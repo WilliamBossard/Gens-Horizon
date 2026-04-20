@@ -5,7 +5,7 @@ const path = require('path');
 const dns = require('dns').promises;
 const { credentials } = require('./config');
 const { getInstancesFolder } = require('./paths');
-const { getSecureToken } = require('./auth');
+const { getSecureToken } = require('./Auth');
 
 async function syncAllInstances() {
     try {
@@ -36,9 +36,16 @@ async function syncAllInstances() {
         const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
         if (isList) {
-            try {
-                const res = await drive.files.list({ spaces: 'appDataFolder', fields: 'files(id, name)' });
-                const list = (res.data.files || [])
+try {
+                let cloudFiles = [];
+                let pageToken = null;
+                do {
+                    const res = await drive.files.list({ spaces: 'appDataFolder', fields: 'nextPageToken, files(id, name)', pageToken: pageToken, pageSize: 1000 });
+                    if (res.data.files) cloudFiles = cloudFiles.concat(res.data.files);
+                    pageToken = res.data.nextPageToken;
+                } while (pageToken);
+
+                const list = cloudFiles
                     .filter(f => f.name.startsWith("GensHorizon_Backup_"))
                     .map(f => f.name.replace('GensHorizon_Backup_', '').replace('.zip', ''));
                 console.log(JSON.stringify({ type: "CLOUD_LIST", data: list }));
@@ -82,12 +89,19 @@ async function syncAllInstances() {
             console.log(JSON.stringify({ type: "PROGRESS", step: "CHECKING", value: 0, instance: targetInstance }));
         }
 
-        const res = await drive.files.list({
-            spaces: 'appDataFolder',
-            q: driveQuery,
-            fields: 'files(id, name, modifiedTime, size)'
-        });
-        const cloudFiles = res.data.files || [];
+let cloudFiles = [];
+        let pageToken = null;
+        do {
+            const res = await drive.files.list({
+                spaces: 'appDataFolder',
+                q: driveQuery,
+                fields: 'nextPageToken, files(id, name, modifiedTime, size)',
+                pageToken: pageToken,
+                pageSize: 1000
+            });
+            if (res.data.files) cloudFiles = cloudFiles.concat(res.data.files);
+            pageToken = res.data.nextPageToken;
+        } while (pageToken);
 
         if (targetInstance && cloudFiles.length === 0) {
             console.log(JSON.stringify({

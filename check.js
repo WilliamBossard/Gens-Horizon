@@ -4,7 +4,7 @@ const path = require('path');
 const dns = require('dns').promises;
 const { credentials } = require('./config');
 const { getInstancesFolder } = require('./paths');
-const { getSecureToken } = require('./auth');
+const { getSecureToken } = require('./Auth');
 
 const TOKEN_PATH     = path.join(process.cwd(), 'token.json');
 const SYNC_INFO_FILE = path.join(process.cwd(), 'last_sync.json');
@@ -38,11 +38,20 @@ async function check() {
             ? JSON.parse(fs.readFileSync(SYNC_INFO_FILE, 'utf8'))
             : {};
 
-        const res = await drive.files.list({
-            spaces: 'appDataFolder',
-            fields: 'files(id, name, modifiedTime)'
-        });
-        const cloudFiles = res.data.files;
+let cloudFiles = [];
+        let pageToken = null;
+        do {
+            const res = await drive.files.list({
+                spaces: 'appDataFolder',
+                fields: 'nextPageToken, files(id, name, modifiedTime)',
+                pageToken: pageToken,
+                pageSize: 1000
+            });
+            if (res.data.files) {
+                cloudFiles = cloudFiles.concat(res.data.files);
+            }
+            pageToken = res.data.nextPageToken;
+        } while (pageToken);
 
         let report = { status: "UP_TO_DATE", updates: [] };
 

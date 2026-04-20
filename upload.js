@@ -6,7 +6,7 @@ const dns = require('dns').promises;
 const { credentials } = require('./config');
 const { getInstancesFolder, scanInstances } = require('./paths');
 const { generateManifest, compareManifests } = require('./scanner');
-const { getSecureToken } = require('./auth');
+const { getSecureToken } = require('./Auth');
 
 function getFolderSizeSync(dir) {
     let total = 0;
@@ -119,11 +119,21 @@ async function upload() {
                     archive.finalize(); 
                 });
 
-                const oldFiles = await drive.files.list({
-                    spaces: 'appDataFolder',
-                    q: `name = 'GensHorizon_Backup_${inst}.zip'`
-                });
-                for (const f of oldFiles.data.files) await drive.files.delete({ fileId: f.id });
+            let oldFilesData = [];
+                let pageToken = null;
+                do {
+                    const res = await drive.files.list({
+                        spaces: 'appDataFolder',
+                        q: `name = 'GensHorizon_Backup_${inst}.zip'`,
+                        fields: 'nextPageToken, files(id)',
+                        pageToken: pageToken,
+                        pageSize: 1000
+                    });
+                    if (res.data.files) oldFilesData = oldFilesData.concat(res.data.files);
+                    pageToken = res.data.nextPageToken;
+                } while (pageToken);
+                
+                for (const f of oldFilesData) await drive.files.delete({ fileId: f.id });
 
                 
                 const uploadRes = await drive.files.create({

@@ -23,7 +23,7 @@
       "paths.js",
       "scanner.js",
       "config.js",
-      "auth.js"
+      "Auth.js"
     ]
   },
   "dependencies": {
