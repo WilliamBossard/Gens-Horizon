@@ -22,7 +22,7 @@ function openBrowser(targetUrl) {
 
 async function loginPlayer() {
     const key = credentials.web;
-    const REDIRECT_URI = 'http://127.0.0.1:3000';
+    const REDIRECT_URI = 'http://127.0.0.1:12543';
 
     const oauth2Client = new google.auth.OAuth2(
         key.client_id,
@@ -136,10 +136,10 @@ async function loginPlayer() {
             }
         }, AUTH_TIMEOUT_MS);
 
-        server.listen(3000, '127.0.0.1', () => {
-            console.log(JSON.stringify({ type: "INFO", message: "Serveur d'écoute Horizon prêt. Ouverture du navigateur..." }));
-            openBrowser(authUrl);
-        });
+server.listen(12543, '127.0.0.1', () => {
+    console.log(JSON.stringify({ type: "INFO", message: "Serveur Horizon prêt sur le port 12543. Ouverture du navigateur..." }));
+    openBrowser(authUrl);
+});
 
         server.on('error', (e) => {
             clearTimeout(authTimeout);
