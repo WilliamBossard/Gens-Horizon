@@ -1,0 +1,36 @@
+1. Les nouveaux paramètres du Launcher
+Dans ton fichier de sauvegarde des paramètres (ex: store.js ou settings.json), tu vas devoir ajouter 3 nouvelles options que l'utilisateur pourra cocher dans l'interface :
+
+cloud_enabled (booléen) : Est-ce que le joueur a lié son compte Google ?
+
+cloud_auto_sync (booléen) : Télécharger automatiquement au démarrage du launcher.
+
+cloud_auto_upload (booléen) : Sauvegarder automatiquement quand le jeu se ferme.
+
+2. La nouvelle commande Horizon : --check
+On va devoir créer un nouveau script dans Horizon (ex: check.js). Son seul but sera de se connecter à Google Drive, de regarder la date du fichier .zip, de la comparer avec la date locale, et de renvoyer une réponse ultra-rapide au launcher : UPDATE_AVAILABLE ou UP_TO_DATE.
+Il ne télécharge rien, il fait juste l'éclaireur.
+
+3. Le Scénario de Démarrage (Startup)
+Le joueur ouvre Gens Launcher.
+
+Le launcher lit les paramètres. Si cloud_enabled est true, il lance Horizon --check en sous-marin.
+
+Horizon répond : "Il y a une mise à jour sur le Cloud !"
+
+L'embranchement logique :
+
+Si cloud_auto_sync est activé : Le launcher lance Horizon --sync, et affiche une petite notification système en bas à droite : "☁️ Gens Cloud : Synchronisation de vos sauvegardes terminée."
+
+Si cloud_auto_sync est désactivé : Le launcher affiche une notification cliquable : "☁️ Gens Cloud : Une sauvegarde plus récente existe. Cliquez ici pour synchroniser."
+
+4. Le Scénario de Fin de Partie (Quit)
+Le joueur ferme Minecraft.
+
+Le launcher détecte la fermeture du processus.
+
+L'embranchement logique :
+
+Si cloud_auto_upload est activé : Le launcher lance Horizon --upload et affiche : "☁️ Gens Cloud : Sauvegarde envoyée sur le Cloud."
+
+Si cloud_auto_upload est désactivé : Le launcher affiche une fenêtre ou une notification : "Voulez-vous envoyer votre progression sur le Cloud ?" avec des boutons Oui/Non.

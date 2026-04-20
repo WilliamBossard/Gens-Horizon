@@ -1,0 +1,61 @@
+name: Build & Release Gens Horizon (Manuel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Nom de la version (ex: v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configuration de Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+
+      - name: Installation des dépendances
+        run: npm install
+
+      # NOUVELLE ÉTAPE : Création du config.js sécurisé à la volée !
+      - name: Injection des identifiants Google (config.js)
+        run: |
+          cat << 'EOF' > config.js
+          module.exports = {
+              credentials: {
+                  web: {
+                      client_id: "${{ secrets.G_CLIENT_ID }}",
+                      project_id: "gens-horizon",
+                      auth_uri: "https://accounts.google.com/o/oauth2/auth",
+                      token_uri: "https://oauth2.googleapis.com/token",
+                      client_secret: "${{ secrets.G_CLIENT_SECRET }}"
+                  }
+              }
+          };
+          EOF
+
+      - name: Compilation avec pkg
+        run: npm run dist
+
+      - name: Préparation des fichiers
+        run: |
+          mv dist/Horizon-win.exe dist/Horizon.exe || true
+          mv dist/Horizon-linux dist/Horizon-linux || true
+
+      - name: Publication sur GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag_name }}
+          name: Release ${{ github.event.inputs.tag_name }}
+          files: |
+            dist/Horizon.exe
+            dist/Horizon-linux
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
