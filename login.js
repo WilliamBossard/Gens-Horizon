@@ -12,12 +12,24 @@ const { credentials } = require('./config');
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
 function openBrowser(targetUrl) {
-    const command = process.platform === 'win32'
-        ? 'start'
-        : process.platform === 'darwin'
-            ? 'open'
-            : 'xdg-open';
-    exec(`${command} "" "${targetUrl}"`);
+    let command = "";
+    
+    if (process.platform === 'win32') {
+        command = `start "" "${targetUrl}"`;
+    } else if (process.platform === 'darwin') {
+        command = `open "${targetUrl}"`;
+    } else {
+        command = `xdg-open "${targetUrl}"`;
+    }
+
+    exec(command, (error) => {
+        if (error) {
+            console.log(JSON.stringify({ 
+                type: "ERROR", 
+                message: "Impossible d'ouvrir le navigateur. Copie l'URL manuellement." 
+            }));
+        }
+    });
 }
 
 async function loginPlayer() {
