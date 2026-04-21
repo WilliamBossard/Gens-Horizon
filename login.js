@@ -1,168 +1,228 @@
-const fs = require('fs');
-const http = require('http');
+/**
+ * login.js
+ * Connexion OAuth2 pour Google Drive, Dropbox et OneDrive.
+ *
+ * Usage :
+ *   node index.js --login                    → Google (défaut)
+ *   node index.js --login --provider=dropbox
+ *   node index.js --login --provider=onedrive
+ *
+ * Le token est sauvegardé dans token_{provider}.json (chiffré par Auth.js).
+ * Compatibilité : Google écrit aussi token.json pour les anciens builds.
+ */
+
+'use strict';
+
+const fs    = require('fs');
+const http  = require('http');
 const https = require('https');
-const url = require('url');
-const { google } = require('googleapis');
+const url   = require('url');
+const path  = require('path');
 const { exec } = require('child_process');
-const path = require('path');
 
-const TOKEN_PATH = path.join(process.cwd(), 'token.json');
-const { credentials } = require('./config');
+const { credentials }    = require('./config');
+const { getProviderName, getTokenPath } = require('./provider');
+const { getSecureToken } = require('./Auth');
 
-const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const AUTH_TIMEOUT_MS = 5 * 60 * 1000; 
+const CWD = process.cwd();
 
 function openBrowser(targetUrl) {
-    let command = "";
-    
-    if (process.platform === 'win32') {
-        command = `start "" "${targetUrl}"`;
-    } else if (process.platform === 'darwin') {
-        command = `open "${targetUrl}"`;
-    } else {
-        command = `xdg-open "${targetUrl}"`;
-    }
+    const cmd = process.platform === 'win32' ? `start "" "${targetUrl}"`
+              : process.platform === 'darwin' ? `open "${targetUrl}"`
+              : `xdg-open "${targetUrl}"`;
+    exec(cmd, () => {});
+}
 
-    exec(command, (error) => {
-        if (error) {
-            console.log(JSON.stringify({ 
-                type: "ERROR", 
-                message: "Impossible d'ouvrir le navigateur. Copie l'URL manuellement." 
-            }));
-        }
+function httpsPost(hostname, path, body) {
+    return new Promise((resolve, reject) => {
+        const buf = Buffer.from(body);
+        const req = https.request({
+            hostname, path, method: 'POST',
+            headers: {
+                'Content-Type'  : 'application/x-www-form-urlencoded',
+                'Content-Length': buf.length
+            }
+        }, (res) => {
+            const chunks = [];
+            res.on('data', c => chunks.push(c));
+            res.on('end',  () => {
+                try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+                catch (e) { reject(e); }
+            });
+        });
+        req.on('error', reject);
+        req.write(buf);
+        req.end();
     });
 }
 
-async function loginPlayer() {
-    const key = credentials.web;
-    const REDIRECT_URI = 'http://127.0.0.1:12543';
-
-    const oauth2Client = new google.auth.OAuth2(
-        key.client_id,
-        key.client_secret,
-        REDIRECT_URI
-    );
-
-    const authUrl = oauth2Client.generateAuthUrl({
-        access_type: 'offline',
-        prompt: 'consent',
-        scope: ['https://www.googleapis.com/auth/drive.appdata']
-    });
-
+function waitForCallback(exchangeCode) {
     return new Promise((resolve, reject) => {
         let settled = false;
 
         const server = http.createServer(async (req, res) => {
-            const parsedUrl = new url.URL(req.url, REDIRECT_URI);
+            const parsed = new url.URL(req.url, 'http://127.0.0.1:12543');
 
-            if (parsedUrl.searchParams.has('error')) {
-                const errorCode = parsedUrl.searchParams.get('error');
+            if (parsed.searchParams.has('error')) {
                 res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-                res.end('<h1 style="color:red; text-align:center; font-family:sans-serif;">❌ Connexion annulée.<br>Tu peux fermer cette page.</h1>');
-                
-                if (!settled) {
-                    settled = true;
-                    clearTimeout(authTimeout);
-                    setTimeout(() => {
-                        server.close();
-                        reject(new Error(`Connexion Google refusée : ${errorCode}`));
-                    }, 800);
-                }
+                res.end('<h1 style="color:red;text-align:center;font-family:sans-serif;">❌ Connexion annulée. Tu peux fermer cette page.</h1>');
+                if (!settled) { settled = true; clearTimeout(timer); setTimeout(() => { server.close(); reject(new Error('Connexion annulée.')); }, 600); }
                 return;
             }
+            if (!parsed.searchParams.has('code')) return;
 
-            if (!parsedUrl.searchParams.has('code')) return;
-            const code = parsedUrl.searchParams.get('code');
-
-            const postData = new URLSearchParams({
-                code,
-                client_id:     key.client_id,
-                client_secret: key.client_secret,
-                redirect_uri:  REDIRECT_URI,
-                grant_type:    'authorization_code'
-            }).toString();
-
-            const options = {
-                hostname: 'oauth2.googleapis.com',
-                port: 443,
-                path: '/token',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Content-Length': Buffer.byteLength(postData)
-                }
-            };
-
-            const postReq = https.request(options, (postRes) => {
-                let body = '';
-                postRes.on('data', (chunk) => body += chunk);
-                postRes.on('end', () => {
-                    try {
-                        const tokens = JSON.parse(body);
-                        if (tokens.error) throw new Error(tokens.error_description || tokens.error);
-
-                        fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2));
-
-                        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-                        res.end('<h1 style="color:green; text-align:center; font-family:sans-serif;">✅ Connexion réussie !<br>Tu peux fermer cette page.</h1>');
-
-                        if (!settled) {
-                            settled = true;
-                            clearTimeout(authTimeout);
-                            setTimeout(() => {
-                                server.close();
-                                resolve(tokens);
-                                process.exit(0);
-                            }, 1000);
-                        }
-                    } catch (e) {
-                        res.writeHead(500);
-                        res.end("Erreur lors de l'échange du token.");
-                        if (!settled) {
-                            settled = true;
-                            clearTimeout(authTimeout);
-                            server.close();
-                            reject(e);
-                        }
-                    }
-                });
-            });
-
-            postReq.on('error', (e) => {
-                if (!settled) {
-                    settled = true;
-                    clearTimeout(authTimeout);
-                    server.close();
-                    reject(e);
-                }
-            });
-            postReq.write(postData);
-            postReq.end();
+            const code = parsed.searchParams.get('code');
+            try {
+                const tokens = await exchangeCode(code);
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end('<h1 style="color:green;text-align:center;font-family:sans-serif;">✅ Connexion réussie ! Tu peux fermer cette page.</h1>');
+                if (!settled) { settled = true; clearTimeout(timer); setTimeout(() => { server.close(); resolve(tokens); }, 800); }
+            } catch (e) {
+                res.writeHead(500);
+                res.end('Erreur lors de l\'échange du token.');
+                if (!settled) { settled = true; clearTimeout(timer); server.close(); reject(e); }
+            }
         });
 
-        const authTimeout = setTimeout(() => {
-            if (!settled) {
-                settled = true;
-                server.close();
-                reject(new Error(`Délai d'authentification dépassé (${AUTH_TIMEOUT_MS / 60000} minutes).`));
-                process.exit(1);
-            }
+        const timer = setTimeout(() => {
+            if (!settled) { settled = true; server.close(); reject(new Error('Délai d\'authentification dépassé.')); process.exit(1); }
         }, AUTH_TIMEOUT_MS);
 
-server.listen(12543, '127.0.0.1', () => {
-    console.log(JSON.stringify({ type: "INFO", message: "Serveur Horizon prêt sur le port 12543. Ouverture du navigateur..." }));
-    openBrowser(authUrl);
-});
-
-        server.on('error', (e) => {
-            clearTimeout(authTimeout);
-            reject(new Error("Impossible de démarrer le serveur local : " + e.message));
+        server.listen(12543, '127.0.0.1', () => {
+            console.log(JSON.stringify({ type: 'INFO', message: 'Serveur Horizon prêt (port 12543). Ouverture du navigateur...' }));
         });
+        server.on('error', e => { clearTimeout(timer); reject(new Error('Impossible de démarrer le serveur : ' + e.message)); });
     });
 }
 
-loginPlayer()
-    .then(() => console.log(JSON.stringify({ type: "SUCCESS", message: "Jeton sauvegardé avec succès." })))
-    .catch(err => {
-        console.log(JSON.stringify({ type: "ERROR", message: err.message }));
-        process.exit(1);
+async function loginGoogle() {
+    const cred         = credentials.google;
+    const REDIRECT_URI = cred.redirect_uri;
+    const { google }   = require('googleapis');
+
+    const oauth2 = new google.auth.OAuth2(cred.client_id, cred.client_secret, REDIRECT_URI);
+    const authUrl = oauth2.generateAuthUrl({
+        access_type: 'offline',
+        prompt     : 'consent',
+        scope      : ['https://www.googleapis.com/auth/drive.appdata']
     });
+
+    openBrowser(authUrl);
+
+    return waitForCallback(async (code) => {
+        const postData = new URLSearchParams({
+            code,
+            client_id    : cred.client_id,
+            client_secret: cred.client_secret,
+            redirect_uri : REDIRECT_URI,
+            grant_type   : 'authorization_code'
+        }).toString();
+
+        const tokens = await httpsPost('oauth2.googleapis.com', '/token', postData);
+        if (tokens.error) throw new Error(tokens.error_description || tokens.error);
+        return tokens;
+    });
+}
+
+async function loginDropbox() {
+    const cred         = credentials.dropbox;
+    const REDIRECT_URI = cred.redirect_uri;
+
+    const authUrl = `${cred.auth_uri}?response_type=code&client_id=${cred.client_id}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline`;
+
+    openBrowser(authUrl);
+
+    return waitForCallback(async (code) => {
+        const postData = new URLSearchParams({
+            code,
+            client_id    : cred.client_id,
+            client_secret: cred.client_secret,
+            redirect_uri : REDIRECT_URI,
+            grant_type   : 'authorization_code'
+        }).toString();
+
+        const tokens = await httpsPost('api.dropbox.com', '/oauth2/token', postData);
+        if (tokens.error) throw new Error(tokens.error_description || tokens.error);
+        return tokens;
+    });
+}
+
+async function loginOneDrive() {
+    const cred         = credentials.onedrive;
+    const REDIRECT_URI = cred.redirect_uri;
+    const crypto      = require('crypto');
+    const verifier    = crypto.randomBytes(32).toString('base64url');
+    const challenge   = crypto.createHash('sha256').update(verifier).digest('base64url');
+    const usePKCE     = !cred.client_secret;
+
+    const params = new URLSearchParams({
+        client_id    : cred.client_id,
+        response_type: 'code',
+        redirect_uri : REDIRECT_URI,
+        scope        : cred.scope,
+        ...(usePKCE && { code_challenge: challenge, code_challenge_method: 'S256' }),
+        prompt       : 'select_account'
+    });
+
+    const authUrl = `${cred.auth_uri}?${params.toString()}`;
+    openBrowser(authUrl);
+
+    return waitForCallback(async (code) => {
+        const postParams = new URLSearchParams({
+            code,
+            client_id   : cred.client_id,
+            redirect_uri: REDIRECT_URI,
+            grant_type  : 'authorization_code',
+            scope       : cred.scope,
+            ...(usePKCE ? { code_verifier: verifier } : { client_secret: cred.client_secret })
+        });
+
+        const tokens = await httpsPost('login.microsoftonline.com', '/common/oauth2/v2.0/token', postParams.toString());
+        if (tokens.error) throw new Error(tokens.error_description || tokens.error);
+        return tokens;
+    });
+}
+
+async function loginPlayer() {
+    const settings = (() => {
+        const p = path.join(CWD, 'horizon_settings.json');
+        try { return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {}; } catch { return {}; }
+    })();
+
+    const providerName = getProviderName(settings);
+    const tokenPath    = path.join(CWD, `token_${providerName}.json`);
+
+    console.log(JSON.stringify({ type: 'INFO', message: `Connexion via ${providerName}...` }));
+
+    let tokens;
+    switch (providerName) {
+        case 'google'  : tokens = await loginGoogle();   break;
+        case 'dropbox' : tokens = await loginDropbox();  break;
+        case 'onedrive': tokens = await loginOneDrive(); break;
+        default:
+            throw new Error(`Provider inconnu : ${providerName}`);
+    }
+
+    const { encryptToken } = require('./Auth');
+    encryptToken(tokenPath, tokens);
+
+    if (providerName === 'google') {
+        encryptToken(path.join(CWD, 'token.json'), tokens);
+    }
+
+    const settingsFilePath = path.join(CWD, 'horizon_settings.json');
+    if (fs.existsSync(settingsFilePath)) {
+        try {
+            const sets = JSON.parse(fs.readFileSync(settingsFilePath, 'utf8'));
+            if (!sets.provider || sets.provider !== providerName) {
+                sets.provider = providerName;
+                fs.writeFileSync(settingsFilePath, JSON.stringify(sets, null, 2));
+            }
+        } catch (_) {}
+    }
+}
+
+loginPlayer()
+    .then(() => { console.log(JSON.stringify({ type: 'SUCCESS', message: 'Jeton sauvegardé avec succès.' })); process.exit(0); })
+    .catch(err => { console.log(JSON.stringify({ type: 'ERROR', message: err.message })); process.exit(1); });

@@ -1,34 +1,41 @@
 {
   "name": "Horizon",
   "version": "1.0.0",
-  "description": "Moteur de synchronisation Cloud (Headless) pour Gens Launcher",
+  "description": "Moteur de synchronisation Cloud (Headless) pour Gens Launcher – multi-provider + sync incrémentale",
   "main": "index.js",
-"scripts": {
-    "start": "node index.js",
-    "login": "node index.js --login",
-    "check": "node index.js --check",
-    "upload": "node index.js --upload",
-    "sync": "node index.js --sync",
-    "dist": "pkg . --targets node16-win-x64,node16-linux-x64 --out-path dist"
+  "scripts": {
+    "start"   : "node index.js",
+    "login"   : "node index.js --login",
+    "check"   : "node index.js --check",
+    "upload"  : "node index.js --upload",
+    "sync"    : "node index.js --sync",
+    "dist"    : "pkg . --targets node16-win-x64,node16-linux-x64 --out-path dist"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/WilliamBossard/Gens-Horizon.git"
+    "url" : "git+https://github.com/WilliamBossard/Gens-Horizon.git"
   },
-  "author": "William Bossard",
+  "author" : "William Bossard",
   "license": "ISC",
-  "bin": "index.js",
-"pkg": {
+  "bin"    : "index.js",
+  "pkg": {
     "assets": [
       "paths.js",
       "scanner.js",
       "config.js",
-      "Auth.js"
+      "Auth.js",
+      "provider.js",
+      "providers/**/*"
+    ],
+    "scripts": [
+      "check.js",
+      "sync.js",
+      "upload.js"
     ]
   },
   "dependencies": {
-    "adm-zip": "^0.5.17",
-    "archiver": "^7.0.1",
+    "adm-zip"   : "^0.5.17",
+    "archiver"  : "^7.0.1",
     "googleapis": "^118.0.0"
   },
   "devDependencies": {

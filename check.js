@@ -1,88 +1,86 @@
-const fs = require('fs');
-const { google } = require('googleapis');
+/**
+ * check.js
+ * Vérifie si des mises à jour Cloud sont disponibles pour les instances locales.
+ * Supporte les trois providers via la factory provider.js.
+ */
+
+'use strict';
+
+const fs   = require('fs');
 const path = require('path');
-const dns = require('dns').promises;
-const { credentials } = require('./config');
+const dns  = require('dns').promises;
+
 const { getInstancesFolder } = require('./paths');
-const { getSecureToken } = require('./Auth');
+const { getProvider }        = require('./provider');
 
-const TOKEN_PATH     = path.join(process.cwd(), 'token.json');
 const SYNC_INFO_FILE = path.join(process.cwd(), 'last_sync.json');
-
-async function getDriveClient() {
-    if (!fs.existsSync(TOKEN_PATH)) {
-        console.log(JSON.stringify({ status: "NOT_LOGGED_IN" }));
-        process.exit(0);
-    }
-
-    const token = getSecureToken(TOKEN_PATH);
-    if (!token) {
-        console.log(JSON.stringify({ status: "NOT_LOGGED_IN" }));
-        process.exit(0);
-    }
-
-    const oauth2Client = new google.auth.OAuth2(
-        credentials.web.client_id,
-        credentials.web.client_secret
-    );
-    oauth2Client.setCredentials(token);
-    return google.drive({ version: 'v3', auth: oauth2Client });
-}
+const SETTINGS_PATH  = path.join(process.cwd(), 'horizon_settings.json');
 
 async function check() {
     try {
         await dns.lookup('google.com');
 
-        const drive = await getDriveClient();
-        const syncInfo = fs.existsSync(SYNC_INFO_FILE)
+        let settings = {};
+        if (fs.existsSync(SETTINGS_PATH)) {
+            try { settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')); } catch (_) {}
+        }
+
+        const provider = await getProvider(settings);
+        if (!provider) {
+            console.log(JSON.stringify({ status: 'NOT_LOGGED_IN' }));
+            process.exit(0);
+        }
+
+        const syncInfo   = fs.existsSync(SYNC_INFO_FILE)
             ? JSON.parse(fs.readFileSync(SYNC_INFO_FILE, 'utf8'))
             : {};
 
-let cloudFiles = [];
-        let pageToken = null;
-        do {
-            const res = await drive.files.list({
-                spaces: 'appDataFolder',
-                fields: 'nextPageToken, files(id, name, modifiedTime)',
-                pageToken: pageToken,
-                pageSize: 1000
-            });
-            if (res.data.files) {
-                cloudFiles = cloudFiles.concat(res.data.files);
-            }
-            pageToken = res.data.nextPageToken;
-        } while (pageToken);
+        const cloudFiles = await provider.listFiles('GensHorizon_');
+        const cloudIndex = {};
+        for (const f of cloudFiles) cloudIndex[f.name] = f;
 
-        let report = { status: "UP_TO_DATE", updates: [] };
+        const cloudInstances = Object.keys(cloudIndex)
+            .filter(n => n.startsWith('GensHorizon_Backup_'))
+            .map(n => n.replace('GensHorizon_Backup_', '').replace('.zip', ''));
 
-        for (const file of cloudFiles) {
-            if (!file.name.startsWith("GensHorizon_Backup_")) continue;
-            const instName = file.name.replace('GensHorizon_Backup_', '').replace('.zip', '');
+        let report = { status: 'UP_TO_DATE', updates: [] };
 
-            const cloudTime    = new Date(file.modifiedTime).getTime();
-            const lastSyncTime = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
+        for (const instName of cloudInstances) {
+            const baseName  = `GensHorizon_Backup_${instName}.zip`;
+            const baseFile  = cloudIndex[baseName];
+            const cloudTime = new Date(baseFile.modifiedTime).getTime();
+
+            const latestDeltaTime = Object.keys(cloudIndex)
+                .filter(n => n.startsWith(`GensHorizon_Delta_${instName}_`))
+                .map(n => {
+                    const ts = parseInt(n.replace(`GensHorizon_Delta_${instName}_`, '').replace('.zip', ''), 10);
+                    return isNaN(ts) ? 0 : ts;
+                })
+                .reduce((max, ts) => Math.max(max, ts), 0);
+
+            const effectiveCloudTime = Math.max(cloudTime, latestDeltaTime);
+            const lastSyncTime       = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
 
             const localPath = path.join(getInstancesFolder(), instName);
-            let localModifiedTime = 0;
-            if (fs.existsSync(localPath)) {
-                localModifiedTime = fs.statSync(localPath).mtime.getTime();
-            }
+            const localExists = fs.existsSync(localPath);
 
-            if (cloudTime > lastSyncTime && localModifiedTime > lastSyncTime + 5000) {
-                report.status = "CONFLICT";
-                report.instance = instName;
-                break;
-            }
-            else if (cloudTime > lastSyncTime) {
-                report.status = "UPDATE_AVAILABLE";
+            if (localExists && effectiveCloudTime > lastSyncTime) {
+                const localModTime = fs.statSync(localPath).mtime.getTime();
+
+                if (localModTime > lastSyncTime + 5000) {
+                    report.status   = 'CONFLICT';
+                    report.instance = instName;
+                    break;
+                }
+                report.status = 'UPDATE_AVAILABLE';
                 report.updates.push(instName);
             }
         }
 
         console.log(JSON.stringify(report));
 
-    } catch (e) {
-        console.log(JSON.stringify({ status: "OFFLINE", message: "Internet indisponible" }));
+    } catch (_) {
+        console.log(JSON.stringify({ status: 'OFFLINE', message: 'Internet indisponible.' }));
     }
 }
 

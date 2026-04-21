@@ -2,6 +2,6 @@ config.js
 horizon_settings.json
 manifest_*.json
 last_sync.json
-token.json
+token*.json
 *.zip
 node_modules/

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Nom de la version (ex: v1.0.0)'
+        description: 'Nom de la version (ex: v1.1.0)'
         required: true
-        default: 'v1.0.0'
+        default: 'v1.1.0'
 
 jobs:
   build-and-release:
@@ -24,18 +24,33 @@ jobs:
       - name: Installation des dépendances
         run: npm install
 
-      # NOUVELLE ÉTAPE : Création du config.js sécurisé à la volée !
-      - name: Injection des identifiants Google (config.js)
+      # NOUVELLE ÉTAPE : Création du config.js avec les 3 providers
+      - name: Injection des identifiants API (config.js)
         run: |
           cat << 'EOF' > config.js
           module.exports = {
               credentials: {
-                  web: {
+                  google: {
                       client_id: "${{ secrets.G_CLIENT_ID }}",
-                      project_id: "gens-horizon",
+                      client_secret: "${{ secrets.G_CLIENT_SECRET }}",
                       auth_uri: "https://accounts.google.com/o/oauth2/auth",
                       token_uri: "https://oauth2.googleapis.com/token",
-                      client_secret: "${{ secrets.G_CLIENT_SECRET }}"
+                      redirect_uri: "http://127.0.0.1:12543"
+                  },
+                  dropbox: {
+                      client_id: "${{ secrets.D_CLIENT_ID }}",
+                      client_secret: "${{ secrets.D_CLIENT_SECRET }}",
+                      auth_uri: "https://www.dropbox.com/oauth2/authorize",
+                      token_uri: "https://api.dropbox.com/oauth2/token",
+                      redirect_uri: "http://127.0.0.1:12544"
+                  },
+                  onedrive: {
+                      client_id: "${{ secrets.O_CLIENT_ID }}",
+                      client_secret: "",
+                      auth_uri: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                      token_uri: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                      redirect_uri: "http://127.0.0.1:12545",
+                      scope: "Files.ReadWrite offline_access User.Read"
                   }
               }
           };
