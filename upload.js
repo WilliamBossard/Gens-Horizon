@@ -136,6 +136,8 @@ async function upload() {
             return;
         }
 
+        let localInstances = []; 
+
         if (targetInstance) {
             console.log(JSON.stringify({ type: 'PROGRESS', step: 'CHECKING', value: 0, instance: targetInstance }));
             const targetFolder = path.join(getInstancesFolder(), targetInstance);
