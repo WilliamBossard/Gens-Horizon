@@ -41,12 +41,19 @@ function extractZip(zipPath, targetPath, onProgress) {
     const total = entries.length;
     let done = 0;
     let lastPct = -1;
+    const resolvedTarget = path.resolve(targetPath);
 
     for (const entry of entries) {
+        const dest = path.resolve(path.join(targetPath, entry.entryName));
+        if (!dest.startsWith(resolvedTarget + path.sep) && dest !== resolvedTarget) {
+            console.log(JSON.stringify({ type: 'ERROR', message: `[SÉCURITÉ] Zip Slip bloqué : ${entry.entryName}` }));
+            done++;
+            continue;
+        }
+
         if (entry.isDirectory) {
-            fs.mkdirSync(path.join(targetPath, entry.entryName), { recursive: true });
+            fs.mkdirSync(dest, { recursive: true });
         } else {
-            const dest = path.join(targetPath, entry.entryName);
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.writeFileSync(dest, zip.readFile(entry));
         }
@@ -72,6 +79,7 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
     const total    = entries.length;
     let done       = 0;
     let lastPct    = -1;
+    const resolvedTarget = path.resolve(targetPath);
 
     const deltaEntry = entries.find(e => e.entryName === '__delta__.json');
     const deltaInfo  = deltaEntry ? JSON.parse(zip.readAsText(deltaEntry)) : { deletedFiles: [] };
@@ -81,10 +89,15 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
             done++;
             continue;
         }
+        const dest = path.resolve(path.join(targetPath, entry.entryName));
+        if (!dest.startsWith(resolvedTarget + path.sep) && dest !== resolvedTarget) {
+            console.log(JSON.stringify({ type: 'ERROR', message: `[SÉCURITÉ] Zip Slip bloqué dans delta : ${entry.entryName}` }));
+            done++;
+            continue;
+        }
         if (entry.isDirectory) {
-            fs.mkdirSync(path.join(targetPath, entry.entryName), { recursive: true });
+            fs.mkdirSync(dest, { recursive: true });
         } else {
-            const dest = path.join(targetPath, entry.entryName);
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.writeFileSync(dest, zip.readFile(entry));
         }

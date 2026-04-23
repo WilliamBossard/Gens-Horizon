@@ -18,7 +18,12 @@ const SETTINGS_PATH  = path.join(process.cwd(), 'horizon_settings.json');
 
 async function check() {
     try {
-        await dns.lookup('google.com');
+        try {
+            await dns.lookup('google.com');
+        } catch (dnsErr) {
+            console.log(JSON.stringify({ status: 'OFFLINE', message: 'Internet indisponible.' }));
+            return;
+        }
 
         let settings = {};
         if (fs.existsSync(SETTINGS_PATH)) {
@@ -65,13 +70,6 @@ async function check() {
             const localExists = fs.existsSync(localPath);
 
             if (localExists && effectiveCloudTime > lastSyncTime) {
-                const localModTime = fs.statSync(localPath).mtime.getTime();
-
-                if (localModTime > lastSyncTime + 5000) {
-                    report.status   = 'CONFLICT';
-                    report.instance = instName;
-                    break;
-                }
                 report.status = 'UPDATE_AVAILABLE';
                 report.updates.push(instName);
             }
@@ -79,8 +77,12 @@ async function check() {
 
         console.log(JSON.stringify(report));
 
-    } catch (_) {
-        console.log(JSON.stringify({ status: 'OFFLINE', message: 'Internet indisponible.' }));
+    } catch (e) {
+        if (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN' || e.code === 'ECONNREFUSED') {
+            console.log(JSON.stringify({ status: 'OFFLINE', message: 'Internet indisponible.' }));
+        } else {
+            console.log(JSON.stringify({ status: 'ERROR', message: e.message }));
+        }
     }
 }
 

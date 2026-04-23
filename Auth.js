@@ -22,12 +22,16 @@ function _encrypt(text) {
 }
 
 function _decrypt(text) {
-    const parts   = text.split(':');
-    const iv      = Buffer.from(parts.shift(), 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', SECRET_KEY, iv);
-    let decrypted  = decipher.update(parts.join(':'), 'hex', 'utf8');
-    decrypted     += decipher.final('utf8');
-    return decrypted;
+    try {
+        const parts   = text.split(':');
+        const iv      = Buffer.from(parts.shift(), 'hex');
+        const decipher = crypto.createDecipheriv('aes-256-cbc', SECRET_KEY, iv);
+        let decrypted  = decipher.update(parts.join(':'), 'hex', 'utf8');
+        decrypted     += decipher.final('utf8');
+        return decrypted;
+    } catch (e) {
+        throw new Error('Impossible de déchiffrer le token. (Machine différente ou fichier corrompu ?)');
+    }
 }
 
 

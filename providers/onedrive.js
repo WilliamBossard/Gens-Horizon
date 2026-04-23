@@ -20,8 +20,12 @@ function graphRequest(method, path, accessToken, body = null) {
             const chunks = [];
             res.on('data', c => chunks.push(c));
             res.on('end', () => {
-                const raw = Buffer.concat(chunks).toString('utf8');
-                resolve({ statusCode: res.statusCode, body: raw ? JSON.parse(raw) : {} });
+                const raw = Buffer.concat(chunks).toString('utf8').trim();
+                let parsed = {};
+                if (raw) {
+                    try { parsed = JSON.parse(raw); } catch (_) { parsed = {}; }
+                }
+                resolve({ statusCode: res.statusCode, body: parsed });
             });
         });
         req.on('error', reject);

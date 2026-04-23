@@ -114,7 +114,12 @@ async function createDeltaZip(folder, changed, deleted, tempZip, inst) {
 
 async function upload() {
     try {
-        await dns.lookup('google.com');
+        try {
+            await dns.lookup('google.com');
+        } catch (dnsErr) {
+            console.log(JSON.stringify({ type: 'OFFLINE', message: 'Internet indisponible ou erreur réseau.' }));
+            return;
+        }
 
         const cwd          = process.cwd();
         const settingsPath = path.join(cwd, 'horizon_settings.json');
@@ -200,7 +205,7 @@ async function upload() {
                     const manifestExisting = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
                     await provider.uploadJSON(manifestName, currentManifest, manifestExisting);
                     const syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
-                    syncState[inst] = result.modifiedTime;
+                    syncState[inst] = result?.modifiedTime || new Date().toISOString();
                     fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
                     fs.writeFileSync(manifestPath, JSON.stringify(currentManifest, null, 2));
                     console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'FULL' }));
