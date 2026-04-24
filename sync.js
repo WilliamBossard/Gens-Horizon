@@ -41,19 +41,12 @@ function extractZip(zipPath, targetPath, onProgress) {
     const total = entries.length;
     let done = 0;
     let lastPct = -1;
-    const resolvedTarget = path.resolve(targetPath);
 
     for (const entry of entries) {
-        const dest = path.resolve(path.join(targetPath, entry.entryName));
-        if (!dest.startsWith(resolvedTarget + path.sep) && dest !== resolvedTarget) {
-            console.log(JSON.stringify({ type: 'ERROR', message: `[SÉCURITÉ] Zip Slip bloqué : ${entry.entryName}` }));
-            done++;
-            continue;
-        }
-
         if (entry.isDirectory) {
-            fs.mkdirSync(dest, { recursive: true });
+            fs.mkdirSync(path.join(targetPath, entry.entryName), { recursive: true });
         } else {
+            const dest = path.join(targetPath, entry.entryName);
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.writeFileSync(dest, zip.readFile(entry));
         }
@@ -79,7 +72,6 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
     const total    = entries.length;
     let done       = 0;
     let lastPct    = -1;
-    const resolvedTarget = path.resolve(targetPath);
 
     const deltaEntry = entries.find(e => e.entryName === '__delta__.json');
     const deltaInfo  = deltaEntry ? JSON.parse(zip.readAsText(deltaEntry)) : { deletedFiles: [] };
@@ -89,15 +81,10 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
             done++;
             continue;
         }
-        const dest = path.resolve(path.join(targetPath, entry.entryName));
-        if (!dest.startsWith(resolvedTarget + path.sep) && dest !== resolvedTarget) {
-            console.log(JSON.stringify({ type: 'ERROR', message: `[SÉCURITÉ] Zip Slip bloqué dans delta : ${entry.entryName}` }));
-            done++;
-            continue;
-        }
         if (entry.isDirectory) {
-            fs.mkdirSync(dest, { recursive: true });
+            fs.mkdirSync(path.join(targetPath, entry.entryName), { recursive: true });
         } else {
+            const dest = path.join(targetPath, entry.entryName);
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.writeFileSync(dest, zip.readFile(entry));
         }
@@ -158,6 +145,24 @@ async function syncAllInstances() {
                     .map(n => n.replace('GensHorizon_Backup_', '').replace('.zip', ''))
             )];
             console.log(JSON.stringify({ type: 'CLOUD_LIST', data: list }));
+
+            // Télécharger les métadonnées icône pour chaque instance du cloud.
+            // Sauvegardées localement dans meta_{inst}.json (lu par le launcher pour les icônes).
+            for (const instName of list) {
+                const metaCloudName = `GensHorizon_Meta_${instName}.json`;
+                if (!cloudIndex[metaCloudName]) continue;
+                const localMetaPath = path.join(cwd, `meta_${instName}.json`);
+                const tempMeta      = path.join(cwd, `temp_meta_${instName}.json`);
+                try {
+                    await provider.downloadFile(cloudIndex[metaCloudName].id, tempMeta, null, 0);
+                    const metaData = JSON.parse(fs.readFileSync(tempMeta, 'utf8'));
+                    fs.writeFileSync(localMetaPath, JSON.stringify(metaData));
+                } catch(e) {
+                    // Silencieux : ancien backup sans meta file, pas bloquant
+                } finally {
+                    try { if (fs.existsSync(tempMeta)) fs.unlinkSync(tempMeta); } catch(_) {}
+                }
+            }
             return;
         }
 
@@ -165,12 +170,15 @@ async function syncAllInstances() {
             const toDelete = Object.keys(cloudIndex).filter(n =>
                 n === `GensHorizon_Backup_${targetInstance}.zip`      ||
                 n === `GensHorizon_Manifest_${targetInstance}.json`   ||
+                n === `GensHorizon_Meta_${targetInstance}.json`        ||
                 n.startsWith(`GensHorizon_Delta_${targetInstance}_`)
             );
             for (const n of toDelete) await provider.deleteFile(cloudIndex[n].id);
 
             const manifestPath = path.join(cwd, `manifest_${targetInstance}.json`);
             if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
+            const localMetaPath = path.join(cwd, `meta_${targetInstance}.json`);
+            if (fs.existsSync(localMetaPath)) fs.unlinkSync(localMetaPath);
             if (fs.existsSync(syncInfoPath)) {
                 const syncState = JSON.parse(fs.readFileSync(syncInfoPath, 'utf8'));
                 delete syncState[targetInstance];
@@ -274,6 +282,16 @@ async function syncAllInstances() {
                 const lastDelta  = pendingDeltas.length > 0 ? pendingDeltas[pendingDeltas.length - 1] : null;
                 syncState[inst]  = lastDelta ? new Date(lastDelta.ts).toISOString() : baseFile.modifiedTime;
                 fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
+
+                // Mettre à jour le meta local depuis instance.json (maintenant extrait sur disque)
+                const localInstJsonPath = path.join(getInstancesFolder(), inst, 'instance.json');
+                if (fs.existsSync(localInstJsonPath)) {
+                    try {
+                        const instData   = JSON.parse(fs.readFileSync(localInstJsonPath, 'utf8'));
+                        const localMeta  = { loader: instData.loader || 'vanilla', iconData: instData.icon || '' };
+                        fs.writeFileSync(path.join(cwd, `meta_${inst}.json`), JSON.stringify(localMeta));
+                    } catch(e) {}
+                }
 
                 const deltasApplied = pendingDeltas.length;
                 console.log(JSON.stringify({

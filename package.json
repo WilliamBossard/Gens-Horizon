@@ -1,6 +1,6 @@
 {
   "name": "Horizon",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Moteur de synchronisation Cloud (Headless) pour Gens Launcher – multi-provider + sync incrémentale",
   "main": "index.js",
   "scripts": {

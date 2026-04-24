@@ -57,13 +57,34 @@ if (args.includes('--login')) {
         const server = http.createServer(async (req, res) => {
             try {
                 const query = url.parse(req.url, true).query;
-                if (query.code) {
+
+                // L'utilisateur a annulé ou l'OAuth a retourné une erreur
+                if (query.error) {
                     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-                    res.end("<h1>Authentification réussie !</h1><p>Vous pouvez fermer cet onglet.</p>");
-                    
-                    await providerObj.handleAuthCode(query.code);
-                    console.log(JSON.stringify({ type: "SUCCESS", message: "Jeton sauvegardé avec succès !" }));
-                    
+                    res.end("<h1 style='color:red;text-align:center;font-family:sans-serif;'>❌ Connexion annulée. Vous pouvez fermer cet onglet.</h1>");
+                    console.log(JSON.stringify({ type: "ERROR", message: "Connexion annulée par l'utilisateur : " + (query.error_description || query.error) }));
+                    clearTimeout(globalTimeout);
+                    setTimeout(() => { server.close(); process.exit(1); }, 800);
+                    return;
+                }
+
+                if (query.code) {
+                    // IMPORTANT : on sauvegarde le token AVANT d'envoyer le succès au navigateur.
+                    // Si handleAuthCode échoue, le navigateur verra une erreur et non un faux succès.
+                    try {
+                        await providerObj.handleAuthCode(query.code);
+                        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                        res.end("<h1 style='color:green;text-align:center;font-family:sans-serif;'>✅ Authentification réussie ! Vous pouvez fermer cet onglet.</h1>");
+                        console.log(JSON.stringify({ type: "SUCCESS", message: "Jeton sauvegardé avec succès !" }));
+                    } catch (authErr) {
+                        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+                        res.end("<h1 style='color:red;text-align:center;font-family:sans-serif;'>❌ Erreur lors de la sauvegarde du jeton.</h1>");
+                        console.log(JSON.stringify({ type: "ERROR", message: "Erreur handleAuthCode : " + authErr.message }));
+                        clearTimeout(globalTimeout);
+                        setTimeout(() => { server.close(); process.exit(1); }, 800);
+                        return;
+                    }
+                    clearTimeout(globalTimeout);
                     setTimeout(() => { server.close(); process.exit(0); }, 1000);
                 }
             } catch (err) {
@@ -103,7 +124,7 @@ if (args.includes('--login')) {
                 process.exit(1);
             }
         });
-        setTimeout(() => {
+        const globalTimeout = setTimeout(() => {
             console.log(JSON.stringify({ type: "ERROR", message: "Délai d'attente dépassé." }));
             process.exit(1);
         }, 180000);
