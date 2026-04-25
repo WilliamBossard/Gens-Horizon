@@ -48,9 +48,6 @@ function getFolderSizeSync(dir) {
     return total;
 }
 
-/**
- * Crée un ZIP complet d'un dossier avec rapport de progression.
- */
 function createFullZip(folder, tempZip, inst) {
     const realTotal = getFolderSizeSync(folder);
     let lastPct = -1;
@@ -162,8 +159,7 @@ async function upload() {
                 const manifestPath = path.join(cwd, `manifest_${inst}.json`);
                 const baseName     = `GensHorizon_Backup_${inst}.zip`;
                 const manifestName = `GensHorizon_Manifest_${inst}.json`;
-                const metaName     = `GensHorizon_Meta_${inst}.json`;
-                const oldManifest  = fs.existsSync(manifestPath)
+                const oldManifest = fs.existsSync(manifestPath)
                     ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
                     : {};
 
@@ -172,36 +168,6 @@ async function upload() {
 
                 const hasBaseOnCloud = !!cloudIndex[baseName];
                 const useSmartMode   = settings.syncMode === 'SMART';
-
-                // ── Construction des métadonnées icône ────────────────────────────────
-                // Priorité : icon.png/jpg dans le dossier (copié par le launcher quand
-                // l'utilisateur choisit un logo custom) > instance.json icon (data URI SVG)
-                // > icône du loader par défaut.
-                let instMeta = { loader: 'vanilla', iconData: '' };
-                const instJsonPath = path.join(folder, 'instance.json');
-                if (fs.existsSync(instJsonPath)) {
-                    try {
-                        const instData = JSON.parse(fs.readFileSync(instJsonPath, 'utf8'));
-                        instMeta.loader = instData.loader || 'vanilla';
-                    } catch(e) {}
-                }
-                // Chercher icon.png puis icon.jpg directement dans le dossier de l'instance
-                // (c'est là que le launcher les copie, indépendamment du champ icon dans instance.json)
-                const iconPng = path.join(folder, 'icon.png');
-                const iconJpg = path.join(folder, 'icon.jpg');
-                if (fs.existsSync(iconPng)) {
-                    instMeta.iconData = 'data:image/png;base64,' + fs.readFileSync(iconPng).toString('base64');
-                } else if (fs.existsSync(iconJpg)) {
-                    instMeta.iconData = 'data:image/jpeg;base64,' + fs.readFileSync(iconJpg).toString('base64');
-                } else if (fs.existsSync(instJsonPath)) {
-                    // Pas de fichier image → lire le champ icon (data URI SVG embarqué éventuel)
-                    try {
-                        const instData = JSON.parse(fs.readFileSync(instJsonPath, 'utf8'));
-                        if (instData.icon && !instData.icon.startsWith('file://')) {
-                            instMeta.iconData = instData.icon;
-                        }
-                    } catch(e) {}
-                }
 
                 if (!diff.hasChanges && !force && hasBaseOnCloud) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `Aucun changement pour ${inst}, upload ignoré.` }));
@@ -218,55 +184,77 @@ async function upload() {
                     }
 
                     const tempZip = path.join(cwd, `temp_${inst}.zip`);
+                    await createFullZip(folder, tempZip, inst);
+
+                    const existingBase = hasBaseOnCloud ? cloudIndex[baseName].id : null;
+                    console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: 0, instance: inst }));
+                    const result = await provider.uploadZip(
+                        baseName, tempZip, existingBase,
+                        (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
+                    );
+                    fs.unlinkSync(tempZip);
+
+                    const manifestExisting = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
+                    await provider.uploadJSON(manifestName, currentManifest, manifestExisting);
+                    const syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
+                    syncState[inst] = result.modifiedTime;
+                    fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
+                    fs.writeFileSync(manifestPath, JSON.stringify(currentManifest, null, 2));
+                    console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'FULL' }));
+                    continue;
+                }
+
+                const DELTA_THRESHOLD = settings.deltaCleanupThreshold || 10;
+                const existingDeltas  = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${inst}_`));
+                if (existingDeltas.length >= DELTA_THRESHOLD) {
+                    console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${existingDeltas.length} delta(s) accumulé(s) — repack complet automatique (seuil: ${DELTA_THRESHOLD}).` }));
+                    for (const dName of existingDeltas) await provider.deleteFile(cloudIndex[dName].id);
+                    const tempZipRepack = path.join(cwd, `temp_${inst}.zip`);
                     try {
-                        await createFullZip(folder, tempZip, inst);
-                        const existingBase = hasBaseOnCloud ? cloudIndex[baseName].id : null;
+                        await createFullZip(folder, tempZipRepack, inst);
+                        const existingBase = cloudIndex[baseName] ? cloudIndex[baseName].id : null;
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: 0, instance: inst }));
-                        const result = await provider.uploadZip(
-                            baseName, tempZip, existingBase,
-                            (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
-                        );
-                        const manifestExisting = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
-                        await provider.uploadJSON(manifestName, currentManifest, manifestExisting);
-                        const metaExisting = cloudIndex[metaName] ? cloudIndex[metaName].id : null;
-                        await provider.uploadJSON(metaName, instMeta, metaExisting);
-                        const syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
-                        syncState[inst] = result?.modifiedTime || new Date().toISOString();
-                        fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
+                        const repackResult = await provider.uploadZip(baseName, tempZipRepack, existingBase,
+                            (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst })));
+                        const manifestEx = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
+                        await provider.uploadJSON(manifestName, currentManifest, manifestEx);
+                        const metaEx = cloudIndex[metaName] ? cloudIndex[metaName].id : null;
+                        await provider.uploadJSON(metaName, instMeta, metaEx);
+                        const syncStateR = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
+                        syncStateR[inst] = repackResult?.modifiedTime || new Date().toISOString();
+                        fs.writeFileSync(syncInfoPath, JSON.stringify(syncStateR, null, 2));
                         fs.writeFileSync(manifestPath, JSON.stringify(currentManifest, null, 2));
-                        console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'FULL' }));
+                        console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'REPACK' }));
                     } finally {
-                        try { if (fs.existsSync(tempZip)) fs.unlinkSync(tempZip); } catch(_) {}
+                        try { if (fs.existsSync(tempZipRepack)) fs.unlinkSync(tempZipRepack); } catch(_) {}
                     }
                     continue;
                 }
 
                 const changedFiles = [...diff.added, ...diff.modified];
                 const deletedFiles = diff.deleted;
-                const timestamp    = Date.now();
-                const deltaName    = `GensHorizon_Delta_${inst}_${timestamp}.zip`;
-                const tempDelta    = path.join(cwd, `delta_${inst}_${timestamp}.zip`);
 
-                try {
-                    await createDeltaZip(folder, changedFiles, deletedFiles, tempDelta, inst);
-                    console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: 0, instance: inst }));
-                    await provider.uploadZip(
-                        deltaName, tempDelta, null,
-                        (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
-                    );
-                    const manifestExisting = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
-                    await provider.uploadJSON(manifestName, currentManifest, manifestExisting);
-                    const metaExisting = cloudIndex[metaName] ? cloudIndex[metaName].id : null;
-                    await provider.uploadJSON(metaName, instMeta, metaExisting);
-                    const syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
-                    syncState[inst] = new Date().toISOString();
-                    fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
-                    fs.writeFileSync(manifestPath, JSON.stringify(currentManifest, null, 2));
-                    const summary = `+${diff.added.length} ajouté(s), ~${diff.modified.length} modifié(s), -${diff.deleted.length} supprimé(s)`;
-                    console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'SMART', summary }));
-                } finally {
-                    try { if (fs.existsSync(tempDelta)) fs.unlinkSync(tempDelta); } catch(_) {}
-                }
+                const timestamp = Date.now();
+                const deltaName = `GensHorizon_Delta_${inst}_${timestamp}.zip`;
+                const tempDelta = path.join(cwd, `delta_${inst}_${timestamp}.zip`);
+
+                await createDeltaZip(folder, changedFiles, deletedFiles, tempDelta, inst);
+
+                console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: 0, instance: inst }));
+                await provider.uploadZip(
+                    deltaName, tempDelta, null,
+                    (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
+                );
+                fs.unlinkSync(tempDelta);
+                const manifestExisting = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
+                await provider.uploadJSON(manifestName, currentManifest, manifestExisting);
+                const syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
+                syncState[inst] = new Date().toISOString();
+                fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
+                fs.writeFileSync(manifestPath, JSON.stringify(currentManifest, null, 2));
+
+                const summary = `+${diff.added.length} ajouté(s), ~${diff.modified.length} modifié(s), -${diff.deleted.length} supprimé(s)`;
+                console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'SMART', summary }));
 
             } catch (instErr) {
                 console.log(JSON.stringify({ type: 'ERROR', instance: inst, message: instErr.message }));
