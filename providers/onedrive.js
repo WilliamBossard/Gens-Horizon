@@ -3,6 +3,7 @@
 const fs    = require('fs');
 const https = require('https');
 const path  = require('path');
+const os    = require('os');
 const { credentials } = require('../config');
 const Auth = require('../Auth'); 
 
@@ -179,7 +180,7 @@ class OneDriveProvider {
         return { id: res.body.id, modifiedTime: res.body.lastModifiedDateTime };
     }
 
-    async uploadJSON(name, content, existingId = null) {
+    async uploadJSON(name, content) {
         const buf = Buffer.from(JSON.stringify(content, null, 2));
         const _doUpload = async () => new Promise((resolve, reject) => {
             const req = https.request({
@@ -197,45 +198,41 @@ class OneDriveProvider {
         return { id: res.body.id, modifiedTime: res.body.lastModifiedDateTime };
     }
 
-    async downloadFile(fileId, destPath, onProgress, totalSize) {
-        const redirectUrl = await new Promise((resolve, reject) => {
+    async _getDownloadUrl(fileId) {
+        return new Promise((resolve, reject) => {
             const req = https.request({
                 hostname: GRAPH_HOST,
                 path    : `/v1.0/me/drive/items/${fileId}/content`,
                 method  : 'GET',
                 headers : { 'Authorization': `Bearer ${this._token}` }
             }, (res) => {
-                res.resume(); 
+                res.resume();
                 if (res.statusCode === 302 || res.statusCode === 303) {
                     resolve(res.headers.location);
-                } else if (res.statusCode === 401) {
-                    reject(Object.assign(new Error('Unauthorized'), { statusCode: 401 }));
                 } else {
-                    reject(new Error(`OneDrive download: statut inattendu ${res.statusCode}`));
+                    reject(Object.assign(
+                        new Error(`OneDrive download: statut inattendu ${res.statusCode}`),
+                        { statusCode: res.statusCode }
+                    ));
                 }
             });
             req.on('error', reject);
             req.end();
-        }).catch(async (e) => {
+        });
+    }
+
+    async downloadFile(fileId, destPath, onProgress, totalSize) {
+        let redirectUrl;
+        try {
+            redirectUrl = await this._getDownloadUrl(fileId);
+        } catch (e) {
             if (e.statusCode === 401) {
                 await this._refreshToken();
-                return new Promise((resolve, reject) => {
-                    const req = https.request({
-                        hostname: GRAPH_HOST,
-                        path    : `/v1.0/me/drive/items/${fileId}/content`,
-                        method  : 'GET',
-                        headers : { 'Authorization': `Bearer ${this._token}` }
-                    }, (res) => {
-                        res.resume();
-                        if (res.statusCode === 302 || res.statusCode === 303) resolve(res.headers.location);
-                        else reject(new Error(`OneDrive download: statut inattendu ${res.statusCode}`));
-                    });
-                    req.on('error', reject);
-                    req.end();
-                });
+                redirectUrl = await this._getDownloadUrl(fileId);
+            } else {
+                throw e;
             }
-            throw e;
-        });
+        }
 
         const loc = new URL(redirectUrl);
         await new Promise((resolve, reject) => {
@@ -256,6 +253,14 @@ class OneDriveProvider {
             req.on('error', e => { dest.destroy(); reject(e); });
             req.end();
         });
+    }
+
+    async downloadJSON(fileId) {
+        const tmp = path.join(os.tmpdir(), `horizon_db_${Date.now()}.json`);
+        await this.downloadFile(fileId, tmp, null, 0);
+        const data = JSON.parse(fs.readFileSync(tmp, 'utf8'));
+        fs.unlinkSync(tmp);
+        return data;
     }
 
     async deleteFile(fileId) { await this._call('DELETE', `/v1.0/me/drive/items/${fileId}`); }
