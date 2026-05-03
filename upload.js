@@ -1,29 +1,3 @@
-/**
- * upload.js
- * Upload des instances Minecraft vers le Cloud.
- *
- * ── Modes ────────────────────────────────────────────────────────────────────
- *  FULL  : rezippe et remplace l'intégralité de l'instance sur le Cloud.
- *          Équivalent de l'ancien comportement.
- *
- *  SMART : mode incrémental (défaut).
- *          - Premier upload → crée un backup complet (base ZIP).
- *          - Uploads suivants → crée uniquement un delta ZIP contenant
- *            les fichiers ajoutés/modifiés + un __delta__.json listant
- *            les fichiers à supprimer. Les deltas s'accumulent sur le Cloud.
- *          - --force → supprime tous les deltas et recrée un base complet.
- *
- * ── Nommage des fichiers Cloud ────────────────────────────────────────────────
- *  Base    : GensHorizon_Backup_{instance}.zip
- *  Delta   : GensHorizon_Delta_{instance}_{timestamp}.zip
- *  Manifest: GensHorizon_Manifest_{instance}.json   (manifest cloud courant)
- *
- * ── Arguments CLI ─────────────────────────────────────────────────────────────
- *  --upload [instanceName]  Uploade une instance spécifique ou toutes
- *  --force                  Force un base complet (ignore le manifest local)
- *  --provider=xxx           google | dropbox | onedrive (sinon : settings.provider)
- */
-
 'use strict';
 
 const fs      = require('fs');
@@ -74,13 +48,6 @@ function createFullZip(folder, tempZip, inst) {
     });
 }
 
-/**
- * @param {string}   folder      
- * @param {string[]} changed     
- * @param {string[]} deleted     
- * @param {string}   tempZip     
- * @param {string}   inst        
- */
 async function createDeltaZip(folder, changed, deleted, tempZip, inst) {
     const zip = new AdmZip();
 
@@ -218,8 +185,6 @@ async function upload() {
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst })));
                         const manifestEx = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
                         await provider.uploadJSON(manifestName, currentManifest, manifestEx);
-                        const metaEx = cloudIndex[metaName] ? cloudIndex[metaName].id : null;
-                        await provider.uploadJSON(metaName, instMeta, metaEx);
                         const syncStateR = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
                         syncStateR[inst] = repackResult?.modifiedTime || new Date().toISOString();
                         fs.writeFileSync(syncInfoPath, JSON.stringify(syncStateR, null, 2));
