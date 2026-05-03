@@ -34,16 +34,6 @@ function _decrypt(text) {
     }
 }
 
-
-/**
- * 
- * 
- * 
- *
- * @param {string} filePath
- * @returns {object|null}
- * @throws {Error} 
- */
 function getSecureToken(filePath) {
     if (!fs.existsSync(filePath)) return null;
 
@@ -51,7 +41,7 @@ function getSecureToken(filePath) {
 
     if (raw.startsWith('{')) {
         const parsed = JSON.parse(raw);
-        console.log(JSON.stringify({ type: 'INFO', message: 'Sécurisation du token en cours...' }));
+        process.stderr.write(JSON.stringify({ type: 'INFO', message: 'Sécurisation du token en cours...' }) + '\n');
         fs.writeFileSync(filePath, _encrypt(JSON.stringify(parsed)), 'utf8');
         return parsed;
     }
@@ -63,13 +53,6 @@ function getSecureToken(filePath) {
     }
 }
 
-/**
- * 
- * 
- *
- * @param {string} filePath
- * @param {object} tokenData
- */
 function encryptToken(filePath, tokenData) {
     fs.writeFileSync(filePath, _encrypt(JSON.stringify(tokenData)), 'utf8');
 }
