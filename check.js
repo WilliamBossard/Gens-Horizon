@@ -1,9 +1,3 @@
-/**
- * check.js
- * Vérifie si des mises à jour Cloud sont disponibles pour les instances locales.
- * Supporte les trois providers via la factory provider.js.
- */
-
 'use strict';
 
 const fs   = require('fs');
@@ -16,11 +10,18 @@ const { getProvider }        = require('./provider');
 const SYNC_INFO_FILE = path.join(process.cwd(), 'last_sync.json');
 const SETTINGS_PATH  = path.join(process.cwd(), 'horizon_settings.json');
 
+async function checkConnectivity() {
+    const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
+    for (const host of hosts) {
+        try { await dns.lookup(host); return true; } catch (_) {}
+    }
+    return false;
+}
+
 async function check() {
     try {
-        try {
-            await dns.lookup('google.com');
-        } catch (dnsErr) {
+        const online = await checkConnectivity();
+        if (!online) {
             console.log(JSON.stringify({ status: 'OFFLINE', message: 'Internet indisponible.' }));
             return;
         }
@@ -66,7 +67,7 @@ async function check() {
             const effectiveCloudTime = Math.max(cloudTime, latestDeltaTime);
             const lastSyncTime       = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
 
-            const localPath = path.join(getInstancesFolder(), instName);
+            const localPath   = path.join(getInstancesFolder(), instName);
             const localExists = fs.existsSync(localPath);
 
             if (localExists && effectiveCloudTime > lastSyncTime) {
