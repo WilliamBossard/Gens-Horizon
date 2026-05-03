@@ -1,24 +1,3 @@
-/**
- * sync.js
- * Synchronisation Cloud → Local des instances Minecraft.
- *
- * ── Fonctionnement ────────────────────────────────────────────────────────────
- * 1. Télécharge le base ZIP (GensHorizon_Backup_{inst}.zip) s'il est plus récent.
- * 2. Cherche tous les delta ZIPs (GensHorizon_Delta_{inst}_{timestamp}.zip) qui
- * sont plus récents que le dernier sync local, et les applique dans l'ordre
- * chronologique (timestamp croissant).
- * 3. Pour chaque delta : extrait les fichiers, puis supprime ceux listés dans
- * __delta__.json.
- * 4. Met à jour last_sync.json.
- *
- * ── Arguments CLI ─────────────────────────────────────────────────────────────
- * --sync [instanceName]    Synchronise une instance spécifique ou toutes
- * --force                  Force le re-téléchargement même si déjà à jour
- * --list                   Liste les instances disponibles sur le Cloud
- * --delete instanceName    Supprime une instance du Cloud
- * --provider=xxx           google | dropbox | onedrive
- */
-
 'use strict';
 
 const fs     = require('fs');
@@ -28,13 +7,8 @@ const dns    = require('dns').promises;
 
 const { getInstancesFolder } = require('./paths');
 const { getProvider }        = require('./provider');
+const { generateManifest }   = require('./scanner');
 
-/**
- * Extrait le ZIP complet avec un rapport de progression
- * @param {string} zipPath
- * @param {string} targetPath
- * @param {function} onProgress
- */
 function extractZip(zipPath, targetPath, onProgress) {
     const zip = new AdmZip(zipPath);
     const entries = zip.getEntries();
@@ -61,11 +35,6 @@ function extractZip(zipPath, targetPath, onProgress) {
     }
 }
 
-/** * Applique un delta ZIP avec rapport de progression
- * @param {string} deltaZipPath
- * @param {string} targetPath
- * @param {function} onProgress
- */
 function applyDelta(deltaZipPath, targetPath, onProgress) {
     const zip      = new AdmZip(deltaZipPath);
     const entries  = zip.getEntries();
@@ -277,6 +246,14 @@ async function syncAllInstances() {
                 const lastDelta  = pendingDeltas.length > 0 ? pendingDeltas[pendingDeltas.length - 1] : null;
                 syncState[inst]  = lastDelta ? new Date(lastDelta.ts).toISOString() : baseFile.modifiedTime;
                 fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
+
+                try {
+                    const newManifest = await generateManifest(targetPath);
+                    fs.writeFileSync(
+                        path.join(cwd, `manifest_${inst}.json`),
+                        JSON.stringify(newManifest, null, 2)
+                    );
+                } catch (_) {}
 
                 const deltasApplied = pendingDeltas.length;
                 console.log(JSON.stringify({
