@@ -67,7 +67,7 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
         }
     }
 
-for (const relPath of (deltaInfo.deletedFiles || [])) {
+    for (const relPath of (deltaInfo.deletedFiles || [])) {
         const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
         if (!path.resolve(absPath).startsWith(path.resolve(targetPath))) {
             console.log(`[ALERTE SÉCURITÉ] Suppression ignorée (Hors de l'instance) : ${absPath}`);
@@ -77,9 +77,22 @@ for (const relPath of (deltaInfo.deletedFiles || [])) {
     }
 }
 
+// CORRIGÉ : teste plusieurs hôtes pour éviter les faux "offline" sur réseaux qui bloquent google.com
+async function checkConnectivity() {
+    const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
+    for (const host of hosts) {
+        try { await dns.lookup(host); return true; } catch (_) {}
+    }
+    return false;
+}
+
 async function syncAllInstances() {
     try {
-        await dns.lookup('google.com');
+        const online = await checkConnectivity();
+        if (!online) {
+            console.log(JSON.stringify({ type: 'OFFLINE', message: 'Internet indisponible.' }));
+            return;
+        }
 
         const cwd          = process.cwd();
         const settingsPath = path.join(cwd, 'horizon_settings.json');
@@ -193,7 +206,7 @@ async function syncAllInstances() {
                         return { name: n, file: cloudIndex[n], ts };
                     })
                     .filter(d => !isNaN(d.ts))
-                    .sort((a, b) => a.ts - b.ts); 
+                    .sort((a, b) => a.ts - b.ts);
 
                 const pendingDeltas = deltaFiles.filter(d => d.ts > lastSync || force);
 
