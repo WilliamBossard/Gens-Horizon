@@ -4,15 +4,13 @@ const fs     = require('fs');
 const fsP    = fs.promises;
 const path   = require('path');
 const crypto = require('crypto');
+
 const IGNORED = new Set([
     'versions', 'libraries', 'assets', 'logs',
     'crash-reports', 'cache', 'webcache', 'temp',
     'screenshots', 'backups', '.git', 'node_modules',
 ]);
 
-/**
- * Calcule le Hash SHA-1 d'un fichier sans saturer la RAM (Lecture par flux)
- */
 function hashFile(filePath) {
     return new Promise((resolve, reject) => {
         const hash = crypto.createHash('sha1');
@@ -23,42 +21,40 @@ function hashFile(filePath) {
     });
 }
 
-/**
- * * @param {string} targetPath  
- * @param {string} basePath    
- * @returns {Promise<Object.<string,string>>}
- */
 async function generateManifest(targetPath, basePath = targetPath) {
     const manifest = {};
+    let items;
     try {
-        const items = await fsP.readdir(targetPath, { withFileTypes: true });
-        for (const item of items) {
-            if (IGNORED.has(item.name) || item.name.startsWith('.')) continue;
+        items = await fsP.readdir(targetPath, { withFileTypes: true });
+    } catch (err) {
+        if (err.code === 'ENOENT') return manifest;
+        throw err;
+    }
 
-            const fullPath     = path.join(targetPath, item.name);
-            const relativePath = path.relative(basePath, fullPath).replace(/\\/g, '/');
+    for (const item of items) {
+        if (IGNORED.has(item.name) || item.name.startsWith('.')) continue;
 
-            if (item.isDirectory()) {
+        const fullPath     = path.join(targetPath, item.name);
+        const relativePath = path.relative(basePath, fullPath).replace(/\\/g, '/');
+
+        if (item.isDirectory()) {
+            try {
                 Object.assign(manifest, await generateManifest(fullPath, basePath));
-            } else {
+            } catch (err) {
+                if (err.code !== 'ENOENT') {
+                    process.stderr.write(`[scanner] Dossier ignoré (${err.code}) : ${fullPath}\n`);
+                }
+            }
+        } else {
+            try {
                 manifest[relativePath] = await hashFile(fullPath);
+            } catch (_) {
             }
         }
-    } catch (_) {}
+    }
     return manifest;
 }
 
-/**
- * *
- * @param {Object.<string,string>} oldM  
- * @param {Object.<string,string>} newM  
- * @returns {{
- * hasChanges : boolean,
- * added      : string[],   
- * modified   : string[],   
- * deleted    : string[]    
- * }}
- */
 function compareManifests(oldM, newM) {
     const added    = Object.keys(newM).filter(f => !oldM[f]);
     const modified = Object.keys(newM).filter(f => oldM[f] && oldM[f] !== newM[f]);
