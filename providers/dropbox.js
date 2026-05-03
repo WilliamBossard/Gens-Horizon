@@ -3,6 +3,7 @@
 const fs    = require('fs');
 const https = require('https');
 const path  = require('path');
+const os    = require('os');
 const { credentials } = require('../config');
 const Auth = require('../Auth'); 
 
@@ -230,22 +231,7 @@ class DropboxProvider {
     }
 
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {
-        const stats = fs.statSync(srcPath);
-        const SIMPLE_LIMIT = 150 * 1024 * 1024; 
-
-        if (stats.size > SIMPLE_LIMIT) return this._uploadSession(name, srcPath, onProgress);
-
-        const content = fs.readFileSync(srcPath); 
-        const arg = JSON.stringify({ path: `/${name}`, mode: 'overwrite' });
-        const _doUpload = (authHeader) => httpsRequest({
-            hostname: 'content.dropboxapi.com', path: '/2/files/upload', method: 'POST',
-            headers: { 'Authorization': authHeader, 'Dropbox-API-Arg': arg, 'Content-Type': 'application/octet-stream', 'Content-Length': content.length }
-        }, content);
-        
-        let res = await _doUpload(this._authHeader());
-        if (res.statusCode === 401) { await this._refreshToken(); res = await _doUpload(this._authHeader()); }
-        onProgress && onProgress(100);
-        return { id: res.body.id, modifiedTime: res.body.server_modified };
+        return this._uploadSession(name, srcPath, onProgress);
     }
 
     async downloadFile(fileId, destPath, onProgress, totalSize) {
@@ -266,7 +252,7 @@ class DropboxProvider {
         }
     }
 
-    async uploadJSON(name, content, existingId = null) {
+    async uploadJSON(name, content) {
         const buf = Buffer.from(JSON.stringify(content, null, 2));
         const arg = JSON.stringify({ path: `/${name}`, mode: 'overwrite' });
         const _doUpload = (authHeader) => httpsRequest({
@@ -282,11 +268,40 @@ class DropboxProvider {
     }
 
     async downloadJSON(fileId) {
-        const tmp = path.join(require('os').tmpdir(), `horizon_db_${Date.now()}.json`);
-        await this.downloadFile(fileId, tmp, null, 0);
-        const data = JSON.parse(fs.readFileSync(tmp, 'utf8'));
-        fs.unlinkSync(tmp);
-        return data;
+        return new Promise((resolve, reject) => {
+            const chunks = [];
+            const options = {
+                hostname: 'content.dropboxapi.com',
+                path    : '/2/files/download',
+                method  : 'POST',
+                headers : {
+                    'Authorization'  : this._authHeader(),
+                    'Dropbox-API-Arg': JSON.stringify({ path: fileId }),
+                    'Content-Type'   : ''
+                }
+            };
+            const req = https.request(options, (res) => {
+                if (res.statusCode === 401) {
+                    res.resume();
+                    reject(Object.assign(new Error('Unauthorized'), { statusCode: 401 }));
+                    return;
+                }
+                res.on('data', c => chunks.push(c));
+                res.on('end', () => {
+                    try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+                    catch (e) { reject(e); }
+                });
+                res.on('error', reject);
+            });
+            req.on('error', reject);
+            req.end();
+        }).catch(async (e) => {
+            if (e.statusCode === 401) {
+                await this._refreshToken();
+                return this.downloadJSON(fileId);
+            }
+            throw e;
+        });
     }
 
     async deleteFile(fileId) {
