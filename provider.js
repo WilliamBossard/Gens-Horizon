@@ -5,25 +5,12 @@ const path = require('path');
 const { getSecureToken }  = require('./Auth');
 const { credentials }     = require('./config');
 
-/**
- * 
- * 
- * @param {object} settings
- * @returns {string}
- */
 function getProviderName(settings) {
     const cliArg = process.argv.find(a => a.startsWith('--provider='));
     if (cliArg) return cliArg.split('=')[1].trim();
     return (settings && settings.provider) || 'google';
 }
 
-/**
- * 
- * 
- * @param {string} providerName
- * @param {string} cwd
- * @returns {string}
- */
 function getTokenPath(providerName, cwd) {
     const specific = path.join(cwd, `token_${providerName}.json`);
     if (fs.existsSync(specific)) return specific;
@@ -32,16 +19,10 @@ function getTokenPath(providerName, cwd) {
         const legacy = path.join(cwd, 'token.json');
         if (fs.existsSync(legacy)) return legacy;
     }
-    return specific; 
+    return specific;
 }
 
-/**
- * 
- * @param {object} settings  
- * @param {string} [cwd]     
- * @returns {Promise<object|null>}  
- */
-async function getProvider(settings, cwd = process.cwd()) {
+function getProvider(settings, cwd = process.cwd()) {
     const name      = getProviderName(settings);
     const tokenPath = getTokenPath(name, cwd);
 
