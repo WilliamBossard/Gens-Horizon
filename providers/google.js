@@ -1,8 +1,3 @@
-/**
- * providers/google.js
- * Fournisseur Google Drive (appDataFolder)
- */
-
 'use strict';
 
 const fs = require('fs');
@@ -42,9 +37,22 @@ async function handleAuthCode(code) {
 
 class GoogleProvider {
     constructor(tokenData, credentials) {
-        this._creds = credentials;
+        this._creds  = credentials;
+        this._tokenData = tokenData;
+
         const oauth2 = new google.auth.OAuth2(credentials.client_id, credentials.client_secret);
         oauth2.setCredentials(tokenData);
+
+        oauth2.on('tokens', (newTokens) => {
+            const merged = { ...this._tokenData, ...newTokens };
+            this._tokenData = merged;
+            try {
+                Auth.encryptToken(TOKEN_PATH, merged);
+            } catch (e) {
+                process.stderr.write(`[google] Échec sauvegarde token rafraîchi : ${e.message}\n`);
+            }
+        });
+
         this._drive = google.drive({ version: 'v3', auth: oauth2 });
     }
 
@@ -87,7 +95,7 @@ class GoogleProvider {
         });
     }
 
-async uploadZip(name, srcPath, existingId = null, onProgress = null) {
+    async uploadZip(name, srcPath, existingId = null, onProgress = null) {
         const fileSize = fs.statSync(srcPath).size;
         const media = { mimeType: 'application/zip', body: fs.createReadStream(srcPath) };
         
@@ -107,7 +115,7 @@ async uploadZip(name, srcPath, existingId = null, onProgress = null) {
         if (existingId) {
             const res = await this._drive.files.update(
                 { fileId: existingId, media, fields: 'id, modifiedTime' },
-                progressOptions 
+                progressOptions
             );
             onProgress && onProgress(100);
             return res.data;
