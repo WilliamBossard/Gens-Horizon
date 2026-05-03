@@ -1,16 +1,3 @@
-/**
- * login.js
- * Connexion OAuth2 pour Google Drive, Dropbox et OneDrive.
- *
- * Usage :
- *   node index.js --login                    → Google (défaut)
- *   node index.js --login --provider=dropbox
- *   node index.js --login --provider=onedrive
- *
- * Le token est sauvegardé dans token_{provider}.json (chiffré par Auth.js).
- * Compatibilité : Google écrit aussi token.json pour les anciens builds.
- */
-
 'use strict';
 
 const fs    = require('fs');
@@ -22,9 +9,8 @@ const { exec } = require('child_process');
 
 const { credentials }    = require('./config');
 const { getProviderName, getTokenPath } = require('./provider');
-const { getSecureToken } = require('./Auth');
 
-const AUTH_TIMEOUT_MS = 5 * 60 * 1000; 
+const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const CWD = process.cwd();
 
 function openBrowser(targetUrl) {
@@ -57,12 +43,12 @@ function httpsPost(hostname, path, body) {
     });
 }
 
-function waitForCallback(exchangeCode) {
+function waitForCallback(exchangeCode, port) {
     return new Promise((resolve, reject) => {
         let settled = false;
 
         const server = http.createServer(async (req, res) => {
-            const parsed = new url.URL(req.url, 'http://127.0.0.1:12543');
+            const parsed = new url.URL(req.url, `http://127.0.0.1:${port}`);
 
             if (parsed.searchParams.has('error')) {
                 res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -89,8 +75,8 @@ function waitForCallback(exchangeCode) {
             if (!settled) { settled = true; server.close(); reject(new Error('Délai d\'authentification dépassé.')); process.exit(1); }
         }, AUTH_TIMEOUT_MS);
 
-        server.listen(12543, '127.0.0.1', () => {
-            console.log(JSON.stringify({ type: 'INFO', message: 'Serveur Horizon prêt (port 12543). Ouverture du navigateur...' }));
+        server.listen(port, '127.0.0.1', () => {
+            console.log(JSON.stringify({ type: 'INFO', message: `Serveur Horizon prêt (port ${port}). Ouverture du navigateur...` }));
         });
         server.on('error', e => { clearTimeout(timer); reject(new Error('Impossible de démarrer le serveur : ' + e.message)); });
     });
@@ -99,6 +85,7 @@ function waitForCallback(exchangeCode) {
 async function loginGoogle() {
     const cred         = credentials.google;
     const REDIRECT_URI = cred.redirect_uri;
+    const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
     const { google }   = require('googleapis');
 
     const oauth2 = new google.auth.OAuth2(cred.client_id, cred.client_secret, REDIRECT_URI);
@@ -122,12 +109,13 @@ async function loginGoogle() {
         const tokens = await httpsPost('oauth2.googleapis.com', '/token', postData);
         if (tokens.error) throw new Error(tokens.error_description || tokens.error);
         return tokens;
-    });
+    }, port);
 }
 
 async function loginDropbox() {
     const cred         = credentials.dropbox;
     const REDIRECT_URI = cred.redirect_uri;
+    const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
 
     const authUrl = `${cred.auth_uri}?response_type=code&client_id=${cred.client_id}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline`;
 
@@ -145,16 +133,21 @@ async function loginDropbox() {
         const tokens = await httpsPost('api.dropbox.com', '/oauth2/token', postData);
         if (tokens.error) throw new Error(tokens.error_description || tokens.error);
         return tokens;
-    });
+    }, port);
 }
 
 async function loginOneDrive() {
     const cred         = credentials.onedrive;
     const REDIRECT_URI = cred.redirect_uri;
-    const crypto      = require('crypto');
-    const verifier    = crypto.randomBytes(32).toString('base64url');
-    const challenge   = crypto.createHash('sha256').update(verifier).digest('base64url');
-    const usePKCE     = !cred.client_secret;
+    const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
+    const usePKCE      = !cred.client_secret;
+
+    let verifier, challenge;
+    if (usePKCE) {
+        const crypto = require('crypto');
+        verifier  = crypto.randomBytes(32).toString('base64url');
+        challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+    }
 
     const params = new URLSearchParams({
         client_id    : cred.client_id,
@@ -181,7 +174,7 @@ async function loginOneDrive() {
         const tokens = await httpsPost('login.microsoftonline.com', '/common/oauth2/v2.0/token', postParams.toString());
         if (tokens.error) throw new Error(tokens.error_description || tokens.error);
         return tokens;
-    });
+    }, port);
 }
 
 async function loginPlayer() {
