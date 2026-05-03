@@ -1,6 +1,7 @@
 'use strict';
 
 const fs      = require('fs');
+const fsP     = fs.promises;
 const archiver = require('archiver');
 const AdmZip  = require('adm-zip');
 const path    = require('path');
@@ -10,41 +11,48 @@ const { getInstancesFolder, scanInstances } = require('./paths');
 const { generateManifest, compareManifests } = require('./scanner');
 const { getProvider }                        = require('./provider');
 
-function getFolderSizeSync(dir) {
+async function getFolderSize(dir) {
     let total = 0;
     try {
-        for (const f of fs.readdirSync(dir)) {
-            const p    = path.join(dir, f);
-            const stat = fs.statSync(p);
-            total += stat.isDirectory() ? getFolderSizeSync(p) : stat.size;
-        }
+        const entries = await fsP.readdir(dir, { withFileTypes: true });
+        await Promise.all(entries.map(async (entry) => {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                total += await getFolderSize(fullPath);
+            } else {
+                try {
+                    const stat = await fsP.stat(fullPath);
+                    total += stat.size;
+                } catch (_) {}
+            }
+        }));
     } catch (_) {}
     return total;
 }
 
 function createFullZip(folder, tempZip, inst) {
-    const realTotal = getFolderSizeSync(folder);
-    let lastPct = -1;
+    return getFolderSize(folder).then(realTotal => {
+        let lastPct = -1;
+        return new Promise((resolve, reject) => {
+            const output  = fs.createWriteStream(tempZip);
+            const archive = archiver('zip', { zlib: { level: 6 } });
 
-    return new Promise((resolve, reject) => {
-        const output  = fs.createWriteStream(tempZip);
-        const archive = archiver('zip', { zlib: { level: 6 } });
+            archive.on('progress', (p) => {
+                if (realTotal === 0) return;
+                let pct = Math.min(100, Math.round(p.fs.processedBytes / realTotal * 100));
+                if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
+                    console.log(JSON.stringify({ type: 'PROGRESS', step: 'COMPRESSING', value: pct, instance: inst }));
+                    lastPct = pct;
+                }
+            });
+            archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+            output.on('close', resolve);
+            output.on('error', err => { try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
 
-        archive.on('progress', (p) => {
-            if (realTotal === 0) return;
-            let pct = Math.min(100, Math.round(p.fs.processedBytes / realTotal * 100));
-            if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
-                console.log(JSON.stringify({ type: 'PROGRESS', step: 'COMPRESSING', value: pct, instance: inst }));
-                lastPct = pct;
-            }
+            archive.pipe(output);
+            archive.directory(folder, false);
+            archive.finalize();
         });
-        archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
-        output.on('close', resolve);
-        output.on('error', err => { try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
-
-        archive.pipe(output);
-        archive.directory(folder, false);
-        archive.finalize();
     });
 }
 
@@ -60,7 +68,7 @@ async function createDeltaZip(folder, changed, deleted, tempZip, inst) {
     for (const relPath of changed) {
         const absPath = path.join(folder, relPath.replace(/\//g, path.sep));
         if (!fs.existsSync(absPath)) continue;
-       const zipDir = path.posix.dirname(relPath) === '.' ? '' : path.posix.dirname(relPath);
+        const zipDir = path.posix.dirname(relPath) === '.' ? '' : path.posix.dirname(relPath);
         zip.addLocalFile(absPath, zipDir);
 
         done++;
@@ -76,9 +84,22 @@ async function createDeltaZip(folder, changed, deleted, tempZip, inst) {
     await new Promise((resolve, reject) => zip.writeZip(tempZip, err => err ? reject(err) : resolve()));
 }
 
+// CORRIGÉ : teste plusieurs hôtes pour éviter les faux "offline" sur réseaux qui bloquent google.com
+async function checkConnectivity() {
+    const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
+    for (const host of hosts) {
+        try { await dns.lookup(host); return true; } catch (_) {}
+    }
+    return false;
+}
+
 async function upload() {
     try {
-        await dns.lookup('google.com');
+        const online = await checkConnectivity();
+        if (!online) {
+            console.log(JSON.stringify({ type: 'OFFLINE', message: 'Internet indisponible ou erreur réseau.' }));
+            return;
+        }
 
         const cwd          = process.cwd();
         const settingsPath = path.join(cwd, 'horizon_settings.json');
@@ -159,10 +180,9 @@ async function upload() {
                         baseName, tempZip, existingBase,
                         (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
                     );
-                    fs.unlinkSync(tempZip);
+                    try { fs.unlinkSync(tempZip); } catch (_) {}
 
-                    const manifestExisting = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
-                    await provider.uploadJSON(manifestName, currentManifest, manifestExisting);
+                    await provider.uploadJSON(manifestName, currentManifest);
                     const syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
                     syncState[inst] = result.modifiedTime;
                     fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
@@ -183,8 +203,7 @@ async function upload() {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: 0, instance: inst }));
                         const repackResult = await provider.uploadZip(baseName, tempZipRepack, existingBase,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst })));
-                        const manifestEx = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
-                        await provider.uploadJSON(manifestName, currentManifest, manifestEx);
+                        await provider.uploadJSON(manifestName, currentManifest);
                         const syncStateR = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
                         syncStateR[inst] = repackResult?.modifiedTime || new Date().toISOString();
                         fs.writeFileSync(syncInfoPath, JSON.stringify(syncStateR, null, 2));
@@ -210,9 +229,9 @@ async function upload() {
                     deltaName, tempDelta, null,
                     (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
                 );
-                fs.unlinkSync(tempDelta);
-                const manifestExisting = cloudIndex[manifestName] ? cloudIndex[manifestName].id : null;
-                await provider.uploadJSON(manifestName, currentManifest, manifestExisting);
+                try { fs.unlinkSync(tempDelta); } catch (_) {}
+
+                await provider.uploadJSON(manifestName, currentManifest);
                 const syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
                 syncState[inst] = new Date().toISOString();
                 fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
