@@ -11,7 +11,6 @@ const { getInstancesFolder, scanInstances } = require('./paths');
 const { generateManifest, compareManifests } = require('./scanner');
 const { getProvider }                        = require('./provider');
 
-// Registre des fichiers temporaires à nettoyer sur SIGTERM/SIGINT
 const _tempFiles = new Set();
 function _registerTemp(p)   { _tempFiles.add(p); }
 function _unregisterTemp(p) { _tempFiles.delete(p); }
@@ -22,6 +21,20 @@ function _cleanupTemps() {
 }
 process.on('SIGTERM', () => { _cleanupTemps(); process.exit(0); });
 process.on('SIGINT',  () => { _cleanupTemps(); process.exit(0); });
+
+function writeJsonAtomic(filePath, data) {
+    const tmp = filePath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
+}
+
+function readJsonSafe(filePath, fallback = {}) {
+    try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (_) { return fallback; }
+}
+
+function sanitizeInstanceName(name) {
+    return name.replace(/[/\\:.]/g, '_');
+}
 
 async function getFolderSize(dir) {
     let total = 0;
@@ -54,9 +67,9 @@ function createFullZip(folder, tempZip, inst) {
                     lastPct = pct;
                 }
             });
-            archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+            archive.on('error', err => { output.destroy(); try { try { fs.unlinkSync(tempZip); } catch(_) {} } catch (_) {} reject(err); });
             output.on('close', resolve);
-            output.on('error', err => { try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+            output.on('error', err => { try { try { fs.unlinkSync(tempZip); } catch(_) {} } catch (_) {} reject(err); });
 
             archive.pipe(output);
             archive.directory(folder, false);
@@ -143,12 +156,13 @@ async function upload() {
         for (const inst of localInstances) {
             try {
                 const folder       = path.join(getInstancesFolder(), inst);
-                const manifestPath = path.join(cwd, `manifest_${inst}.json`);
-                const baseName     = `GensHorizon_Backup_${inst}.zip`;
-                const manifestName = `GensHorizon_Manifest_${inst}.json`;
+                const safeInst     = sanitizeInstanceName(inst);
+                const baseName     = `GensHorizon_Backup_${safeInst}.zip`;
+                const manifestName = `GensHorizon_Manifest_${safeInst}.json`;
+                const manifestPath = path.join(cwd, `manifest_${safeInst}.json`);
 
                 const oldManifest = fs.existsSync(manifestPath)
-                    ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+                    ? readJsonSafe(manifestPath)
                     : {};
 
                 const currentManifest = await generateManifest(folder);
@@ -162,7 +176,6 @@ async function upload() {
                     continue;
                 }
 
-                // ── MODE FULL (forcé, pas de base cloud, ou mode non-SMART) ──────────────
                 if (!useSmartMode || force || !hasBaseOnCloud) {
                     if (!useSmartMode || force) {
                         const deltasToDelete = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${inst}_`));
@@ -172,7 +185,7 @@ async function upload() {
                         }
                     }
 
-                    const tempZip = path.join(cwd, `temp_${inst}.zip`);
+                    const tempZip = path.join(cwd, `temp_${safeInst}.zip`);
                     _registerTemp(tempZip);
                     try {
                         await createFullZip(folder, tempZip, inst);
@@ -182,29 +195,26 @@ async function upload() {
                             baseName, tempZip, existingBase,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
                         );
-                        // CORRIGÉ : suppression dans finally — avant, si uploadZip throwait,
-                        // tempZip restait sur disque indéfiniment
                         await provider.uploadJSON(manifestName, currentManifest);
-                        const syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
+                        const syncState = fs.existsSync(syncInfoPath) ? readJsonSafe(syncInfoPath) : {};
                         syncState[inst] = result.modifiedTime;
-                        fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
-                        fs.writeFileSync(manifestPath, JSON.stringify(currentManifest, null, 2));
+                        writeJsonAtomic(syncInfoPath, syncState);
+                        writeJsonAtomic(manifestPath, currentManifest);
                         console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'FULL' }));
                     } finally {
-                        try { if (fs.existsSync(tempZip)) fs.unlinkSync(tempZip); } catch (_) {}
+                        try { if (fs.existsSync(tempZip)) try { fs.unlinkSync(tempZip); } catch(_) {} } catch (_) {}
                         _unregisterTemp(tempZip);
                     }
                     continue;
                 }
 
-                // ── REPACK AUTO si trop de deltas ────────────────────────────────────────
                 const DELTA_THRESHOLD = settings.deltaCleanupThreshold || 10;
                 const existingDeltas  = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${inst}_`));
                 if (existingDeltas.length >= DELTA_THRESHOLD) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${existingDeltas.length} delta(s) — repack complet (seuil: ${DELTA_THRESHOLD}).` }));
                     for (const dName of existingDeltas) await provider.deleteFile(cloudIndex[dName].id);
 
-                    const tempZipRepack = path.join(cwd, `temp_${inst}.zip`);
+                    const tempZipRepack = path.join(cwd, `temp_${safeInst}.zip`);
                     _registerTemp(tempZipRepack);
                     try {
                         await createFullZip(folder, tempZipRepack, inst);
@@ -215,25 +225,23 @@ async function upload() {
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
                         );
                         await provider.uploadJSON(manifestName, currentManifest);
-                        const syncStateR = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
+                        const syncStateR = fs.existsSync(syncInfoPath) ? readJsonSafe(syncInfoPath) : {};
                         syncStateR[inst] = repackResult?.modifiedTime || new Date().toISOString();
-                        fs.writeFileSync(syncInfoPath, JSON.stringify(syncStateR, null, 2));
-                        fs.writeFileSync(manifestPath, JSON.stringify(currentManifest, null, 2));
+                        writeJsonAtomic(syncInfoPath, syncStateR);
+                        writeJsonAtomic(manifestPath, currentManifest);
                         console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'REPACK' }));
                     } finally {
-                        // CORRIGÉ : finally garantit le nettoyage même si uploadZip throw
                         try { if (fs.existsSync(tempZipRepack)) fs.unlinkSync(tempZipRepack); } catch (_) {}
                         _unregisterTemp(tempZipRepack);
                     }
                     continue;
                 }
 
-                // ── MODE SMART (delta) ────────────────────────────────────────────────────
                 const changedFiles = [...diff.added, ...diff.modified];
                 const deletedFiles = diff.deleted;
                 const timestamp    = Date.now();
-                const deltaName    = `GensHorizon_Delta_${inst}_${timestamp}.zip`;
-                const tempDelta    = path.join(cwd, `delta_${inst}_${timestamp}.zip`);
+                const deltaName    = `GensHorizon_Delta_${safeInst}_${timestamp}.zip`;
+                const tempDelta    = path.join(cwd, `delta_${safeInst}_${timestamp}.zip`);
 
                 _registerTemp(tempDelta);
                 try {
@@ -245,10 +253,10 @@ async function upload() {
                     );
                     // CORRIGÉ : idem — suppression dans finally
                     await provider.uploadJSON(manifestName, currentManifest);
-                    const syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
+                    const syncState = fs.existsSync(syncInfoPath) ? readJsonSafe(syncInfoPath) : {};
                     syncState[inst] = new Date().toISOString();
-                    fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
-                    fs.writeFileSync(manifestPath, JSON.stringify(currentManifest, null, 2));
+                    writeJsonAtomic(syncInfoPath, syncState);
+                    writeJsonAtomic(manifestPath, currentManifest);
                     const summary = `+${diff.added.length} ajouté(s), ~${diff.modified.length} modifié(s), -${diff.deleted.length} supprimé(s)`;
                     console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'SMART', summary }));
                 } finally {
