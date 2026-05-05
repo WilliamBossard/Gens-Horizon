@@ -23,9 +23,7 @@ function graphRequest(method, path, accessToken, body = null) {
             res.on('end', () => {
                 const raw = Buffer.concat(chunks).toString('utf8').trim();
                 let parsed = {};
-                if (raw) {
-                    try { parsed = JSON.parse(raw); } catch (_) { parsed = {}; }
-                }
+                if (raw) { try { parsed = JSON.parse(raw); } catch (_) { parsed = {}; } }
                 resolve({ statusCode: res.statusCode, body: parsed });
             });
         });
@@ -42,11 +40,8 @@ function getAuthUrl() {
 
 async function handleAuthCode(code) {
     const params = new URLSearchParams({
-        client_id: creds.client_id,
-        client_secret: creds.client_secret,
-        code: code,
-        redirect_uri: creds.redirect_uri,
-        grant_type: 'authorization_code'
+        client_id: creds.client_id, client_secret: creds.client_secret,
+        code, redirect_uri: creds.redirect_uri, grant_type: 'authorization_code'
     });
     const buf = Buffer.from(params.toString());
     const res = await new Promise((resolve, reject) => {
@@ -60,11 +55,8 @@ async function handleAuthCode(code) {
         });
         req.on('error', reject); req.write(buf); req.end();
     });
-
     if (res.statusCode !== 200) throw new Error('OneDrive Token Error');
-
     Auth.encryptToken(TOKEN_PATH, res.body);
-
     return res.body;
 }
 
@@ -80,21 +72,19 @@ class OneDriveProvider {
         if (this._creds.client_secret) params.set('client_secret', this._creds.client_secret);
         const buf = Buffer.from(params.toString());
         const res = await new Promise((resolve, reject) => {
-            const req = https.request({ hostname: 'login.microsoftonline.com', path: '/common/oauth2/v2.0/token', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': buf.length } }, (r) => {
+            const req = https.request({
+                hostname: 'login.microsoftonline.com', path: '/common/oauth2/v2.0/token', method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': buf.length }
+            }, (r) => {
                 const chunks = []; r.on('data', c => chunks.push(c));
                 r.on('end', () => { try { resolve({ statusCode: r.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) }); } catch(e) { reject(e); } });
             });
-            req.on('error', reject);
-            req.write(buf); req.end();
+            req.on('error', reject); req.write(buf); req.end();
         });
         if (!res.body.access_token) throw new Error('OneDrive token refresh failed: ' + (res.body.error_description || res.body.error || res.statusCode));
         this._token = res.body.access_token;
         if (res.body.refresh_token) this._refresh = res.body.refresh_token;
-        Auth.encryptToken(TOKEN_PATH, {
-            access_token : this._token,
-            refresh_token: this._refresh,
-            token_type   : res.body.token_type || 'Bearer'
-        });
+        Auth.encryptToken(TOKEN_PATH, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'Bearer' });
     }
 
     async _call(method, path, body = null) {
@@ -112,23 +102,27 @@ class OneDriveProvider {
     }
 
     async _uploadSession(name, srcPath, onProgress) {
-        const CHUNK = 10 * 1024 * 1024; 
+        const CHUNK = 10 * 1024 * 1024;
         const total = fs.statSync(srcPath).size;
-        let offset  = 0;
-        let lastPct = -1;
-        let result  = null;
+
+        // CORRIGÉ : fichier vide → on bypasse la session chunked (inutile) et on fait un PUT direct
+        if (total === 0) {
+            return this.uploadZip(name, srcPath, null, onProgress);
+        }
+
+        let offset = 0, lastPct = -1, result = null;
 
         const sessionRes = await this._call('POST', `${APP_ROOT}:/${encodeURIComponent(name)}:/createUploadSession`, { item: { '@microsoft.graph.conflictBehavior': 'replace' } });
-        if (sessionRes.statusCode >= 400 || !sessionRes.body.uploadUrl) throw new Error(`OneDrive upload session failed`);
+        if (sessionRes.statusCode >= 400 || !sessionRes.body.uploadUrl) throw new Error('OneDrive upload session failed');
         const uploadUrl = new URL(sessionRes.body.uploadUrl);
         const fd = fs.openSync(srcPath, 'r');
 
         try {
             while (offset < total) {
-                const end = Math.min(offset + CHUNK, total);
+                const end         = Math.min(offset + CHUNK, total);
                 const bytesToRead = end - offset;
-                const buffer = Buffer.alloc(bytesToRead);
-                fs.readSync(fd, buffer, 0, bytesToRead, offset); 
+                const buffer      = Buffer.alloc(bytesToRead);
+                fs.readSync(fd, buffer, 0, bytesToRead, offset);
                 const isLast = end === total;
 
                 const res = await new Promise((resolve, reject) => {
@@ -143,27 +137,26 @@ class OneDriveProvider {
                 });
 
                 if (res.statusCode >= 400) throw new Error(`OneDrive chunk error ${res.statusCode}`);
-
                 offset = end;
                 if (onProgress && total > 0) {
                     const pct = isLast ? 100 : Math.min(99, Math.round(offset / total * 100));
                     if (pct !== lastPct) { onProgress(pct); lastPct = pct; }
                 }
-                if (isLast && (res.statusCode === 200 || res.statusCode === 201)) result = { id: res.body.id, modifiedTime: res.body.lastModifiedDateTime };
+                if (isLast && (res.statusCode === 200 || res.statusCode === 201))
+                    result = { id: res.body.id, modifiedTime: res.body.lastModifiedDateTime };
             }
         } finally {
-            fs.closeSync(fd); 
+            fs.closeSync(fd);
         }
         return result;
     }
 
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {
         const stats = fs.statSync(srcPath);
-        const SIMPLE_LIMIT = 4 * 1024 * 1024; 
-
+        const SIMPLE_LIMIT = 4 * 1024 * 1024;
         if (stats.size > SIMPLE_LIMIT) return this._uploadSession(name, srcPath, onProgress);
 
-        const content = fs.readFileSync(srcPath); 
+        const content = fs.readFileSync(srcPath);
         const _doUpload = async () => new Promise((resolve, reject) => {
             const req = https.request({
                 hostname: GRAPH_HOST, path: `${APP_ROOT}:/${encodeURIComponent(name)}:/content`, method: 'PUT',
@@ -201,23 +194,14 @@ class OneDriveProvider {
     async _getDownloadUrl(fileId) {
         return new Promise((resolve, reject) => {
             const req = https.request({
-                hostname: GRAPH_HOST,
-                path    : `/v1.0/me/drive/items/${fileId}/content`,
-                method  : 'GET',
-                headers : { 'Authorization': `Bearer ${this._token}` }
+                hostname: GRAPH_HOST, path: `/v1.0/me/drive/items/${fileId}/content`,
+                method: 'GET', headers: { 'Authorization': `Bearer ${this._token}` }
             }, (res) => {
                 res.resume();
-                if (res.statusCode === 302 || res.statusCode === 303) {
-                    resolve(res.headers.location);
-                } else {
-                    reject(Object.assign(
-                        new Error(`OneDrive download: statut inattendu ${res.statusCode}`),
-                        { statusCode: res.statusCode }
-                    ));
-                }
+                if (res.statusCode === 302 || res.statusCode === 303) resolve(res.headers.location);
+                else reject(Object.assign(new Error(`OneDrive download: statut inattendu ${res.statusCode}`), { statusCode: res.statusCode }));
             });
-            req.on('error', reject);
-            req.end();
+            req.on('error', reject); req.end();
         });
     }
 
@@ -226,14 +210,9 @@ class OneDriveProvider {
         try {
             redirectUrl = await this._getDownloadUrl(fileId);
         } catch (e) {
-            if (e.statusCode === 401) {
-                await this._refreshToken();
-                redirectUrl = await this._getDownloadUrl(fileId);
-            } else {
-                throw e;
-            }
+            if (e.statusCode === 401) { await this._refreshToken(); redirectUrl = await this._getDownloadUrl(fileId); }
+            else throw e;
         }
-
         const loc = new URL(redirectUrl);
         await new Promise((resolve, reject) => {
             const dest = fs.createWriteStream(destPath);
