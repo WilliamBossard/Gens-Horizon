@@ -3,7 +3,6 @@
 const fs    = require('fs');
 const https = require('https');
 const path  = require('path');
-const os    = require('os');
 const { credentials } = require('../config');
 const Auth = require('../Auth'); 
 
@@ -15,7 +14,7 @@ function httpsRequest(options, bodyBuffer = null) {
         const req = https.request(options, (res) => {
             const chunks = [];
             res.on('data', c => chunks.push(c));
-            res.on('end',  () => {
+            res.on('end', () => {
                 const raw  = Buffer.concat(chunks).toString('utf8');
                 const body = (() => { try { return JSON.parse(raw); } catch { return raw; } })();
                 resolve({ statusCode: res.statusCode, headers: res.headers, body });
@@ -36,38 +35,24 @@ function httpsDownload(options, destPath, onProgress, totalSize) {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 dest.destroy();
                 const loc = new URL(res.headers.location);
-                httpsDownload({
-                    hostname: loc.hostname,
-                    path    : loc.pathname + loc.search,
-                    method  : 'GET'
-                }, destPath, onProgress, totalSize).then(resolve).catch(reject);
+                httpsDownload({ hostname: loc.hostname, path: loc.pathname + loc.search, method: 'GET' }, destPath, onProgress, totalSize).then(resolve).catch(reject);
                 return;
             }
-
             if (res.statusCode < 200 || res.statusCode >= 300) {
                 const errChunks = [];
                 res.on('data', c => errChunks.push(c));
                 res.on('end', () => {
                     dest.destroy();
                     try { fs.unlinkSync(destPath); } catch(_) {}
-                    const errBody = Buffer.concat(errChunks).toString('utf8').slice(0, 300);
-                    const err = Object.assign(
-                        new Error(`Dropbox download HTTP ${res.statusCode}: ${errBody}`),
-                        { statusCode: res.statusCode }
-                    );
-                    reject(err);
+                    reject(Object.assign(new Error(`Dropbox download HTTP ${res.statusCode}: ${Buffer.concat(errChunks).toString('utf8').slice(0, 300)}`), { statusCode: res.statusCode }));
                 });
                 return;
             }
-
             res.on('data', chunk => {
                 downloaded += chunk.length;
                 if (totalSize > 0) {
                     const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
-                    if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
-                        onProgress && onProgress(pct);
-                        lastPct = pct;
-                    }
+                    if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) { onProgress && onProgress(pct); lastPct = pct; }
                 }
                 dest.write(chunk);
             });
@@ -84,115 +69,69 @@ function getAuthUrl() {
 }
 
 async function handleAuthCode(code) {
-    const params = new URLSearchParams({
-        code,
-        grant_type: 'authorization_code',
-        client_id: creds.client_id,
-        client_secret: creds.client_secret,
-        redirect_uri: creds.redirect_uri
-    });
+    const params = new URLSearchParams({ code, grant_type: 'authorization_code', client_id: creds.client_id, client_secret: creds.client_secret, redirect_uri: creds.redirect_uri });
     const buf = Buffer.from(params.toString());
-    const res = await httpsRequest({
-        hostname: 'api.dropbox.com',
-        path: '/oauth2/token',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': buf.length }
-    }, buf);
-
+    const res = await httpsRequest({ hostname: 'api.dropbox.com', path: '/oauth2/token', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': buf.length } }, buf);
     if (res.statusCode !== 200) throw new Error('Dropbox Token Error');
-
     Auth.encryptToken(TOKEN_PATH, res.body);
-    
     return res.body;
 }
 
 class DropboxProvider {
     constructor(tokenData, credentials) {
-        this._token  = tokenData.access_token;
+        this._token   = tokenData.access_token;
         this._refresh = tokenData.refresh_token;
-        this._creds  = credentials;
+        this._creds   = credentials;
     }
 
-    _authHeader() {
-        return `Bearer ${this._token}`;
-    }
+    _authHeader() { return `Bearer ${this._token}`; }
 
-    async _api(endpoint, body) {
+    async _api(endpoint, body, _retried = false) {
         const bodyBuf = Buffer.from(JSON.stringify(body));
         const res = await httpsRequest({
-            hostname: 'api.dropboxapi.com',
-            path    : `/2/${endpoint}`,
-            method  : 'POST',
-            headers : {
-                'Authorization' : this._authHeader(),
-                'Content-Type'  : 'application/json',
-                'Content-Length': bodyBuf.length
-            }
+            hostname: 'api.dropboxapi.com', path: `/2/${endpoint}`, method: 'POST',
+            headers: { 'Authorization': this._authHeader(), 'Content-Type': 'application/json', 'Content-Length': bodyBuf.length }
         }, bodyBuf);
 
-        if (res.statusCode === 401) {
+        if (res.statusCode === 401 && !_retried) {
             await this._refreshToken();
-            return this._api(endpoint, body);
+            return this._api(endpoint, body, true);
         }
+        if (res.statusCode === 401) throw new Error('Dropbox : token invalide après refresh (accès révoqué ?)');
         return res.body;
     }
 
     async _refreshToken() {
-        const params = new URLSearchParams({
-            grant_type   : 'refresh_token',
-            refresh_token: this._refresh,
-            client_id    : this._creds.client_id,
-            client_secret: this._creds.client_secret
-        });
+        const params = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: this._refresh, client_id: this._creds.client_id, client_secret: this._creds.client_secret });
         const buf = Buffer.from(params.toString());
-        const res = await httpsRequest({
-            hostname: 'api.dropbox.com',
-            path    : '/oauth2/token',
-            method  : 'POST',
-            headers : { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': buf.length }
-        }, buf);
+        const res = await httpsRequest({ hostname: 'api.dropbox.com', path: '/oauth2/token', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': buf.length } }, buf);
         if (!res.body.access_token) throw new Error('Dropbox token refresh failed: ' + (res.body.error_description || res.body.error || res.statusCode));
         this._token = res.body.access_token;
-        Auth.encryptToken(TOKEN_PATH, {
-            access_token : this._token,
-            refresh_token: this._refresh,
-            token_type   : res.body.token_type || 'bearer'
-        });
+        Auth.encryptToken(TOKEN_PATH, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'bearer' });
     }
 
     async listFiles(nameContains = '') {
         const res = await this._api('files/list_folder', { path: '', recursive: false });
-        let entries = res.entries || [];
-        return entries
+        return (res.entries || [])
             .filter(e => e['.tag'] === 'file')
             .filter(e => !nameContains || e.name.includes(nameContains))
-            .map(e => ({
-                id          : e.id,
-                name        : e.name,
-                modifiedTime: e.server_modified,
-                size        : e.size
-            }));
+            .map(e => ({ id: e.id, name: e.name, modifiedTime: e.server_modified, size: e.size }));
     }
 
     async _uploadSession(name, srcPath, onProgress) {
-        const CHUNK = 8 * 1024 * 1024; 
+        const CHUNK = 8 * 1024 * 1024;
         const total = fs.statSync(srcPath).size;
-        let offset  = 0;
-        let lastPct = -1;
-        
+        let offset = 0, lastPct = -1;
         const fd = fs.openSync(srcPath, 'r');
-
         const _report = (off) => {
             if (!onProgress || total === 0) return;
             const pct = Math.min(99, Math.round(off / total * 100));
             if (pct !== lastPct) { onProgress(pct); lastPct = pct; }
         };
-
         try {
             let bytesToRead = Math.min(CHUNK, total);
             let buffer = Buffer.alloc(bytesToRead);
             fs.readSync(fd, buffer, 0, bytesToRead, offset);
-            
             const startRes = await httpsRequest({
                 hostname: 'content.dropboxapi.com', path: '/2/files/upload_session/start', method: 'POST',
                 headers: { 'Authorization': this._authHeader(), 'Dropbox-API-Arg': JSON.stringify({ close: false }), 'Content-Type': 'application/octet-stream', 'Content-Length': bytesToRead }
@@ -205,7 +144,6 @@ class DropboxProvider {
                 bytesToRead = Math.min(CHUNK, total - offset);
                 buffer = Buffer.alloc(bytesToRead);
                 fs.readSync(fd, buffer, 0, bytesToRead, offset);
-
                 await httpsRequest({
                     hostname: 'content.dropboxapi.com', path: '/2/files/upload_session/append_v2', method: 'POST',
                     headers: { 'Authorization': this._authHeader(), 'Dropbox-API-Arg': JSON.stringify({ cursor: { session_id: sessionId, offset }, close: false }), 'Content-Type': 'application/octet-stream', 'Content-Length': bytesToRead }
@@ -217,16 +155,14 @@ class DropboxProvider {
             const lastBytes = total - offset;
             buffer = Buffer.alloc(lastBytes);
             if (lastBytes > 0) fs.readSync(fd, buffer, 0, lastBytes, offset);
-
             const finishRes = await httpsRequest({
                 hostname: 'content.dropboxapi.com', path: '/2/files/upload_session/finish', method: 'POST',
                 headers: { 'Authorization': this._authHeader(), 'Dropbox-API-Arg': JSON.stringify({ cursor: { session_id: sessionId, offset }, commit: { path: `/${name}`, mode: 'overwrite', autorename: false } }), 'Content-Type': 'application/octet-stream', 'Content-Length': lastBytes }
             }, buffer);
-            
             onProgress && onProgress(100);
             return { id: finishRes.body.id, modifiedTime: finishRes.body.server_modified };
         } finally {
-            fs.closeSync(fd);  
+            fs.closeSync(fd);
         }
     }
 
@@ -236,12 +172,9 @@ class DropboxProvider {
 
     async downloadFile(fileId, destPath, onProgress, totalSize) {
         const _doDownload = (authHeader) => httpsDownload({
-            hostname: 'content.dropboxapi.com',
-            path    : '/2/files/download',
-            method  : 'POST',
-            headers : { 'Authorization': authHeader, 'Dropbox-API-Arg': JSON.stringify({ path: fileId }), 'Content-Type': '' }
+            hostname: 'content.dropboxapi.com', path: '/2/files/download', method: 'POST',
+            headers: { 'Authorization': authHeader, 'Dropbox-API-Arg': JSON.stringify({ path: fileId }), 'Content-Type': '' }
         }, destPath, onProgress, totalSize);
-
         try {
             await _doDownload(this._authHeader());
         } catch (e) {
@@ -256,9 +189,7 @@ class DropboxProvider {
         const buf = Buffer.from(JSON.stringify(content, null, 2));
         const arg = JSON.stringify({ path: `/${name}`, mode: 'overwrite' });
         const _doUpload = (authHeader) => httpsRequest({
-            hostname: 'content.dropboxapi.com',
-            path: '/2/files/upload',
-            method: 'POST',
+            hostname: 'content.dropboxapi.com', path: '/2/files/upload', method: 'POST',
             headers: { 'Authorization': authHeader, 'Dropbox-API-Arg': arg, 'Content-Type': 'application/octet-stream', 'Content-Length': buf.length }
         }, buf);
         let res = await _doUpload(this._authHeader());
@@ -270,43 +201,23 @@ class DropboxProvider {
     async downloadJSON(fileId) {
         return new Promise((resolve, reject) => {
             const chunks = [];
-            const options = {
-                hostname: 'content.dropboxapi.com',
-                path    : '/2/files/download',
-                method  : 'POST',
-                headers : {
-                    'Authorization'  : this._authHeader(),
-                    'Dropbox-API-Arg': JSON.stringify({ path: fileId }),
-                    'Content-Type'   : ''
-                }
-            };
-            const req = https.request(options, (res) => {
-                if (res.statusCode === 401) {
-                    res.resume();
-                    reject(Object.assign(new Error('Unauthorized'), { statusCode: 401 }));
-                    return;
-                }
+            const req = https.request({
+                hostname: 'content.dropboxapi.com', path: '/2/files/download', method: 'POST',
+                headers: { 'Authorization': this._authHeader(), 'Dropbox-API-Arg': JSON.stringify({ path: fileId }), 'Content-Type': '' }
+            }, (res) => {
+                if (res.statusCode === 401) { res.resume(); reject(Object.assign(new Error('Unauthorized'), { statusCode: 401 })); return; }
                 res.on('data', c => chunks.push(c));
-                res.on('end', () => {
-                    try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-                    catch (e) { reject(e); }
-                });
+                res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { reject(e); } });
                 res.on('error', reject);
             });
-            req.on('error', reject);
-            req.end();
+            req.on('error', reject); req.end();
         }).catch(async (e) => {
-            if (e.statusCode === 401) {
-                await this._refreshToken();
-                return this.downloadJSON(fileId);
-            }
+            if (e.statusCode === 401) { await this._refreshToken(); return this.downloadJSON(fileId); }
             throw e;
         });
     }
 
-    async deleteFile(fileId) {
-        await this._api('files/delete_v2', { path: fileId });
-    }
+    async deleteFile(fileId) { await this._api('files/delete_v2', { path: fileId }); }
 }
 
 module.exports = { DropboxProvider, getAuthUrl, handleAuthCode };
