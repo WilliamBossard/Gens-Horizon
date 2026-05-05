@@ -87,9 +87,10 @@ class OneDriveProvider {
         Auth.encryptToken(TOKEN_PATH, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'Bearer' });
     }
 
-    async _call(method, path, body = null) {
+    async _call(method, path, body = null, _retried = false) {
         let res = await graphRequest(method, path, this._token, body);
-        if (res.statusCode === 401) { await this._refreshToken(); res = await graphRequest(method, path, this._token, body); }
+        if (res.statusCode === 401 && !_retried) { await this._refreshToken(); return this._call(method, path, body, true); }
+        if (res.statusCode === 401) throw new Error("OneDrive : token invalide après refresh (accès révoqué ?)");
         return res;
     }
 
@@ -105,7 +106,6 @@ class OneDriveProvider {
         const CHUNK = 10 * 1024 * 1024;
         const total = fs.statSync(srcPath).size;
 
-        // CORRIGÉ : fichier vide → on bypasse la session chunked (inutile) et on fait un PUT direct
         if (total === 0) {
             return this.uploadZip(name, srcPath, null, onProgress);
         }
