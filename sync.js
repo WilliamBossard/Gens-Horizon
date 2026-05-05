@@ -20,13 +20,30 @@ function _cleanupTemps() {
 process.on('SIGTERM', () => { _cleanupTemps(); process.exit(0); });
 process.on('SIGINT',  () => { _cleanupTemps(); process.exit(0); });
 
+function writeJsonAtomic(filePath, data) {
+    const tmp = filePath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
+}
+
+function readJsonSafe(filePath, fallback = {}) {
+    try {
+        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (_) {
+        return fallback;
+    }
+}
+
+function sanitizeInstanceName(name) {
+    return name.replace(/[/\\:.]/g, '_');
+}
+
 function extractZip(zipPath, targetPath, onProgress) {
     const zip      = new AdmZip(zipPath);
     const entries  = zip.getEntries();
     const total    = entries.length;
     const resolved = path.resolve(targetPath);
-    let done = 0;
-    let lastPct = -1;
+    let done = 0, lastPct = -1;
 
     for (const entry of entries) {
         const dest    = path.join(targetPath, entry.entryName);
@@ -34,15 +51,19 @@ function extractZip(zipPath, targetPath, onProgress) {
 
         if (!resDest.startsWith(resolved + path.sep) && resDest !== resolved) {
             process.stderr.write(`[ALERTE SÉCURITÉ] Entrée zip ignorée (path traversal) : ${entry.entryName}\n`);
-            done++;
-            continue;
+            done++; continue;
         }
 
         if (entry.isDirectory) {
             fs.mkdirSync(dest, { recursive: true });
         } else {
+            const content = zip.readFile(entry);
+            if (content === null) {
+                process.stderr.write(`[WARN] Entrée zip illisible ignorée : ${entry.entryName}\n`);
+                done++; continue;
+            }
             fs.mkdirSync(path.dirname(dest), { recursive: true });
-            fs.writeFileSync(dest, zip.readFile(entry));
+            fs.writeFileSync(dest, content);
         }
         done++;
         if (onProgress && total > 0) {
@@ -57,29 +78,36 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
     const entries  = zip.getEntries();
     const total    = entries.length;
     const resolved = path.resolve(targetPath);
-    let done       = 0;
-    let lastPct    = -1;
+    let done = 0, lastPct = -1;
 
     const deltaEntry = entries.find(e => e.entryName === '__delta__.json');
-    const deltaInfo  = deltaEntry ? JSON.parse(zip.readAsText(deltaEntry)) : { deletedFiles: [] };
+    // CORRIGÉ : JSON.parse sans try/catch crashait toute la sync sur delta corrompu
+    let deltaInfo = { deletedFiles: [] };
+    if (deltaEntry) {
+        try { deltaInfo = JSON.parse(zip.readAsText(deltaEntry)); }
+        catch (_) { process.stderr.write(`[WARN] __delta__.json corrompu, suppressions ignorées\n`); }
+    }
 
     for (const entry of entries) {
         if (entry.entryName === '__delta__.json') { done++; continue; }
 
         const dest    = path.join(targetPath, entry.entryName);
         const resDest = path.resolve(dest);
-
         if (!resDest.startsWith(resolved + path.sep) && resDest !== resolved) {
             process.stderr.write(`[ALERTE SÉCURITÉ] Entrée delta ignorée (path traversal) : ${entry.entryName}\n`);
-            done++;
-            continue;
+            done++; continue;
         }
 
         if (entry.isDirectory) {
             fs.mkdirSync(dest, { recursive: true });
         } else {
+            const content = zip.readFile(entry);
+            if (content === null) {
+                process.stderr.write(`[WARN] Entrée delta illisible ignorée : ${entry.entryName}\n`);
+                done++; continue;
+            }
             fs.mkdirSync(path.dirname(dest), { recursive: true });
-            fs.writeFileSync(dest, zip.readFile(entry));
+            fs.writeFileSync(dest, content);
         }
         done++;
         if (onProgress && total > 0) {
@@ -151,24 +179,25 @@ async function syncAllInstances() {
         }
 
         if (isDelete && targetInstance) {
+            const safeTarget = sanitizeInstanceName(targetInstance);
             const toDelete = Object.keys(cloudIndex).filter(n =>
-                n === `GensHorizon_Backup_${targetInstance}.zip` ||
-                n === `GensHorizon_Manifest_${targetInstance}.json` ||
-                n.startsWith(`GensHorizon_Delta_${targetInstance}_`)
+                n === `GensHorizon_Backup_${safeTarget}.zip` ||
+                n === `GensHorizon_Manifest_${safeTarget}.json` ||
+                n.startsWith(`GensHorizon_Delta_${safeTarget}_`)
             );
             for (const n of toDelete) await provider.deleteFile(cloudIndex[n].id);
-            const manifestPath = path.join(cwd, `manifest_${targetInstance}.json`);
+            const manifestPath = path.join(cwd, `manifest_${safeTarget}.json`);
             if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
             if (fs.existsSync(syncInfoPath)) {
-                const syncState = JSON.parse(fs.readFileSync(syncInfoPath, 'utf8'));
+                const syncState = readJsonSafe(syncInfoPath);
                 delete syncState[targetInstance];
-                fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
+                writeJsonAtomic(syncInfoPath, syncState);
             }
             console.log(JSON.stringify({ type: 'SUCCESS', instance: targetInstance, message: 'Supprimé du cloud.' }));
             return;
         }
 
-        let syncState = fs.existsSync(syncInfoPath) ? JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')) : {};
+        let syncState = fs.existsSync(syncInfoPath) ? readJsonSafe(syncInfoPath) : {};
 
         const instancesToSync = targetInstance
             ? [targetInstance]
@@ -176,10 +205,12 @@ async function syncAllInstances() {
 
         for (const inst of instancesToSync) {
             try {
+                const safeInst    = sanitizeInstanceName(inst);
+                const baseName    = `GensHorizon_Backup_${safeInst}.zip`;
+                const baseFile    = cloudIndex[baseName];
+
                 if (targetInstance) console.log(JSON.stringify({ type: 'PROGRESS', step: 'CHECKING', value: 0, instance: inst }));
 
-                const baseName = `GensHorizon_Backup_${inst}.zip`;
-                const baseFile = cloudIndex[baseName];
                 if (!baseFile) { console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${inst} n'existe pas encore sur le Cloud.` })); continue; }
 
                 const targetPath = path.join(getInstancesFolder(), inst);
@@ -187,8 +218,8 @@ async function syncAllInstances() {
                 const baseTime   = new Date(baseFile.modifiedTime).getTime();
 
                 const deltaFiles = Object.keys(cloudIndex)
-                    .filter(n => n.startsWith(`GensHorizon_Delta_${inst}_`) && n.endsWith('.zip'))
-                    .map(n => { const ts = parseInt(n.replace(`GensHorizon_Delta_${inst}_`, '').replace('.zip', ''), 10); return { name: n, file: cloudIndex[n], ts }; })
+                    .filter(n => n.startsWith(`GensHorizon_Delta_${safeInst}_`) && n.endsWith('.zip'))
+                    .map(n => { const ts = parseInt(n.replace(`GensHorizon_Delta_${safeInst}_`, '').replace('.zip', ''), 10); return { name: n, file: cloudIndex[n], ts }; })
                     .filter(d => !isNaN(d.ts))
                     .sort((a, b) => a.ts - b.ts);
 
@@ -196,11 +227,10 @@ async function syncAllInstances() {
                 const baseChanged  = baseTime > lastSync || force;
 
                 if (!baseChanged && pendingDeltas.length === 0) { console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${inst} est déjà à jour.` })); continue; }
-
                 if (!fs.existsSync(targetPath)) fs.mkdirSync(targetPath, { recursive: true });
 
                 if (baseChanged) {
-                    const tempBase = path.join(cwd, `download_base_${inst}.zip`);
+                    const tempBase = path.join(cwd, `download_base_${safeInst}.zip`);
                     _registerTemp(tempBase);
                     try {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'DOWNLOADING', value: 0, instance: inst }));
@@ -216,7 +246,7 @@ async function syncAllInstances() {
                 }
 
                 for (const delta of pendingDeltas) {
-                    const tempDelta = path.join(cwd, `download_delta_${inst}_${delta.ts}.zip`);
+                    const tempDelta = path.join(cwd, `download_delta_${safeInst}_${delta.ts}.zip`);
                     _registerTemp(tempDelta);
                     try {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'APPLYING_DELTA', value: 0, instance: inst, delta: delta.name }));
@@ -230,11 +260,12 @@ async function syncAllInstances() {
 
                 const lastDelta = pendingDeltas.length > 0 ? pendingDeltas[pendingDeltas.length - 1] : null;
                 syncState[inst] = lastDelta ? new Date(lastDelta.ts).toISOString() : baseFile.modifiedTime;
-                fs.writeFileSync(syncInfoPath, JSON.stringify(syncState, null, 2));
+                // CORRIGÉ : écriture atomique pour éviter corruption sur SIGKILL
+                writeJsonAtomic(syncInfoPath, syncState);
 
                 try {
                     const newManifest = await generateManifest(targetPath);
-                    fs.writeFileSync(path.join(cwd, `manifest_${inst}.json`), JSON.stringify(newManifest, null, 2));
+                    writeJsonAtomic(path.join(cwd, `manifest_${safeInst}.json`), newManifest);
                 } catch (_) {}
 
                 const deltasApplied = pendingDeltas.length;
