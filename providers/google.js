@@ -29,15 +29,13 @@ async function handleAuthCode(code) {
         credentials.google.redirect_uri
     );
     const { tokens } = await oauth2.getToken(code);
-    
-    Auth.encryptToken(TOKEN_PATH, tokens); 
-    
+    Auth.encryptToken(TOKEN_PATH, tokens);
     return tokens;
 }
 
 class GoogleProvider {
     constructor(tokenData, credentials) {
-        this._creds  = credentials;
+        this._creds     = credentials;
         this._tokenData = tokenData;
 
         const oauth2 = new google.auth.OAuth2(credentials.client_id, credentials.client_secret);
@@ -46,11 +44,8 @@ class GoogleProvider {
         oauth2.on('tokens', (newTokens) => {
             const merged = { ...this._tokenData, ...newTokens };
             this._tokenData = merged;
-            try {
-                Auth.encryptToken(TOKEN_PATH, merged);
-            } catch (e) {
-                process.stderr.write(`[google] Échec sauvegarde token rafraîchi : ${e.message}\n`);
-            }
+            try { Auth.encryptToken(TOKEN_PATH, merged); }
+            catch (e) { process.stderr.write(`[google] Échec sauvegarde token rafraîchi : ${e.message}\n`); }
         });
 
         this._drive = google.drive({ version: 'v3', auth: oauth2 });
@@ -60,11 +55,11 @@ class GoogleProvider {
         let files = [], pageToken = null;
         do {
             const params = {
-                spaces   : 'appDataFolder',
-                fields   : 'nextPageToken, files(id, name, modifiedTime, size)',
-                pageSize : 1000,
-                ...(pageToken     && { pageToken }),
-                ...(nameContains  && { q: `name contains '${nameContains}'` })
+                spaces  : 'appDataFolder',
+                fields  : 'nextPageToken, files(id, name, modifiedTime, size)',
+                pageSize: 1000,
+                ...(pageToken && { pageToken }),
+                ...(nameContains && { q: `name contains '${nameContains.replace(/'/g, "\\'")}'` })
             };
             const res = await this._drive.files.list(params);
             if (res.data.files) files = files.concat(res.data.files);
@@ -97,34 +92,24 @@ class GoogleProvider {
 
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {
         const fileSize = fs.statSync(srcPath).size;
-        const media = { mimeType: 'application/zip', body: fs.createReadStream(srcPath) };
-        
-        let lastPct = -1;
+        const media    = { mimeType: 'application/zip', body: fs.createReadStream(srcPath) };
+        let lastPct    = -1;
+
         const progressOptions = {
             onUploadProgress: evt => {
                 if (onProgress && fileSize > 0) {
                     const pct = Math.min(100, Math.round((evt.bytesRead / fileSize) * 100));
-                    if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
-                        onProgress(pct);
-                        lastPct = pct;
-                    }
+                    if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) { onProgress(pct); lastPct = pct; }
                 }
             }
         };
 
         if (existingId) {
-            const res = await this._drive.files.update(
-                { fileId: existingId, media, fields: 'id, modifiedTime' },
-                progressOptions
-            );
+            const res = await this._drive.files.update({ fileId: existingId, media, fields: 'id, modifiedTime' }, progressOptions);
             onProgress && onProgress(100);
             return res.data;
         }
-
-        const res = await this._drive.files.create(
-            { resource: { name, parents: ['appDataFolder'] }, media, fields: 'id, modifiedTime' },
-            progressOptions
-        );
+        const res = await this._drive.files.create({ resource: { name, parents: ['appDataFolder'] }, media, fields: 'id, modifiedTime' }, progressOptions);
         onProgress && onProgress(100);
         return res.data;
     }
@@ -136,11 +121,7 @@ class GoogleProvider {
             const res = await this._drive.files.update({ fileId: existingId, media, fields: 'id, modifiedTime' });
             return res.data;
         }
-        const res = await this._drive.files.create({
-            resource: { name, parents: ['appDataFolder'] },
-            media,
-            fields: 'id, modifiedTime'
-        });
+        const res = await this._drive.files.create({ resource: { name, parents: ['appDataFolder'] }, media, fields: 'id, modifiedTime' });
         return res.data;
     }
 
