@@ -5,7 +5,7 @@ const http  = require('http');
 const https = require('https');
 const url   = require('url');
 const path  = require('path');
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 
 const { credentials }    = require('./config');
 const { getProviderName, getTokenPath } = require('./provider');
@@ -14,9 +14,22 @@ const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const CWD = process.cwd();
 
 function openBrowser(targetUrl) {
-    const cmd = process.platform === 'win32' ? `start "" "${targetUrl}"`
-              : process.platform === 'darwin' ? `open "${targetUrl}"`
-              : `xdg-open "${targetUrl}"`;
+    console.log(JSON.stringify({ type: 'AUTH_URL', message: targetUrl }));
+
+    let cmd;
+    if (process.platform === 'win32') {
+        cmd = `start "" "${targetUrl}"`;
+    } else if (process.platform === 'darwin') {
+        cmd = `open "${targetUrl}"`;
+    } else {
+        try {
+            execSync('which xdg-open', { stdio: 'ignore' });
+            cmd = `xdg-open "${targetUrl}"`;
+        } catch (_) {
+            console.log(JSON.stringify({ type: 'INFO', message: 'Environnement headless détecté. Ouvre l\'URL manuellement dans un navigateur.' }));
+            return;
+        }
+    }
     exec(cmd, () => {});
 }
 
@@ -25,14 +38,11 @@ function httpsPost(hostname, path, body) {
         const buf = Buffer.from(body);
         const req = https.request({
             hostname, path, method: 'POST',
-            headers: {
-                'Content-Type'  : 'application/x-www-form-urlencoded',
-                'Content-Length': buf.length
-            }
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': buf.length }
         }, (res) => {
             const chunks = [];
             res.on('data', c => chunks.push(c));
-            res.on('end',  () => {
+            res.on('end', () => {
                 try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
                 catch (e) { reject(e); }
             });
@@ -89,24 +99,14 @@ async function loginGoogle() {
     const { google }   = require('googleapis');
 
     const oauth2 = new google.auth.OAuth2(cred.client_id, cred.client_secret, REDIRECT_URI);
-    const authUrl = oauth2.generateAuthUrl({
-        access_type: 'offline',
-        prompt     : 'consent',
-        scope      : ['https://www.googleapis.com/auth/drive.appdata']
-    });
+    const authUrl = oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: ['https://www.googleapis.com/auth/drive.appdata'] });
 
     openBrowser(authUrl);
-
     return waitForCallback(async (code) => {
-        const postData = new URLSearchParams({
-            code,
-            client_id    : cred.client_id,
-            client_secret: cred.client_secret,
-            redirect_uri : REDIRECT_URI,
-            grant_type   : 'authorization_code'
-        }).toString();
-
-        const tokens = await httpsPost('oauth2.googleapis.com', '/token', postData);
+        const tokens = await httpsPost('oauth2.googleapis.com', '/token', new URLSearchParams({
+            code, client_id: cred.client_id, client_secret: cred.client_secret,
+            redirect_uri: REDIRECT_URI, grant_type: 'authorization_code'
+        }).toString());
         if (tokens.error) throw new Error(tokens.error_description || tokens.error);
         return tokens;
     }, port);
@@ -117,20 +117,12 @@ async function loginDropbox() {
     const REDIRECT_URI = cred.redirect_uri;
     const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
 
-    const authUrl = `${cred.auth_uri}?response_type=code&client_id=${cred.client_id}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline`;
-
-    openBrowser(authUrl);
-
+    openBrowser(`${cred.auth_uri}?response_type=code&client_id=${cred.client_id}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline`);
     return waitForCallback(async (code) => {
-        const postData = new URLSearchParams({
-            code,
-            client_id    : cred.client_id,
-            client_secret: cred.client_secret,
-            redirect_uri : REDIRECT_URI,
-            grant_type   : 'authorization_code'
-        }).toString();
-
-        const tokens = await httpsPost('api.dropbox.com', '/oauth2/token', postData);
+        const tokens = await httpsPost('api.dropbox.com', '/oauth2/token', new URLSearchParams({
+            code, client_id: cred.client_id, client_secret: cred.client_secret,
+            redirect_uri: REDIRECT_URI, grant_type: 'authorization_code'
+        }).toString());
         if (tokens.error) throw new Error(tokens.error_description || tokens.error);
         return tokens;
     }, port);
@@ -150,28 +142,19 @@ async function loginOneDrive() {
     }
 
     const params = new URLSearchParams({
-        client_id    : cred.client_id,
-        response_type: 'code',
-        redirect_uri : REDIRECT_URI,
-        scope        : cred.scope,
-        ...(usePKCE && { code_challenge: challenge, code_challenge_method: 'S256' }),
-        prompt       : 'select_account'
+        client_id: cred.client_id, response_type: 'code', redirect_uri: REDIRECT_URI,
+        scope: cred.scope, prompt: 'select_account',
+        ...(usePKCE && { code_challenge: challenge, code_challenge_method: 'S256' })
     });
 
-    const authUrl = `${cred.auth_uri}?${params.toString()}`;
-    openBrowser(authUrl);
-
+    openBrowser(`${cred.auth_uri}?${params.toString()}`);
     return waitForCallback(async (code) => {
-        const postParams = new URLSearchParams({
-            code,
-            client_id   : cred.client_id,
-            redirect_uri: REDIRECT_URI,
-            grant_type  : 'authorization_code',
-            scope       : cred.scope,
-            ...(usePKCE ? { code_verifier: verifier } : { client_secret: cred.client_secret })
-        });
-
-        const tokens = await httpsPost('login.microsoftonline.com', '/common/oauth2/v2.0/token', postParams.toString());
+        const tokens = await httpsPost('login.microsoftonline.com', '/common/oauth2/v2.0/token',
+            new URLSearchParams({
+                code, client_id: cred.client_id, redirect_uri: REDIRECT_URI,
+                grant_type: 'authorization_code', scope: cred.scope,
+                ...(usePKCE ? { code_verifier: verifier } : { client_secret: cred.client_secret })
+            }).toString());
         if (tokens.error) throw new Error(tokens.error_description || tokens.error);
         return tokens;
     }, port);
@@ -184,8 +167,6 @@ async function loginPlayer() {
     })();
 
     const providerName = getProviderName(settings);
-    const tokenPath    = path.join(CWD, `token_${providerName}.json`);
-
     console.log(JSON.stringify({ type: 'INFO', message: `Connexion via ${providerName}...` }));
 
     let tokens;
@@ -193,16 +174,13 @@ async function loginPlayer() {
         case 'google'  : tokens = await loginGoogle();   break;
         case 'dropbox' : tokens = await loginDropbox();  break;
         case 'onedrive': tokens = await loginOneDrive(); break;
-        default:
-            throw new Error(`Provider inconnu : ${providerName}`);
+        default: throw new Error(`Provider inconnu : ${providerName}`);
     }
 
     const { encryptToken } = require('./Auth');
+    const tokenPath = path.join(CWD, `token_${providerName}.json`);
     encryptToken(tokenPath, tokens);
-
-    if (providerName === 'google') {
-        encryptToken(path.join(CWD, 'token.json'), tokens);
-    }
+    if (providerName === 'google') encryptToken(path.join(CWD, 'token.json'), tokens);
 
     const settingsFilePath = path.join(CWD, 'horizon_settings.json');
     if (fs.existsSync(settingsFilePath)) {
