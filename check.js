@@ -10,6 +10,11 @@ const { getProvider }        = require('./provider');
 const SYNC_INFO_FILE = path.join(process.cwd(), 'last_sync.json');
 const SETTINGS_PATH  = path.join(process.cwd(), 'horizon_settings.json');
 
+function readJsonSafe(filePath, fallback = {}) {
+    try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+    catch (_) { return fallback; }
+}
+
 async function checkConnectivity() {
     const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
     for (const host of hosts) {
@@ -37,8 +42,8 @@ async function check() {
             process.exit(0);
         }
 
-        const syncInfo   = fs.existsSync(SYNC_INFO_FILE)
-            ? JSON.parse(fs.readFileSync(SYNC_INFO_FILE, 'utf8'))
+        const syncInfo = fs.existsSync(SYNC_INFO_FILE)
+            ? readJsonSafe(SYNC_INFO_FILE)
             : {};
 
         const cloudFiles = await provider.listFiles('GensHorizon_');
@@ -66,9 +71,8 @@ async function check() {
 
             const effectiveCloudTime = Math.max(cloudTime, latestDeltaTime);
             const lastSyncTime       = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
-
-            const localPath   = path.join(getInstancesFolder(), instName);
-            const localExists = fs.existsSync(localPath);
+            const localPath          = path.join(getInstancesFolder(), instName);
+            const localExists        = fs.existsSync(localPath);
 
             if (localExists && effectiveCloudTime > lastSyncTime) {
                 report.status = 'UPDATE_AVAILABLE';
