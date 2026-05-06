@@ -53,6 +53,8 @@ class GoogleProvider {
 
     async listFiles(nameContains = '') {
         let files = [], pageToken = null;
+        const MAX_PAGES = 20; 
+        let page = 0;
         do {
             const params = {
                 spaces  : 'appDataFolder',
@@ -64,7 +66,12 @@ class GoogleProvider {
             const res = await this._drive.files.list(params);
             if (res.data.files) files = files.concat(res.data.files);
             pageToken = res.data.nextPageToken;
-        } while (pageToken);
+            page++;
+        } while (pageToken && page < MAX_PAGES);
+        if (page >= MAX_PAGES && pageToken) {
+            process.stderr.write(`[google] listFiles : limite de pagination atteinte (${MAX_PAGES} pages)
+`);
+        }
         return files;
     }
 
