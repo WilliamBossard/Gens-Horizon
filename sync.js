@@ -22,8 +22,13 @@ process.on('SIGINT',  () => { _cleanupTemps(); process.exit(0); });
 
 function writeJsonAtomic(filePath, data) {
     const tmp = filePath + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(tmp, filePath);
+    _registerTemp(tmp);
+    try {
+        fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+        fs.renameSync(tmp, filePath);
+    } finally {
+        _unregisterTemp(tmp);
+    }
 }
 
 function readJsonSafe(filePath, fallback = {}) {
@@ -81,7 +86,6 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
     let done = 0, lastPct = -1;
 
     const deltaEntry = entries.find(e => e.entryName === '__delta__.json');
-    // CORRIGÉ : JSON.parse sans try/catch crashait toute la sync sur delta corrompu
     let deltaInfo = { deletedFiles: [] };
     if (deltaEntry) {
         try { deltaInfo = JSON.parse(zip.readAsText(deltaEntry)); }
