@@ -111,8 +111,16 @@ class DropboxProvider {
     }
 
     async listFiles(nameContains = '') {
-        const res = await this._api('files/list_folder', { path: '', recursive: false });
-        return (res.entries || [])
+        let entries = [];
+        let res = await this._api('files/list_folder', { path: '', recursive: false });
+        entries = entries.concat(res.entries || []);
+
+        while (res.has_more) {
+            res = await this._api('files/list_folder/continue', { cursor: res.cursor });
+            entries = entries.concat(res.entries || []);
+        }
+
+        return entries
             .filter(e => e['.tag'] === 'file')
             .filter(e => !nameContains || e.name.includes(nameContains))
             .map(e => ({ id: e.id, name: e.name, modifiedTime: e.server_modified, size: e.size }));
