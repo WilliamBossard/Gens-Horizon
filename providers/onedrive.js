@@ -95,8 +95,22 @@ class OneDriveProvider {
     }
 
     async listFiles(nameContains = '') {
-        const res = await this._call('GET', `${APP_ROOT}/children?$top=1000`);
-        return (res.body.value || [])
+        let items = [];
+        let nextPath = `${APP_ROOT}/children?$top=1000`;
+
+        while (nextPath) {
+            const res = await this._call('GET', nextPath);
+            items = items.concat(res.body.value || []);
+            const nextLink = res.body['@odata.nextLink'];
+            if (nextLink) {
+                try { nextPath = new URL(nextLink).pathname + new URL(nextLink).search; }
+                catch (_) { nextPath = null; }
+            } else {
+                nextPath = null;
+            }
+        }
+
+        return items
             .filter(i => i.file)
             .filter(i => !nameContains || i.name.includes(nameContains))
             .map(i => ({ id: i.id, name: i.name, modifiedTime: i.lastModifiedDateTime, size: i.size }));
