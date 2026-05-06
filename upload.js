@@ -6,11 +6,9 @@ const archiver = require('archiver');
 const AdmZip  = require('adm-zip');
 const path    = require('path');
 const dns     = require('dns').promises;
-
 const { getInstancesFolder, scanInstances } = require('./paths');
 const { generateManifest, compareManifests } = require('./scanner');
 const { getProvider }                        = require('./provider');
-
 const _tempFiles = new Set();
 function _registerTemp(p)   { _tempFiles.add(p); }
 function _unregisterTemp(p) { _tempFiles.delete(p); }
@@ -22,10 +20,16 @@ function _cleanupTemps() {
 process.on('SIGTERM', () => { _cleanupTemps(); process.exit(0); });
 process.on('SIGINT',  () => { _cleanupTemps(); process.exit(0); });
 
+
 function writeJsonAtomic(filePath, data) {
     const tmp = filePath + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(tmp, filePath);
+    _registerTemp(tmp);
+    try {
+        fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+        fs.renameSync(tmp, filePath);
+    } finally {
+        _unregisterTemp(tmp);
+    }
 }
 
 function readJsonSafe(filePath, fallback = {}) {
@@ -251,7 +255,6 @@ async function upload() {
                         deltaName, tempDelta, null,
                         (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
                     );
-                    // CORRIGÉ : idem — suppression dans finally
                     await provider.uploadJSON(manifestName, currentManifest);
                     const syncState = fs.existsSync(syncInfoPath) ? readJsonSafe(syncInfoPath) : {};
                     syncState[inst] = new Date().toISOString();
