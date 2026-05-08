@@ -226,6 +226,14 @@ class DropboxProvider {
     }
 
     async deleteFile(fileId) { await this._api('files/delete_v2', { path: fileId }); }
+
+    async getQuota() {
+        const res = await this._api('users/get_space_usage', null);
+        return {
+            used : res.used || 0,
+            total: res.allocation?.allocated || 0,
+        };
+    }
 }
 
 module.exports = { DropboxProvider, getAuthUrl, handleAuthCode };
