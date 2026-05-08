@@ -180,8 +180,9 @@ async function checkConnectivity() {
 async function syncAllInstances() {
     if (!acquireLock()) {
         console.log(JSON.stringify({
-            type   : 'ERROR',
-            message: 'Une synchronisation Horizon est déjà en cours. Réessaie dans quelques instants.'
+            type     : 'ERROR',
+            errorCode: 'ERR_ALREADY_RUNNING',
+            message  : 'ERR_ALREADY_RUNNING'
         }));
         process.exit(1);
     }
@@ -317,6 +318,7 @@ async function syncAllInstances() {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 0, instance: inst }));
                         verifyZipIntegrity(tempBase);
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 100, instance: inst }));
+
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: 0, instance: inst }));
                         extractZip(tempBase, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: pct, instance: inst }))
