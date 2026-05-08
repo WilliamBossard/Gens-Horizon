@@ -6,11 +6,13 @@ const archiver = require('archiver');
 const AdmZip   = require('adm-zip');
 const path     = require('path');
 const dns      = require('dns').promises;
+
 const { getInstancesFolder, scanInstances } = require('./paths');
 const { generateManifest, compareManifests } = require('./scanner');
 const { getProvider }                        = require('./provider');
 const { acquireLock, releaseLock }           = require('./lock');
 const { withRetry }                          = require('./retry');
+
 const _tempFiles = new Set();
 function _registerTemp(p)   { _tempFiles.add(p); }
 function _unregisterTemp(p) { _tempFiles.delete(p); }
@@ -117,8 +119,9 @@ async function checkConnectivity() {
 async function upload() {
     if (!acquireLock()) {
         console.log(JSON.stringify({
-            type   : 'ERROR',
-            message: 'Une opération Horizon est déjà en cours. Réessaie dans quelques instants.'
+            type     : 'ERROR',
+            errorCode: 'ERR_ALREADY_RUNNING',
+            message  : 'ERR_ALREADY_RUNNING'
         }));
         process.exit(1);
     }
