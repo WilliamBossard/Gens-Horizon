@@ -140,6 +140,16 @@ class GoogleProvider {
     async deleteFile(fileId) {
         await this._drive.files.delete({ fileId });
     }
+
+    async getQuota() {
+        const res = await this._drive.about.get({ fields: 'storageQuota' });
+        const q   = res.data.storageQuota || {};
+        return {
+            used : parseInt(q.usage,   10) || 0,
+            total: parseInt(q.limit,   10) || 0,  
+            inDrive: parseInt(q.usageInDrive, 10) || 0,
+        };
+    }
 }
 
 module.exports = { GoogleProvider, getAuthUrl, handleAuthCode };
