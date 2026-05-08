@@ -257,6 +257,16 @@ class OneDriveProvider {
     }
 
     async deleteFile(fileId) { await this._call('DELETE', `/v1.0/me/drive/items/${fileId}`); }
+
+    async getQuota() {
+        const res = await this._call('GET', '/v1.0/me/drive?$select=quota');
+        const q   = res.body.quota || {};
+        return {
+            used      : q.used      || 0,
+            total     : q.total     || 0,
+            remaining : q.remaining || 0,
+        };
+    }
 }
 
 module.exports = { OneDriveProvider, getAuthUrl, handleAuthCode };
