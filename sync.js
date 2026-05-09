@@ -178,13 +178,18 @@ async function checkConnectivity() {
 }
 
 async function syncAllInstances() {
-    if (!acquireLock()) {
-        console.log(JSON.stringify({
-            type     : 'ERROR',
-            errorCode: 'ERR_ALREADY_RUNNING',
-            message  : 'ERR_ALREADY_RUNNING'
-        }));
-        process.exit(1);
+    const args   = process.argv.slice(2);
+    const isList = args.includes('--list');
+
+    if (!isList) {
+        if (!acquireLock()) {
+            console.log(JSON.stringify({
+                type     : 'ERROR',
+                errorCode: 'ERR_ALREADY_RUNNING',
+                message  : 'ERR_ALREADY_RUNNING'
+            }));
+            process.exit(1);
+        }
     }
 
     try {
@@ -194,9 +199,7 @@ async function syncAllInstances() {
         const cwd          = process.cwd();
         const settingsPath = path.join(cwd, 'horizon_settings.json');
         const syncInfoPath = path.join(cwd, 'last_sync.json');
-        const args         = process.argv.slice(2);
         const force        = args.includes('--force');
-        const isList       = args.includes('--list');
         const isDelete     = args.includes('--delete');
         const COMMANDS     = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
         const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
@@ -318,7 +321,6 @@ async function syncAllInstances() {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 0, instance: inst }));
                         verifyZipIntegrity(tempBase);
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 100, instance: inst }));
-
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: 0, instance: inst }));
                         extractZip(tempBase, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: pct, instance: inst }))
@@ -397,7 +399,7 @@ async function syncAllInstances() {
             console.log(JSON.stringify({ type: 'ERROR', message: e.message }));
         }
     } finally {
-        releaseLock();
+        if (!isList) releaseLock();
     }
 }
 
