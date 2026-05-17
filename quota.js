@@ -2,17 +2,9 @@
 
 const fs   = require('fs');
 const path = require('path');
-const dns  = require('dns').promises;
 
-const { getProvider } = require('./provider');
-
-async function checkConnectivity() {
-    const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
-    for (const host of hosts) {
-        try { await dns.lookup(host); return true; } catch (_) {}
-    }
-    return false;
-}
+const { getProvider }          = require('./provider');
+const { checkConnectivity }    = require('./utils');
 
 async function quota() {
     try {
@@ -40,7 +32,7 @@ async function quota() {
         const cloudFiles  = await provider.listFiles('GensHorizon_');
         const horizonUsed = cloudFiles.reduce((s, f) => s + (parseInt(f.size, 10) || 0), 0);
 
-        const instanceMap = {};
+        const instanceMap   = {};
         const deltaCountMap = {};
 
         for (const f of cloudFiles) {

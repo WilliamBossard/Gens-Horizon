@@ -3,11 +3,8 @@
 const fs   = require('fs');
 const path = require('path');
 
-const { getInstancesFolder } = require('./paths');
-
-function sanitizeInstanceName(name) {
-    return name.replace(/[/\\:.]/g, '_');
-}
+const { getInstancesFolder }      = require('./paths');
+const { sanitizeInstanceName }    = require('./utils');
 
 function rollback() {
     const args           = process.argv.slice(2);
@@ -17,7 +14,7 @@ function rollback() {
     if (!targetInstance) {
         const instDir = getInstancesFolder();
         if (!fs.existsSync(instDir)) {
-            console.log(JSON.stringify({ type: 'INFO', message: 'Aucun dossier d\'instances trouvé.' }));
+            console.log(JSON.stringify({ type: 'INFO', message: "Aucun dossier d'instances trouvé." }));
             return;
         }
         const rollbacks = fs.readdirSync(instDir)
@@ -25,15 +22,19 @@ function rollback() {
             .map(n => {
                 const tsStr = n.split('_rollback_').pop();
                 const ts    = parseInt(tsStr, 10);
-                return { folder: n, instance: n.split('_rollback_')[0], timestamp: isNaN(ts) ? null : new Date(ts).toISOString() };
+                return {
+                    folder   : n,
+                    instance : n.split('_rollback_')[0],
+                    timestamp: isNaN(ts) ? null : new Date(ts).toISOString(),
+                };
             });
         console.log(JSON.stringify({ type: 'ROLLBACK_LIST', data: rollbacks }));
         return;
     }
 
-    const safeInst    = sanitizeInstanceName(targetInstance);
-    const instDir     = getInstancesFolder();
-    const targetPath  = path.join(instDir, targetInstance);
+    const safeInst   = sanitizeInstanceName(targetInstance);
+    const instDir    = getInstancesFolder();
+    const targetPath = path.join(instDir, safeInst);
 
     let rollbackFolder = null;
     let rollbackTime   = 0;

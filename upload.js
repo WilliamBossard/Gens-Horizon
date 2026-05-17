@@ -5,88 +5,68 @@ const fsP      = fs.promises;
 const archiver = require('archiver');
 const AdmZip   = require('adm-zip');
 const path     = require('path');
-const dns      = require('dns').promises;
 
-const { getInstancesFolder, scanInstances } = require('./paths');
-const { generateManifest, compareManifests } = require('./scanner');
-const { getProvider }                        = require('./provider');
-const { acquireLock, releaseLock }           = require('./lock');
-const { withRetry }                          = require('./retry');
+const { getInstancesFolder, scanInstances }    = require('./paths');
+const { generateManifest, compareManifests }   = require('./scanner');
+const { getProvider }                          = require('./provider');
+const { acquireLock, releaseLock }             = require('./lock');
+const { withRetry }                            = require('./retry');
+const {
+    checkConnectivity,
+    readJsonSafe,
+    writeJsonAtomic,
+    sanitizeInstanceName,
+    registerTemp,
+    unregisterTemp,
+    setupProcessHandlers,
+} = require('./utils');
 
-const _tempFiles = new Set();
-function _registerTemp(p)   { _tempFiles.add(p); }
-function _unregisterTemp(p) { _tempFiles.delete(p); }
-function _cleanupTemps() {
-    for (const f of _tempFiles) {
-        try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (_) {}
-    }
-}
-process.on('SIGTERM', () => { _cleanupTemps(); releaseLock(); process.exit(0); });
-process.on('SIGINT',  () => { _cleanupTemps(); releaseLock(); process.exit(0); });
+setupProcessHandlers();
 
-function writeJsonAtomic(filePath, data) {
-    const tmp = filePath + '.tmp';
-    _registerTemp(tmp);
-    try {
-        fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-        fs.renameSync(tmp, filePath);
-    } finally {
-        _unregisterTemp(tmp);
-    }
-}
-
-function readJsonSafe(filePath, fallback = {}) {
-    try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (_) { return fallback; }
-}
-
-function sanitizeInstanceName(name) {
-    return name.replace(/[/\\:.]/g, '_');
-}
-
-async function getFolderSize(dir) {
+function getFolderSize(dir) {
     let total = 0;
     try {
-        const entries = await fsP.readdir(dir, { withFileTypes: true });
-        await Promise.all(entries.map(async (entry) => {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
             const fullPath = path.join(dir, entry.name);
             if (entry.isDirectory()) {
-                total += await getFolderSize(fullPath);
+                total += getFolderSize(fullPath);
             } else {
-                try { const stat = await fsP.stat(fullPath); total += stat.size; } catch (_) {}
+                try { total += fs.statSync(fullPath).size; } catch (_) {}
             }
-        }));
+        }
     } catch (_) {}
     return total;
 }
 
+
 function createFullZip(folder, tempZip, inst) {
-    return getFolderSize(folder).then(realTotal => {
-        let lastPct = -1;
-        return new Promise((resolve, reject) => {
-            const output  = fs.createWriteStream(tempZip);
-            const archive = archiver('zip', { zlib: { level: 6 } });
+    const realTotal = getFolderSize(folder);
+    let lastPct = -1;
+    return new Promise((resolve, reject) => {
+        const output  = fs.createWriteStream(tempZip);
+        const archive = archiver('zip', { zlib: { level: 6 } });
 
-            archive.on('progress', (p) => {
-                if (realTotal === 0) return;
-                const pct = Math.min(100, Math.round(p.fs.processedBytes / realTotal * 100));
-                if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
-                    console.log(JSON.stringify({ type: 'PROGRESS', step: 'COMPRESSING', value: pct, instance: inst }));
-                    lastPct = pct;
-                }
-            });
-            archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch(_) {} reject(err); });
-            output.on('close', resolve);
-            output.on('error', err => { try { fs.unlinkSync(tempZip); } catch(_) {} reject(err); });
-
-            archive.pipe(output);
-            archive.directory(folder, false);
-            archive.finalize();
+        archive.on('progress', (p) => {
+            if (realTotal === 0) return;
+            const pct = Math.min(100, Math.round(p.fs.processedBytes / realTotal * 100));
+            if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
+                console.log(JSON.stringify({ type: 'PROGRESS', step: 'COMPRESSING', value: pct, instance: inst }));
+                lastPct = pct;
+            }
         });
+        archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+        output.on('close', resolve);
+        output.on('error', err => { try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+
+        archive.pipe(output);
+        archive.directory(folder, false);
+        archive.finalize();
     });
 }
 
 async function createDeltaZip(folder, changed, deleted, tempZip, inst) {
-    const zip = new AdmZip();
+    const zip       = new AdmZip();
     const deltaInfo = { deletedFiles: deleted, createdAt: new Date().toISOString() };
     zip.addFile('__delta__.json', Buffer.from(JSON.stringify(deltaInfo, null, 2)));
 
@@ -108,20 +88,12 @@ async function createDeltaZip(folder, changed, deleted, tempZip, inst) {
     await new Promise((resolve, reject) => zip.writeZip(tempZip, err => err ? reject(err) : resolve()));
 }
 
-async function checkConnectivity() {
-    const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
-    for (const host of hosts) {
-        try { await dns.lookup(host); return true; } catch (_) {}
-    }
-    return false;
-}
-
 async function upload() {
     if (!acquireLock()) {
         console.log(JSON.stringify({
             type     : 'ERROR',
             errorCode: 'ERR_ALREADY_RUNNING',
-            message  : 'ERR_ALREADY_RUNNING'
+            message  : 'ERR_ALREADY_RUNNING',
         }));
         process.exit(1);
     }
@@ -171,6 +143,8 @@ async function upload() {
         const cloudIndex = {};
         for (const f of cloudFiles) cloudIndex[f.name] = f;
 
+        let syncState = readJsonSafe(syncInfoPath);
+
         for (const inst of localInstances) {
             try {
                 const folder       = path.join(getInstancesFolder(), inst);
@@ -179,7 +153,7 @@ async function upload() {
                 const manifestName = `GensHorizon_Manifest_${safeInst}.json`;
                 const manifestPath = path.join(cwd, `manifest_${safeInst}.json`);
 
-                const oldManifest     = fs.existsSync(manifestPath) ? readJsonSafe(manifestPath) : {};
+                const oldManifest     = readJsonSafe(manifestPath);
                 const currentManifest = await generateManifest(folder);
                 const diff            = compareManifests(oldManifest, currentManifest);
 
@@ -193,7 +167,7 @@ async function upload() {
 
                 if (!useSmartMode || force || !hasBaseOnCloud) {
                     if (!useSmartMode || force) {
-                        const deltasToDelete = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${inst}_`));
+                        const deltasToDelete = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${safeInst}_`));
                         for (const dName of deltasToDelete) {
                             await withRetry(() => provider.deleteFile(cloudIndex[dName].id), { ...retryOpts, label: `deleteFile(${dName})` });
                             console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `Delta supprimé : ${dName}` }));
@@ -201,7 +175,7 @@ async function upload() {
                     }
 
                     const tempZip = path.join(cwd, `temp_${safeInst}.zip`);
-                    _registerTemp(tempZip);
+                    registerTemp(tempZip);
                     try {
                         await createFullZip(folder, tempZip, inst);
                         const existingBase = hasBaseOnCloud ? cloudIndex[baseName].id : null;
@@ -215,22 +189,24 @@ async function upload() {
                             { ...retryOpts, label: `uploadZip(${inst})` }
                         );
 
-                        await withRetry(() => provider.uploadJSON(manifestName, currentManifest), { ...retryOpts, label: `uploadManifest(${inst})` });
+                        await withRetry(
+                            () => provider.uploadJSON(manifestName, currentManifest, cloudIndex[manifestName]?.id),
+                            { ...retryOpts, label: `uploadManifest(${inst})` }
+                        );
 
-                        const syncState = fs.existsSync(syncInfoPath) ? readJsonSafe(syncInfoPath) : {};
-                        syncState[inst] = result.modifiedTime;
+                        syncState[safeInst] = result?.modifiedTime || new Date().toISOString();
                         writeJsonAtomic(syncInfoPath, syncState);
                         writeJsonAtomic(manifestPath, currentManifest);
                         console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'FULL' }));
                     } finally {
                         try { if (fs.existsSync(tempZip)) fs.unlinkSync(tempZip); } catch (_) {}
-                        _unregisterTemp(tempZip);
+                        unregisterTemp(tempZip);
                     }
                     continue;
                 }
 
                 const DELTA_THRESHOLD = settings.deltaCleanupThreshold || 10;
-                const existingDeltas  = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${inst}_`));
+                const existingDeltas  = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${safeInst}_`));
                 if (existingDeltas.length >= DELTA_THRESHOLD) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${existingDeltas.length} delta(s) — repack complet (seuil: ${DELTA_THRESHOLD}).` }));
                     for (const dName of existingDeltas) {
@@ -238,7 +214,7 @@ async function upload() {
                     }
 
                     const tempZipRepack = path.join(cwd, `temp_${safeInst}.zip`);
-                    _registerTemp(tempZipRepack);
+                    registerTemp(tempZipRepack);
                     try {
                         await createFullZip(folder, tempZipRepack, inst);
                         const existingBase = cloudIndex[baseName] ? cloudIndex[baseName].id : null;
@@ -252,16 +228,18 @@ async function upload() {
                             { ...retryOpts, label: `uploadZipRepack(${inst})` }
                         );
 
-                        await withRetry(() => provider.uploadJSON(manifestName, currentManifest), { ...retryOpts, label: `uploadManifest(${inst})` });
+                        await withRetry(
+                            () => provider.uploadJSON(manifestName, currentManifest, cloudIndex[manifestName]?.id),
+                            { ...retryOpts, label: `uploadManifest(${inst})` }
+                        );
 
-                        const syncStateR = fs.existsSync(syncInfoPath) ? readJsonSafe(syncInfoPath) : {};
-                        syncStateR[inst] = repackResult?.modifiedTime || new Date().toISOString();
-                        writeJsonAtomic(syncInfoPath, syncStateR);
+                        syncState[safeInst] = repackResult?.modifiedTime || new Date().toISOString();
+                        writeJsonAtomic(syncInfoPath, syncState);
                         writeJsonAtomic(manifestPath, currentManifest);
                         console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'REPACK' }));
                     } finally {
                         try { if (fs.existsSync(tempZipRepack)) fs.unlinkSync(tempZipRepack); } catch (_) {}
-                        _unregisterTemp(tempZipRepack);
+                        unregisterTemp(tempZipRepack);
                     }
                     continue;
                 }
@@ -272,12 +250,12 @@ async function upload() {
                 const deltaName    = `GensHorizon_Delta_${safeInst}_${timestamp}.zip`;
                 const tempDelta    = path.join(cwd, `delta_${safeInst}_${timestamp}.zip`);
 
-                _registerTemp(tempDelta);
+                registerTemp(tempDelta);
                 try {
                     await createDeltaZip(folder, changedFiles, deletedFiles, tempDelta, inst);
                     console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: 0, instance: inst }));
 
-                    await withRetry(
+                    const deltaResult = await withRetry(
                         () => provider.uploadZip(
                             deltaName, tempDelta, null,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'UPLOADING', value: pct, instance: inst }))
@@ -285,17 +263,19 @@ async function upload() {
                         { ...retryOpts, label: `uploadDelta(${inst})` }
                     );
 
-                    await withRetry(() => provider.uploadJSON(manifestName, currentManifest), { ...retryOpts, label: `uploadManifest(${inst})` });
+                    await withRetry(
+                        () => provider.uploadJSON(manifestName, currentManifest, cloudIndex[manifestName]?.id),
+                        { ...retryOpts, label: `uploadManifest(${inst})` }
+                    );
 
-                    const syncState = fs.existsSync(syncInfoPath) ? readJsonSafe(syncInfoPath) : {};
-                    syncState[inst] = new Date().toISOString();
+                    syncState[safeInst] = deltaResult?.modifiedTime || new Date().toISOString();
                     writeJsonAtomic(syncInfoPath, syncState);
                     writeJsonAtomic(manifestPath, currentManifest);
                     const summary = `+${diff.added.length} ajouté(s), ~${diff.modified.length} modifié(s), -${diff.deleted.length} supprimé(s)`;
                     console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'SMART', summary }));
                 } finally {
                     try { if (fs.existsSync(tempDelta)) fs.unlinkSync(tempDelta); } catch (_) {}
-                    _unregisterTemp(tempDelta);
+                    unregisterTemp(tempDelta);
                 }
 
             } catch (instErr) {

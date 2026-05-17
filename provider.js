@@ -22,13 +22,20 @@ function getTokenPath(providerName, cwd) {
     return specific;
 }
 
-function getProvider(settings, cwd = process.cwd()) {
+async function getProvider(settings, cwd = process.cwd()) {
     const name      = getProviderName(settings);
     const tokenPath = getTokenPath(name, cwd);
 
     if (!fs.existsSync(tokenPath)) return null;
 
-    const tokenData = getSecureToken(tokenPath);
+    let tokenData;
+    try {
+        tokenData = getSecureToken(tokenPath);
+    } catch (e) {
+        process.stderr.write(`[provider] Token illisible pour "${name}" : ${e.message}\n`);
+        return null;
+    }
+
     if (!tokenData) return null;
 
     switch (name) {

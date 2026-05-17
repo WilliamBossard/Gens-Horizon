@@ -3,15 +3,35 @@
 const fs     = require('fs');
 const crypto = require('crypto');
 const os     = require('os');
+const path   = require('path');
 
-let username = "default";
+let username = 'default';
 try {
     username = os.userInfo().username;
 } catch (e) {
-    username = process.env.USER || process.env.LOGNAME || "unknown";
+    username = process.env.USER || process.env.LOGNAME || 'unknown';
 }
-const machineID  = os.hostname() + '_' + username;
-const SECRET_KEY = crypto.createHash('sha256').update(machineID).digest();
+const machineID = os.hostname() + '_' + username;
+const BASE_DIR = process.pkg
+    ? path.dirname(process.execPath)   
+    : path.dirname(process.argv[1]);  
+
+const SALT_FILE       = path.join(BASE_DIR, 'salt.key');
+const TOKEN_FILE_MODE = 0o600;
+
+let salt;
+if (fs.existsSync(SALT_FILE)) {
+    salt = fs.readFileSync(SALT_FILE);
+} else {
+    salt = crypto.randomBytes(16);
+    try {
+        fs.writeFileSync(SALT_FILE, salt, { mode: TOKEN_FILE_MODE });
+    } catch (e) {
+        process.stderr.write(`[Auth] Impossible d'écrire le salt : ${e.message}\n`);
+    }
+}
+
+const SECRET_KEY = crypto.pbkdf2Sync(machineID, salt, 100000, 32, 'sha256');
 
 function _encrypt(text) {
     const iv     = crypto.randomBytes(16);
@@ -34,7 +54,6 @@ function _decrypt(text) {
     }
 }
 
-const TOKEN_FILE_MODE = 0o600;
 
 function getSecureToken(filePath) {
     if (!fs.existsSync(filePath)) return null;

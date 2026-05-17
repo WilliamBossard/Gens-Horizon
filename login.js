@@ -116,8 +116,9 @@ async function loginDropbox() {
     const cred         = credentials.dropbox;
     const REDIRECT_URI = cred.redirect_uri;
     const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
+    const DROPBOX_AUTH_URL = 'https://www.dropbox.com/oauth2/authorize';
 
-    openBrowser(`${cred.auth_uri}?response_type=code&client_id=${cred.client_id}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline`);
+    openBrowser(`${DROPBOX_AUTH_URL}?response_type=code&client_id=${cred.client_id}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline`);
     return waitForCallback(async (code) => {
         const tokens = await httpsPost('api.dropbox.com', '/oauth2/token', new URLSearchParams({
             code, client_id: cred.client_id, client_secret: cred.client_secret,

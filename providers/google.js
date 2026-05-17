@@ -4,34 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const { Readable } = require('stream');
 const { google } = require('googleapis');
-const { credentials } = require('../config');
-const Auth = require('../Auth'); 
+const Auth = require('../Auth');
 
 const TOKEN_PATH = path.join(process.cwd(), 'token_google.json');
-
-function getAuthUrl() {
-    const oauth2 = new google.auth.OAuth2(
-        credentials.google.client_id,
-        credentials.google.client_secret,
-        credentials.google.redirect_uri
-    );
-    return oauth2.generateAuthUrl({
-        access_type: 'offline',
-        scope: ['https://www.googleapis.com/auth/drive.appdata'],
-        prompt: 'consent'
-    });
-}
-
-async function handleAuthCode(code) {
-    const oauth2 = new google.auth.OAuth2(
-        credentials.google.client_id,
-        credentials.google.client_secret,
-        credentials.google.redirect_uri
-    );
-    const { tokens } = await oauth2.getToken(code);
-    Auth.encryptToken(TOKEN_PATH, tokens);
-    return tokens;
-}
 
 class GoogleProvider {
     constructor(tokenData, credentials) {
@@ -53,7 +28,7 @@ class GoogleProvider {
 
     async listFiles(nameContains = '') {
         let files = [], pageToken = null;
-        const MAX_PAGES = 20; 
+        const MAX_PAGES = 20;
         let page = 0;
         do {
             const params = {
@@ -61,16 +36,16 @@ class GoogleProvider {
                 fields  : 'nextPageToken, files(id, name, modifiedTime, size)',
                 pageSize: 1000,
                 ...(pageToken && { pageToken }),
-                ...(nameContains && { q: `name contains '${nameContains.replace(/'/g, "\\'")}'` })
+                ...(nameContains && { q: `name contains '${nameContains.replace(/'/g, "\\'")}'` }),
             };
             const res = await this._drive.files.list(params);
             if (res.data.files) files = files.concat(res.data.files);
             pageToken = res.data.nextPageToken;
             page++;
         } while (pageToken && page < MAX_PAGES);
+
         if (page >= MAX_PAGES && pageToken) {
-            process.stderr.write(`[google] listFiles : limite de pagination atteinte (${MAX_PAGES} pages)
-`);
+            process.stderr.write(`[google] listFiles : limite de pagination atteinte (${MAX_PAGES} pages)\n`);
         }
         return files;
     }
@@ -108,7 +83,7 @@ class GoogleProvider {
                     const pct = Math.min(100, Math.round((evt.bytesRead / fileSize) * 100));
                     if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) { onProgress(pct); lastPct = pct; }
                 }
-            }
+            },
         };
 
         if (existingId) {
@@ -145,11 +120,11 @@ class GoogleProvider {
         const res = await this._drive.about.get({ fields: 'storageQuota' });
         const q   = res.data.storageQuota || {};
         return {
-            used : parseInt(q.usage,   10) || 0,
-            total: parseInt(q.limit,   10) || 0,  
-            inDrive: parseInt(q.usageInDrive, 10) || 0,
+            used   : parseInt(q.usage,        10) || 0,
+            total  : parseInt(q.limit,         10) || 0,
+            inDrive: parseInt(q.usageInDrive,  10) || 0,
         };
     }
 }
 
-module.exports = { GoogleProvider, getAuthUrl, handleAuthCode };
+module.exports = { GoogleProvider };

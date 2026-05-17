@@ -11,12 +11,24 @@ const IGNORED = new Set([
     'screenshots', 'backups', '.git', 'node_modules',
 ]);
 
+async function withConcurrency(limit, tasks) {
+    const executing = new Set();
+
+    for (let i = 0; i < tasks.length; i++) {
+        const p = tasks[i]().finally(() => executing.delete(p));
+        executing.add(p);
+        if (executing.size >= limit) await Promise.race(executing);
+    }
+
+    await Promise.all(executing);
+}
+
 function hashFile(filePath) {
     return new Promise((resolve, reject) => {
-        const hash = crypto.createHash('sha1');
+        const hash   = crypto.createHash('sha1');
         const stream = fs.createReadStream(filePath);
-        stream.on('data', chunk => hash.update(chunk));
-        stream.on('end', () => resolve(hash.digest('hex')));
+        stream.on('data',  chunk => hash.update(chunk));
+        stream.on('end',   ()    => resolve(hash.digest('hex')));
         stream.on('error', reject);
     });
 }
@@ -31,27 +43,29 @@ async function generateManifest(targetPath, basePath = targetPath) {
         throw err;
     }
 
-    for (const item of items) {
-        if (IGNORED.has(item.name) || item.name.startsWith('.')) continue;
+    const tasks = items
+        .filter(item => !IGNORED.has(item.name) && !item.name.startsWith('.'))
+        .map(item => async () => {
+            const fullPath     = path.join(targetPath, item.name);
+            const relativePath = path.relative(basePath, fullPath).replace(/\\/g, '/');
 
-        const fullPath     = path.join(targetPath, item.name);
-        const relativePath = path.relative(basePath, fullPath).replace(/\\/g, '/');
-
-        if (item.isDirectory()) {
-            try {
-                Object.assign(manifest, await generateManifest(fullPath, basePath));
-            } catch (err) {
-                if (err.code !== 'ENOENT') {
-                    process.stderr.write(`[scanner] Dossier ignoré (${err.code}) : ${fullPath}\n`);
+            if (item.isDirectory()) {
+                try {
+                    const subManifest = await generateManifest(fullPath, basePath);
+                    Object.assign(manifest, subManifest);
+                } catch (err) {
+                    if (err.code !== 'ENOENT') {
+                        process.stderr.write(`[scanner] Dossier ignoré (${err.code}) : ${fullPath}\n`);
+                    }
                 }
+            } else {
+                try {
+                    manifest[relativePath] = await hashFile(fullPath);
+                } catch (_) {}
             }
-        } else {
-            try {
-                manifest[relativePath] = await hashFile(fullPath);
-            } catch (_) {
-            }
-        }
-    }
+        });
+
+    await withConcurrency(64, tasks);
     return manifest;
 }
 
@@ -64,8 +78,8 @@ function compareManifests(oldM, newM) {
         hasChanges: added.length > 0 || modified.length > 0 || deleted.length > 0,
         added,
         modified,
-        deleted
+        deleted,
     };
 }
 
-module.exports = { generateManifest, compareManifests };
+module.exports = { generateManifest, compareManifests, withConcurrency };

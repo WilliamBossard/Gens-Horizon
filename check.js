@@ -2,26 +2,13 @@
 
 const fs   = require('fs');
 const path = require('path');
-const dns  = require('dns').promises;
 
-const { getInstancesFolder } = require('./paths');
-const { getProvider }        = require('./provider');
+const { getInstancesFolder }             = require('./paths');
+const { getProvider }                    = require('./provider');
+const { checkConnectivity, readJsonSafe, sanitizeInstanceName } = require('./utils');
 
 const SYNC_INFO_FILE = path.join(process.cwd(), 'last_sync.json');
 const SETTINGS_PATH  = path.join(process.cwd(), 'horizon_settings.json');
-
-function readJsonSafe(filePath, fallback = {}) {
-    try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
-    catch (_) { return fallback; }
-}
-
-async function checkConnectivity() {
-    const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
-    for (const host of hosts) {
-        try { await dns.lookup(host); return true; } catch (_) {}
-    }
-    return false;
-}
 
 async function check() {
     try {
@@ -31,20 +18,15 @@ async function check() {
             return;
         }
 
-        let settings = {};
-        if (fs.existsSync(SETTINGS_PATH)) {
-            try { settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')); } catch (_) {}
-        }
+        const settings = readJsonSafe(SETTINGS_PATH);
 
         const provider = await getProvider(settings);
         if (!provider) {
             console.log(JSON.stringify({ status: 'NOT_LOGGED_IN' }));
-            process.exit(0);
+            return;
         }
 
-        const syncInfo = fs.existsSync(SYNC_INFO_FILE)
-            ? readJsonSafe(SYNC_INFO_FILE)
-            : {};
+        const syncInfo = readJsonSafe(SYNC_INFO_FILE);
 
         const cloudFiles = await provider.listFiles('GensHorizon_');
         const cloudIndex = {};
@@ -70,9 +52,9 @@ async function check() {
                 .reduce((max, ts) => Math.max(max, ts), 0);
 
             const effectiveCloudTime = Math.max(cloudTime, latestDeltaTime);
-            const lastSyncTime       = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
-            const localPath          = path.join(getInstancesFolder(), instName);
-            const localExists        = fs.existsSync(localPath);
+            const lastSyncTime = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
+            const localPath  = path.join(getInstancesFolder(), instName);
+            const localExists = fs.existsSync(localPath);
 
             if (localExists && effectiveCloudTime > lastSyncTime) {
                 report.status = 'UPDATE_AVAILABLE';
