@@ -5,9 +5,8 @@ const https = require('https');
 const path  = require('path');
 const { credentials } = require('../config');
 const Auth = require('../Auth');
-
-const TOKEN_PATH = path.join(process.cwd(), 'token_dropbox.json');
-const creds = credentials.dropbox;
+const BASE_DIR   = process.pkg ? path.dirname(process.execPath) : path.dirname(process.argv[1]);
+const TOKEN_PATH = path.join(BASE_DIR, 'token_dropbox.json');
 
 function httpsRequest(options, bodyBuffer = null) {
     return new Promise((resolve, reject) => {
@@ -135,6 +134,8 @@ class DropboxProvider {
     async _uploadSession(name, srcPath, onProgress) {
         const CHUNK = 8 * 1024 * 1024;
         const total = fs.statSync(srcPath).size;
+
+        if (total === 0) throw new Error(`Dropbox _uploadSession : fichier vide non supporté (${name}).`);
         let offset = 0, lastPct = -1;
         const fd = fs.openSync(srcPath, 'r');
         const _report = (off) => {

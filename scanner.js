@@ -65,7 +65,7 @@ async function generateManifest(targetPath, basePath = targetPath) {
             }
         });
 
-    await withConcurrency(64, tasks);
+    await withConcurrency(32, tasks);
     return manifest;
 }
 

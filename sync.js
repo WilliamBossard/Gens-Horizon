@@ -21,7 +21,6 @@ const {
 
 setupProcessHandlers();
 
-
 function verifyZipIntegrity(zipPath) {
     try {
         const zip     = new AdmZip(zipPath);
@@ -94,7 +93,6 @@ function extractZip(zipPath, targetPath, onProgress) {
     }
 }
 
-
 function applyDelta(deltaZipPath, targetPath, onProgress) {
     const zip      = new AdmZip(deltaZipPath);
     const entries  = zip.getEntries();
@@ -132,7 +130,7 @@ if (entry.isDirectory) {
 
     for (const relPath of (deltaInfo.deletedFiles || [])) {
         const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
-        if (!path.resolve(absPath).startsWith(path.resolve(targetPath))) {
+        if (!path.resolve(absPath).startsWith(path.resolve(targetPath) + path.sep)) {
             process.stderr.write(`[ALERTE SÉCURITÉ] Suppression ignorée (hors instance) : ${absPath}\n`);
             continue;
         }
@@ -326,6 +324,7 @@ async function syncAllInstances() {
                         unregisterTemp(tempDelta);
                     }
                 }
+
                 const lastDelta = pendingDeltas.length > 0 ? pendingDeltas[pendingDeltas.length - 1] : null;
                 syncState[safeInst] = lastDelta ? new Date(lastDelta.ts).toISOString() : baseFile.modifiedTime;
                 writeJsonAtomic(syncInfoPath, syncState);

@@ -5,10 +5,12 @@ const dns = require('dns').promises;
 
 async function checkConnectivity() {
     const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
-    for (const host of hosts) {
-        try { await dns.lookup(host); return true; } catch (_) {}
+    try {
+        await Promise.any(hosts.map(h => dns.lookup(h)));
+        return true;
+    } catch {
+        return false;
     }
-    return false;
 }
 
 
@@ -28,6 +30,7 @@ function cleanupTemps() {
     }
 }
 
+
 function writeJsonAtomic(filePath, data) {
     const tmp = filePath + '.tmp';
     registerTemp(tmp);
@@ -44,7 +47,10 @@ function sanitizeInstanceName(name) {
     return name.replace(/[/\\:.]/g, '_');
 }
 
+let _handlersSetup = false;
 function setupProcessHandlers() {
+    if (_handlersSetup) return;
+    _handlersSetup = true;
     process.on('exit', cleanupTemps);
     process.on('uncaughtException', (err) => {
         console.error('Erreur critique inattendue :', err);

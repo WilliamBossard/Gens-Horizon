@@ -4,6 +4,9 @@ const fs   = require('fs');
 const path = require('path');
 const { getSecureToken }  = require('./Auth');
 const { credentials }     = require('./config');
+const BASE_DIR = process.pkg
+    ? path.dirname(process.execPath)
+    : path.dirname(process.argv[1]);
 
 function getProviderName(settings) {
     const cliArg = process.argv.find(a => a.startsWith('--provider='));
@@ -11,20 +14,20 @@ function getProviderName(settings) {
     return (settings && settings.provider) || 'google';
 }
 
-function getTokenPath(providerName, cwd) {
-    const specific = path.join(cwd, `token_${providerName}.json`);
+function getTokenPath(providerName, _cwd) {
+    const specific = path.join(BASE_DIR, `token_${providerName}.json`);
     if (fs.existsSync(specific)) return specific;
 
     if (providerName === 'google') {
-        const legacy = path.join(cwd, 'token.json');
+        const legacy = path.join(BASE_DIR, 'token.json');
         if (fs.existsSync(legacy)) return legacy;
     }
     return specific;
 }
 
-async function getProvider(settings, cwd = process.cwd()) {
+async function getProvider(settings, _cwd) {
     const name      = getProviderName(settings);
-    const tokenPath = getTokenPath(name, cwd);
+    const tokenPath = getTokenPath(name);
 
     if (!fs.existsSync(tokenPath)) return null;
 

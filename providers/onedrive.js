@@ -6,11 +6,10 @@ const path  = require('path');
 const os    = require('os');
 const { credentials } = require('../config');
 const Auth = require('../Auth');
-
-const TOKEN_PATH = path.join(process.cwd(), 'token_onedrive.json');
+const BASE_DIR   = process.pkg ? path.dirname(process.execPath) : path.dirname(process.argv[1]);
+const TOKEN_PATH = path.join(BASE_DIR, 'token_onedrive.json');
 const GRAPH_HOST = 'graph.microsoft.com';
 const APP_ROOT   = '/v1.0/me/drive/special/approot';
-const creds = credentials.onedrive;
 
 function graphRequest(method, graphPath, accessToken, body = null) {
     const bodyBuf = body ? Buffer.from(JSON.stringify(body)) : null;

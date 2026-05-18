@@ -4,8 +4,9 @@ const fs   = require('fs');
 const path = require('path');
 
 const LOCK_FILE = path.join(process.cwd(), 'horizon.lock');
+const MAX_LOCK_RETRIES = 5;
 
-function acquireLock() {
+function acquireLock(attempt = 0) {
     let fd;
     try {
         fd = fs.openSync(
@@ -29,11 +30,19 @@ function acquireLock() {
                     if (killErr.code === 'EPERM') return false; 
                     process.stderr.write(`[lock] Verrou périmé (PID ${pid} mort) — nettoyage.\n`);
                     fs.unlinkSync(LOCK_FILE);
-                    return acquireLock(); 
+                    if (attempt >= MAX_LOCK_RETRIES) {
+                        process.stderr.write(`[lock] Impossible d'acquérir le verrou après ${MAX_LOCK_RETRIES} tentatives.\n`);
+                        return false;
+                    }
+                    return acquireLock(attempt + 1);
                 }
             }
         } catch (_) {
-            return acquireLock();
+            if (attempt >= MAX_LOCK_RETRIES) {
+                process.stderr.write(`[lock] Impossible de lire le verrou après ${MAX_LOCK_RETRIES} tentatives.\n`);
+                return false;
+            }
+            return acquireLock(attempt + 1);
         }
 
         return false;

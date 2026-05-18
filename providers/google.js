@@ -5,8 +5,8 @@ const path = require('path');
 const { Readable } = require('stream');
 const { google } = require('googleapis');
 const Auth = require('../Auth');
-
-const TOKEN_PATH = path.join(process.cwd(), 'token_google.json');
+const BASE_DIR   = process.pkg ? path.dirname(process.execPath) : path.dirname(process.argv[1]);
+const TOKEN_PATH = path.join(BASE_DIR, 'token_google.json');
 
 class GoogleProvider {
     constructor(tokenData, credentials) {

@@ -39,7 +39,6 @@ function getFolderSize(dir) {
     return total;
 }
 
-
 function createFullZip(folder, tempZip, inst) {
     const realTotal = getFolderSize(folder);
     let lastPct = -1;
@@ -77,12 +76,10 @@ async function createDeltaZip(folder, changed, deleted, tempZip, inst) {
         const zipDir = path.posix.dirname(relPath) === '.' ? '' : path.posix.dirname(relPath);
         zip.addLocalFile(absPath, zipDir);
         done++;
-        if (changed.length > 0) {
-            const pct = Math.min(100, Math.round(done / changed.length * 100));
-            if (pct !== lastPct && (pct >= lastPct + 5 || pct === 100)) {
-                console.log(JSON.stringify({ type: 'PROGRESS', step: 'COMPRESSING', value: pct, instance: inst }));
-                lastPct = pct;
-            }
+        const pct = Math.min(100, Math.round(done / changed.length * 100));
+        if (pct !== lastPct && (pct >= lastPct + 5 || pct === 100)) {
+            console.log(JSON.stringify({ type: 'PROGRESS', step: 'COMPRESSING', value: pct, instance: inst }));
+            lastPct = pct;
         }
     }
     await new Promise((resolve, reject) => zip.writeZip(tempZip, err => err ? reject(err) : resolve()));

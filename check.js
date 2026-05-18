@@ -5,7 +5,9 @@ const path = require('path');
 
 const { getInstancesFolder }             = require('./paths');
 const { getProvider }                    = require('./provider');
-const { checkConnectivity, readJsonSafe, sanitizeInstanceName } = require('./utils');
+const { checkConnectivity, readJsonSafe, sanitizeInstanceName, setupProcessHandlers } = require('./utils');
+
+setupProcessHandlers();
 
 const SYNC_INFO_FILE = path.join(process.cwd(), 'last_sync.json');
 const SETTINGS_PATH  = path.join(process.cwd(), 'horizon_settings.json');
@@ -52,7 +54,8 @@ async function check() {
                 .reduce((max, ts) => Math.max(max, ts), 0);
 
             const effectiveCloudTime = Math.max(cloudTime, latestDeltaTime);
-            const lastSyncTime = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
+            const rawSyncTime  = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
+            const lastSyncTime = isNaN(rawSyncTime) ? 0 : rawSyncTime;
             const localPath  = path.join(getInstancesFolder(), instName);
             const localExists = fs.existsSync(localPath);
 

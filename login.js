@@ -96,10 +96,14 @@ async function loginGoogle() {
     const cred         = credentials.google;
     const REDIRECT_URI = cred.redirect_uri;
     const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
-    const { google }   = require('googleapis');
-
-    const oauth2 = new google.auth.OAuth2(cred.client_id, cred.client_secret, REDIRECT_URI);
-    const authUrl = oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: ['https://www.googleapis.com/auth/drive.appdata'] });
+    const authUrl = `${cred.auth_uri}?${new URLSearchParams({
+        client_id    : cred.client_id,
+        redirect_uri : REDIRECT_URI,
+        response_type: 'code',
+        access_type  : 'offline',
+        prompt       : 'consent',
+        scope        : 'https://www.googleapis.com/auth/drive.appdata',
+    }).toString()}`;
 
     openBrowser(authUrl);
     return waitForCallback(async (code) => {

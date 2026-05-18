@@ -24,7 +24,6 @@ jobs:
       - name: Installation des dépendances
         run: npm install
 
-      # NOUVELLE ÉTAPE : Création du config.js avec les 3 providers
       - name: Injection des identifiants API (config.js)
         run: |
           cat << 'EOF' > config.js

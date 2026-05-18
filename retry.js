@@ -20,14 +20,10 @@ function isRetryable(err) {
 }
 
 async function withRetry(fn, { maxRetries = 3, baseDelay = 1500, label = 'opération' } = {}) {
-    let lastErr;
-
     for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
         try {
             return await fn();
         } catch (err) {
-            lastErr = err;
-
             const isLast = attempt > maxRetries;
             if (isLast || !isRetryable(err)) throw err;
 
@@ -39,8 +35,6 @@ async function withRetry(fn, { maxRetries = 3, baseDelay = 1500, label = 'opéra
             await new Promise(r => setTimeout(r, delay));
         }
     }
-
-    throw lastErr;
 }
 
 module.exports = { withRetry, isRetryable };

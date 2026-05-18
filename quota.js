@@ -4,7 +4,9 @@ const fs   = require('fs');
 const path = require('path');
 
 const { getProvider }          = require('./provider');
-const { checkConnectivity }    = require('./utils');
+const { checkConnectivity, setupProcessHandlers } = require('./utils');
+
+setupProcessHandlers();
 
 async function quota() {
     try {
