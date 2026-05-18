@@ -55,6 +55,8 @@ async function quota() {
                 isDelta  = true;
             } else if (f.name.startsWith('GensHorizon_Manifest_')) {
                 instName = f.name.replace('GensHorizon_Manifest_', '').replace('.json', '');
+            }else if (f.name.startsWith('GensHorizon_Meta_')) { 
+                instName = f.name.replace('GensHorizon_Meta_', '').replace('.json', '');
             }
 
             if (instName) {

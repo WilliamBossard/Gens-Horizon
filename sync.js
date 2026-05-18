@@ -191,6 +191,26 @@ async function syncAllInstances() {
         for (const f of cloudFiles) cloudIndex[f.name] = f;
 
         if (isList) {
+            const metaFiles = Object.keys(cloudIndex).filter(n => n.startsWith('GensHorizon_Meta_'));
+            const downloadPromises = metaFiles.map(async (mName) => {
+                const instName = mName.replace('GensHorizon_Meta_', '').replace('.json', '');
+                const localMetaPath = path.join(cwd, `meta_${instName}.json`);
+                
+                let needsDownload = true;
+                if (fs.existsSync(localMetaPath)) {
+                    const localStat = fs.statSync(localMetaPath);
+                    const cloudTime = new Date(cloudIndex[mName].modifiedTime).getTime();
+                    if (localStat.mtime.getTime() >= cloudTime) needsDownload = false;
+                }
+                
+                if (needsDownload) {
+                    try {
+                        const data = await provider.downloadJSON(cloudIndex[mName].id);
+                        writeJsonAtomic(localMetaPath, data);
+                    } catch(_) {} 
+                }
+            });
+            await Promise.all(downloadPromises);
             const list = [...new Set(
                 Object.keys(cloudIndex)
                     .filter(n => n.startsWith('GensHorizon_Backup_'))
@@ -212,6 +232,7 @@ async function syncAllInstances() {
             const toDelete   = Object.keys(cloudIndex).filter(n =>
                 n === `GensHorizon_Backup_${safeTarget}.zip` ||
                 n === `GensHorizon_Manifest_${safeTarget}.json` ||
+                n === `GensHorizon_Meta_${safeTarget}.json` ||
                 n.startsWith(`GensHorizon_Delta_${safeTarget}_`)
             );
             for (const n of toDelete) {
@@ -224,6 +245,8 @@ async function syncAllInstances() {
                 delete syncState[safeTarget];
                 writeJsonAtomic(syncInfoPath, syncState);
             }
+            const metaPath = path.join(cwd, `meta_${safeTarget}.json`);
+            if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
             console.log(JSON.stringify({ type: 'SUCCESS', instance: targetInstance, message: 'Supprimé du cloud.' }));
             return;
         }

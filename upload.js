@@ -162,6 +162,28 @@ async function upload() {
                 const hasBaseOnCloud = !!cloudIndex[baseName];
                 const useSmartMode   = settings.syncMode === 'SMART';
 
+                const metaName = `GensHorizon_Meta_${safeInst}.json`;
+                let metaData = { iconData: "", loader: "vanilla" };
+                const instJsonPath = path.join(folder, 'instance.json');
+                if (fs.existsSync(instJsonPath)) {
+                    try {
+                        const instObj = JSON.parse(fs.readFileSync(instJsonPath, 'utf8'));
+                        metaData.loader = instObj.loader || "vanilla";
+                        if (instObj.icon && instObj.icon.startsWith('file://')) {
+                            try {
+                                const localIconPath = require('url').fileURLToPath(instObj.icon);
+                                if (fs.existsSync(localIconPath)) {
+                                    const ext = path.extname(localIconPath).toLowerCase() === '.jpg' ? 'jpeg' : 'png';
+                                    const b64 = fs.readFileSync(localIconPath, 'base64');
+                                    metaData.iconData = `data:image/${ext};base64,${b64}`;
+                                }
+                            } catch(_) { metaData.iconData = instObj.icon; }
+                        } else {
+                            metaData.iconData = instObj.icon || "";
+                        }
+                    } catch(_) {}
+                }
+
                 if (!diff.hasChanges && !force && hasBaseOnCloud) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `Aucun changement pour ${inst}, upload ignoré.` }));
                     continue;
@@ -194,6 +216,10 @@ async function upload() {
                         await withRetry(
                             () => provider.uploadJSON(manifestName, currentManifest, cloudIndex[manifestName]?.id),
                             { ...retryOpts, label: `uploadManifest(${inst})` }
+                        );
+                        await withRetry(
+                            () => provider.uploadJSON(metaName, metaData, cloudIndex[metaName]?.id),
+                            { ...retryOpts, label: `uploadMeta(${inst})` }
                         );
 
                         syncState[safeInst] = result?.modifiedTime || new Date().toISOString();
@@ -234,6 +260,10 @@ async function upload() {
                             () => provider.uploadJSON(manifestName, currentManifest, cloudIndex[manifestName]?.id),
                             { ...retryOpts, label: `uploadManifest(${inst})` }
                         );
+                        await withRetry(
+                            () => provider.uploadJSON(metaName, metaData, cloudIndex[metaName]?.id),
+                            { ...retryOpts, label: `uploadMeta(${inst})` }
+                        );
 
                         syncState[safeInst] = repackResult?.modifiedTime || new Date().toISOString();
                         writeJsonAtomic(syncInfoPath, syncState);
@@ -268,6 +298,10 @@ async function upload() {
                     await withRetry(
                         () => provider.uploadJSON(manifestName, currentManifest, cloudIndex[manifestName]?.id),
                         { ...retryOpts, label: `uploadManifest(${inst})` }
+                    );
+                    await withRetry(
+                        () => provider.uploadJSON(metaName, metaData, cloudIndex[metaName]?.id),
+                        { ...retryOpts, label: `uploadMeta(${inst})` }
                     );
 
                     syncState[safeInst] = deltaResult?.modifiedTime || new Date().toISOString();
