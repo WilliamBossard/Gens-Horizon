@@ -6,8 +6,6 @@ const path  = require('path');
 const os    = require('os');
 const { credentials } = require('../config');
 const Auth = require('../Auth');
-const BASE_DIR   = process.pkg ? path.dirname(process.execPath) : path.dirname(process.argv[1]);
-const TOKEN_PATH = path.join(BASE_DIR, 'token_onedrive.json');
 const GRAPH_HOST = 'graph.microsoft.com';
 const APP_ROOT   = '/v1.0/me/drive/special/approot';
 
@@ -33,10 +31,11 @@ function graphRequest(method, graphPath, accessToken, body = null) {
 }
 
 class OneDriveProvider {
-    constructor(tokenData, credentials) {
+    constructor(tokenData, credentials, tokenPath) {
         this._token   = tokenData.access_token;
         this._refresh = tokenData.refresh_token;
         this._creds   = credentials;
+        this._tokenPath = tokenPath;
     }
 
     async _refreshToken() {
@@ -58,7 +57,7 @@ class OneDriveProvider {
         if (!res.body.access_token) throw new Error('OneDrive token refresh failed: ' + (res.body.error_description || res.body.error || res.statusCode));
         this._token = res.body.access_token;
         if (res.body.refresh_token) this._refresh = res.body.refresh_token;
-        Auth.encryptToken(TOKEN_PATH, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'Bearer' });
+        Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'Bearer' }); 
     }
 
     async _call(method, graphPath, body = null, _retried = false) {

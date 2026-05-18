@@ -5,13 +5,12 @@ const path = require('path');
 const { Readable } = require('stream');
 const { google } = require('googleapis');
 const Auth = require('../Auth');
-const BASE_DIR   = process.pkg ? path.dirname(process.execPath) : path.dirname(process.argv[1]);
-const TOKEN_PATH = path.join(BASE_DIR, 'token_google.json');
 
 class GoogleProvider {
-    constructor(tokenData, credentials) {
+    constructor(tokenData, credentials, tokenPath) {
         this._creds     = credentials;
         this._tokenData = tokenData;
+        this._tokenPath = tokenPath;
 
         const oauth2 = new google.auth.OAuth2(credentials.client_id, credentials.client_secret);
         oauth2.setCredentials(tokenData);
@@ -19,7 +18,7 @@ class GoogleProvider {
         oauth2.on('tokens', (newTokens) => {
             const merged = { ...this._tokenData, ...newTokens };
             this._tokenData = merged;
-            try { Auth.encryptToken(TOKEN_PATH, merged); }
+            try { Auth.encryptToken(this._tokenPath, merged); }
             catch (e) { process.stderr.write(`[google] Échec sauvegarde token rafraîchi : ${e.message}\n`); }
         });
 

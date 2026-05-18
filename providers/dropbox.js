@@ -5,8 +5,6 @@ const https = require('https');
 const path  = require('path');
 const { credentials } = require('../config');
 const Auth = require('../Auth');
-const BASE_DIR   = process.pkg ? path.dirname(process.execPath) : path.dirname(process.argv[1]);
-const TOKEN_PATH = path.join(BASE_DIR, 'token_dropbox.json');
 
 function httpsRequest(options, bodyBuffer = null) {
     return new Promise((resolve, reject) => {
@@ -73,10 +71,11 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
 }
 
 class DropboxProvider {
-    constructor(tokenData, credentials) {
+    constructor(tokenData, credentials, tokenPath) {
         this._token   = tokenData.access_token;
         this._refresh = tokenData.refresh_token;
         this._creds   = credentials;
+        this._tokenPath = tokenPath;
     }
 
     _authHeader() { return `Bearer ${this._token}`; }
@@ -112,7 +111,7 @@ class DropboxProvider {
         }, buf);
         if (!res.body.access_token) throw new Error('Dropbox token refresh failed: ' + (res.body.error_description || res.body.error || res.statusCode));
         this._token = res.body.access_token;
-        Auth.encryptToken(TOKEN_PATH, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'bearer' });
+        Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'bearer' }); 
     }
 
     async listFiles(nameContains = '') {

@@ -1,9 +1,7 @@
 'use strict';
 
 const fs       = require('fs');
-const fsP      = fs.promises;
 const archiver = require('archiver');
-const AdmZip   = require('adm-zip');
 const path     = require('path');
 
 const { getInstancesFolder, scanInstances }    = require('./paths');
@@ -65,25 +63,36 @@ function createFullZip(folder, tempZip, inst) {
     });
 }
 
-async function createDeltaZip(folder, changed, deleted, tempZip, inst) {
-    const zip       = new AdmZip();
-    const deltaInfo = { deletedFiles: deleted, createdAt: new Date().toISOString() };
-    zip.addFile('__delta__.json', Buffer.from(JSON.stringify(deltaInfo, null, 2)));
+function createDeltaZip(folder, changed, deleted, tempZip, inst) {
+    return new Promise((resolve, reject) => {
+        const output = fs.createWriteStream(tempZip);
+        const archive = archiver('zip', { zlib: { level: 6 } });
 
-    let done = 0, lastPct = -1;
-    for (const relPath of changed) {
-        const absPath = path.join(folder, relPath.replace(/\//g, path.sep));
-        if (!fs.existsSync(absPath)) continue;
-        const zipDir = path.posix.dirname(relPath) === '.' ? '' : path.posix.dirname(relPath);
-        zip.addLocalFile(absPath, zipDir);
-        done++;
-        const pct = Math.min(100, Math.round(done / changed.length * 100));
-        if (pct !== lastPct && (pct >= lastPct + 5 || pct === 100)) {
-            console.log(JSON.stringify({ type: 'PROGRESS', step: 'COMPRESSING', value: pct, instance: inst }));
-            lastPct = pct;
+        output.on('close', resolve);
+        archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+
+        archive.pipe(output);
+
+        // Ajout du fichier de métadonnées delta
+        const deltaInfo = { deletedFiles: deleted, createdAt: new Date().toISOString() };
+        archive.append(JSON.stringify(deltaInfo, null, 2), { name: '__delta__.json' });
+
+        let done = 0, lastPct = -1;
+        for (const relPath of changed) {
+            const absPath = path.join(folder, relPath.replace(/\//g, path.sep));
+            if (!fs.existsSync(absPath)) continue;
+            
+            archive.file(absPath, { name: relPath });
+            done++;
+            
+            const pct = Math.min(100, Math.round(done / changed.length * 100));
+            if (pct !== lastPct && (pct >= lastPct + 5 || pct === 100)) {
+                console.log(JSON.stringify({ type: 'PROGRESS', step: 'COMPRESSING', value: pct, instance: inst }));
+                lastPct = pct;
+            }
         }
-    }
-    await new Promise((resolve, reject) => zip.writeZip(tempZip, err => err ? reject(err) : resolve()));
+        archive.finalize();
+    });
 }
 
 async function upload() {
@@ -172,9 +181,13 @@ async function upload() {
                         if (instObj.icon && instObj.icon.startsWith('file://')) {
                             try {
                                 const localIconPath = require('url').fileURLToPath(instObj.icon);
-                                if (fs.existsSync(localIconPath)) {
-                                    const ext = path.extname(localIconPath).toLowerCase() === '.jpg' ? 'jpeg' : 'png';
-                                    const b64 = fs.readFileSync(localIconPath, 'base64');
+                                const resolvedIcon = path.resolve(localIconPath);
+                                const resolvedFolder = path.resolve(folder);
+                                
+                                if (fs.existsSync(resolvedIcon) && resolvedIcon.startsWith(resolvedFolder + path.sep)) {
+                                    const rawExt = path.extname(resolvedIcon).toLowerCase();
+                                    const ext = (rawExt === '.jpg' || rawExt === '.jpeg') ? 'jpeg' : 'png';
+                                    const b64 = fs.readFileSync(resolvedIcon, 'base64');
                                     metaData.iconData = `data:image/${ext};base64,${b64}`;
                                 }
                             } catch(_) { metaData.iconData = instObj.icon; }
