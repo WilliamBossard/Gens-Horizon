@@ -67,8 +67,8 @@ function extractZip(zipPath, targetPath, onProgress) {
                         const writeStream = fs.createWriteStream(dest);
                         readStream.pipe(writeStream);
                         writeStream.on("close", () => { done++; reportProgress(); zipfile.readEntry(); });
-                        writeStream.on("error", (e) => { zipfile.close(); reject(e); });
-                        readStream.on("error", (e) => { zipfile.close(); reject(e); });
+                        writeStream.on("error", (e) => { readStream.destroy(); writeStream.destroy(); zipfile.close(); reject(e); });
+                        readStream.on("error", (e) => { writeStream.destroy(); zipfile.close(); reject(e); });
                     });
                 }
             });
@@ -108,6 +108,7 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                             try { deltaInfo = JSON.parse(data); } catch (_) {}
                             done++; reportProgress(); zipfile.readEntry();
                         });
+                        readStream.on('error', (e) => { zipfile.close(); reject(e); }); 
                     });
                     return;
                 }
@@ -128,8 +129,8 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                         const writeStream = fs.createWriteStream(dest);
                         readStream.pipe(writeStream);
                         writeStream.on("close", () => { done++; reportProgress(); zipfile.readEntry(); });
-                        writeStream.on("error", (e) => { zipfile.close(); reject(e); });
-                        readStream.on("error", (e) => { zipfile.close(); reject(e); });
+                        writeStream.on("error", (e) => { readStream.destroy(); writeStream.destroy(); zipfile.close(); reject(e); });
+                        readStream.on("error", (e) => { writeStream.destroy(); zipfile.close(); reject(e); });
                     });
                 }
             });

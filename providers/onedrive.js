@@ -209,8 +209,18 @@ class OneDriveProvider {
             const dest = fs.createWriteStream(destPath);
             let downloaded = 0, lastPct = -1;
             const req = https.request({ hostname: loc.hostname, path: loc.pathname + loc.search, method: 'GET' }, (res) => {
-                res.on('data', chunk => {
-                    downloaded += chunk.length;
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+                res.resume();
+                dest.destroy();
+                try { fs.unlinkSync(destPath); } catch (_) {}
+                return reject(Object.assign(
+                    new Error(`OneDrive download HTTP ${res.statusCode}`),
+                    { statusCode: res.statusCode }
+                ));
+            }
+            
+            res.on('data', chunk => {
+                downloaded += chunk.length;
                     if (totalSize > 0 && onProgress) {
                         const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
                         if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) { onProgress(pct); lastPct = pct; }

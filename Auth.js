@@ -27,7 +27,7 @@ if (fs.existsSync(SALT_FILE)) {
     try {
         fs.writeFileSync(SALT_FILE, salt, { mode: TOKEN_FILE_MODE });
     } catch (e) {
-        process.stderr.write(`[Auth] Impossible d'écrire le salt : ${e.message}\n`);
+        throw new Error(`[Auth] ERREUR CRITIQUE : Impossible d'écrire le fichier de sécurité (salt.key). Vérifiez les permissions. Détail : ${e.message}`);
     }
 }
 

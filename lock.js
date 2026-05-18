@@ -49,9 +49,9 @@ function acquireLock(attempt = 0) {
     }
 
     const release = () => releaseLock();
-    process.on('exit',    release);
-    process.on('SIGTERM', () => { release(); process.exit(0); });
-    process.on('SIGINT',  () => { release(); process.exit(0); });
+    process.once('exit',    release); 
+    process.once('SIGTERM', () => { release(); process.exit(0); });
+    process.once('SIGINT',  () => { release(); process.exit(0); });
 
     return true;
 }

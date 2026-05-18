@@ -183,7 +183,7 @@ async function upload() {
                                 const resolvedIcon = path.resolve(localIconPath);
                                 const resolvedFolder = path.resolve(folder);
                                 
-                                if (fs.existsSync(resolvedIcon) && resolvedIcon.startsWith(resolvedFolder + path.sep)) {
+                                if (fs.existsSync(resolvedIcon) && resolvedIcon.startsWith(resolvedFolder + path.sep) && fs.statSync(resolvedIcon).size < 512 * 1024) {
                                     const rawExt = path.extname(resolvedIcon).toLowerCase().replace('.', '');
                                     const ext = (rawExt === 'jpg') ? 'jpeg' : (rawExt || 'png');
                                     const b64 = fs.readFileSync(resolvedIcon, 'base64');
