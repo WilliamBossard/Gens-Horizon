@@ -47,6 +47,11 @@ function sanitizeInstanceName(name) {
     return name.replace(/[/\\:.]/g, '_');
 }
 
+function getFolderFromName(name) {
+    if (!name) return '';
+    return name.replace(/[^a-z0-9]/gi, '_');
+}
+
 let _handlersSetup = false;
 function setupProcessHandlers() {
     if (_handlersSetup) return;
@@ -68,4 +73,5 @@ module.exports = {
     unregisterTemp,
     cleanupTemps,
     setupProcessHandlers,
+    getFolderFromName,
 };

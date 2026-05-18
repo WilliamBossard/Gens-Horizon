@@ -24,22 +24,29 @@ function getInstancesFolder() {
 
 function scanInstances() {
     const instancesDir = getInstancesFolder();
-
     if (!fs.existsSync(instancesDir)) {
         fs.mkdirSync(instancesDir, { recursive: true });
         return [];
     }
 
     const items = fs.readdirSync(instancesDir);
-    const instances = items.filter(item => {
+    const instances = [];
+    for (const item of items) {
         try {
             const fullPath = path.join(instancesDir, item);
-            return fs.statSync(fullPath).isDirectory();
-        } catch (_) {
-            return false;
-        }
-    });
-
+            if (fs.statSync(fullPath).isDirectory()) {
+                const jsonPath = path.join(fullPath, 'instance.json');
+                if (fs.existsSync(jsonPath)) {
+                    const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+                    if (data.name) {
+                        instances.push(data.name);
+                        continue; 
+                    }
+                }
+                instances.push(item);
+            }
+        } catch (_) {}
+    }
     return instances;
 }
 

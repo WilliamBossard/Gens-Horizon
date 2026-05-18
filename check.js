@@ -5,7 +5,7 @@ const path = require('path');
 
 const { getInstancesFolder }             = require('./paths');
 const { getProvider }                    = require('./provider');
-const { checkConnectivity, readJsonSafe, sanitizeInstanceName, setupProcessHandlers } = require('./utils');
+const { checkConnectivity, readJsonSafe, sanitizeInstanceName, setupProcessHandlers, getFolderFromName } = require('./utils');
 
 setupProcessHandlers();
 
@@ -56,7 +56,7 @@ async function check() {
             const effectiveCloudTime = Math.max(cloudTime, latestDeltaTime);
             const rawSyncTime  = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
             const lastSyncTime = isNaN(rawSyncTime) ? 0 : rawSyncTime;
-            const localPath  = path.join(getInstancesFolder(), instName);
+            const localPath  = path.join(getInstancesFolder(), getFolderFromName(instName));
             const localExists = fs.existsSync(localPath);
 
             if (localExists && effectiveCloudTime > lastSyncTime) {

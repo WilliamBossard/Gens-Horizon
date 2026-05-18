@@ -19,6 +19,7 @@ const {
     registerTemp,
     unregisterTemp,
     setupProcessHandlers,
+    getFolderFromName,
 } = require('./utils');
 
 setupProcessHandlers();
@@ -130,7 +131,7 @@ async function upload() {
         let localInstances = [];
         if (targetInstance) {
             console.log(JSON.stringify({ type: 'PROGRESS', step: 'CHECKING', value: 0, instance: targetInstance }));
-            const targetFolder = path.join(getInstancesFolder(), targetInstance);
+            const targetFolder = path.join(getInstancesFolder(), getFolderFromName(targetInstance));
             if (!fs.existsSync(targetFolder)) {
                 console.log(JSON.stringify({ type: 'ERROR', message: `Instance ${targetInstance} introuvable localement.` }));
                 return;
@@ -148,8 +149,8 @@ async function upload() {
 
         for (const inst of localInstances) {
             try {
-                const folder       = path.join(getInstancesFolder(), inst);
-                const safeInst     = sanitizeInstanceName(inst);
+                const folder = path.join(getInstancesFolder(), getFolderFromName(inst));
+                const safeInst = sanitizeInstanceName(inst);
                 const baseName     = `GensHorizon_Backup_${safeInst}.zip`;
                 const manifestName = `GensHorizon_Manifest_${safeInst}.json`;
                 const manifestPath = path.join(cwd, `manifest_${safeInst}.json`);

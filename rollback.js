@@ -4,7 +4,7 @@ const fs   = require('fs');
 const path = require('path');
 
 const { getInstancesFolder }      = require('./paths');
-const { sanitizeInstanceName }    = require('./utils');
+const { sanitizeInstanceName, getFolderFromName }    = require('./utils');
 
 function rollback() {
     const args           = process.argv.slice(2);
@@ -34,7 +34,7 @@ function rollback() {
 
     const safeInst   = sanitizeInstanceName(targetInstance);
     const instDir    = getInstancesFolder();
-    const targetPath = path.join(instDir, safeInst);
+    const targetPath = path.join(instDir, getFolderFromName(targetInstance));
 
     let rollbackFolder = null;
     let rollbackTime   = 0;

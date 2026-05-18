@@ -17,6 +17,7 @@ const {
     registerTemp,
     unregisterTemp,
     setupProcessHandlers,
+    getFolderFromName,
 } = require('./utils');
 
 setupProcessHandlers();
@@ -251,7 +252,7 @@ async function syncAllInstances() {
                     continue;
                 }
 
-                const targetPath = path.join(getInstancesFolder(), inst);
+                const targetPath = path.join(getInstancesFolder(), getFolderFromName(inst));
                 const lastSync   = syncState[safeInst] ? new Date(syncState[safeInst]).getTime() : 0;
                 const baseTime   = new Date(baseFile.modifiedTime).getTime();
 
