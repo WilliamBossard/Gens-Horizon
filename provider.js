@@ -31,28 +31,29 @@ async function getProvider(settings, _cwd) {
 
     if (!fs.existsSync(tokenPath)) return null;
 
-    let tokenData;
+let tokenData;
     try {
         tokenData = getSecureToken(tokenPath);
     } catch (e) {
         process.stderr.write(`[provider] Token illisible pour "${name}" : ${e.message}\n`);
+        try { fs.unlinkSync(tokenPath); } catch (_) {} 
         return null;
     }
 
     if (!tokenData) return null;
 
-    switch (name) {
+switch (name) {
         case 'google': {
             const { GoogleProvider } = require('./providers/google');
-            return new GoogleProvider(tokenData, credentials.google);
+            return new GoogleProvider(tokenData, credentials.google, tokenPath);
         }
         case 'dropbox': {
             const { DropboxProvider } = require('./providers/dropbox');
-            return new DropboxProvider(tokenData, credentials.dropbox);
+            return new DropboxProvider(tokenData, credentials.dropbox, tokenPath);
         }
         case 'onedrive': {
             const { OneDriveProvider } = require('./providers/onedrive');
-            return new OneDriveProvider(tokenData, credentials.onedrive);
+            return new OneDriveProvider(tokenData, credentials.onedrive, tokenPath);
         }
         default:
             throw new Error(`Fournisseur inconnu : "${name}". Valeurs acceptées : google, dropbox, onedrive`);
