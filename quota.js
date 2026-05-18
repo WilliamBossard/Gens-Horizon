@@ -25,7 +25,11 @@ async function quota() {
 
         const provider = await getProvider(settings, cwd);
         if (!provider) {
-            console.log(JSON.stringify({ type: 'ERROR', message: "Compte non lié. Lance --login d'abord." }));
+            console.log(JSON.stringify({ 
+    type: 'ERROR', 
+    errorCode: 'AUTH_EXPIRED', 
+    message: "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres." 
+}));
             return;
         }
 
