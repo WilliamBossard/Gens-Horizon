@@ -29,7 +29,7 @@ function hashFile(filePath) {
         const stream = fs.createReadStream(filePath);
         stream.on('data',  chunk => hash.update(chunk));
         stream.on('end',   ()    => resolve(hash.digest('hex')));
-        stream.on('error', reject);
+        stream.on('error', (err) => { stream.destroy(); reject(err); });
     });
 }
 

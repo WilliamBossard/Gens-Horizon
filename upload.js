@@ -73,7 +73,6 @@ function createDeltaZip(folder, changed, deleted, tempZip, inst) {
 
         archive.pipe(output);
 
-        // Ajout du fichier de métadonnées delta
         const deltaInfo = { deletedFiles: deleted, createdAt: new Date().toISOString() };
         archive.append(JSON.stringify(deltaInfo, null, 2), { name: '__delta__.json' });
 
@@ -185,8 +184,8 @@ async function upload() {
                                 const resolvedFolder = path.resolve(folder);
                                 
                                 if (fs.existsSync(resolvedIcon) && resolvedIcon.startsWith(resolvedFolder + path.sep)) {
-                                    const rawExt = path.extname(resolvedIcon).toLowerCase();
-                                    const ext = (rawExt === '.jpg' || rawExt === '.jpeg') ? 'jpeg' : 'png';
+                                    const rawExt = path.extname(resolvedIcon).toLowerCase().replace('.', '');
+                                    const ext = (rawExt === 'jpg') ? 'jpeg' : (rawExt || 'png');
                                     const b64 = fs.readFileSync(resolvedIcon, 'base64');
                                     metaData.iconData = `data:image/${ext};base64,${b64}`;
                                 }

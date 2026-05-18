@@ -1,7 +1,7 @@
 'use strict';
 
 const fs     = require('fs');
-const AdmZip = require('adm-zip');
+const yauzl  = require('yauzl');
 const path   = require('path');
 
 const { getInstancesFolder }           = require('./paths');
@@ -23,18 +23,135 @@ const {
 setupProcessHandlers();
 
 function verifyZipIntegrity(zipPath) {
-    try {
-        const zip     = new AdmZip(zipPath);
-        const entries = zip.getEntries();
-        if (entries.length === 0) throw new Error('Archive ZIP vide.');
-        const sampleEntry = entries.find(e => !e.isDirectory);
-        if (sampleEntry) {
-            const content = zip.readFile(sampleEntry);
-            if (content === null) throw new Error(`Entrée ZIP illisible : ${sampleEntry.entryName}`);
-        }
-    } catch (e) {
-        throw new Error(`Vérification d'intégrité échouée (${path.basename(zipPath)}) : ${e.message}`);
-    }
+    return new Promise((resolve, reject) => {
+        yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
+            if (err) return reject(new Error(`Archive invalide : ${err.message}`));
+            
+            zipfile.readEntry();
+            zipfile.on("entry", () => {
+                zipfile.close();
+                resolve();
+            });
+            zipfile.on("end", () => reject(new Error("Archive ZIP vide.")));
+            zipfile.on("error", (e) => reject(new Error(`Archive corrompue : ${e.message}`)));
+        });
+    });
+}
+
+function extractZip(zipPath, targetPath, onProgress) {
+    return new Promise((resolve, reject) => {
+        const resolvedTarget = path.resolve(targetPath);
+        yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
+            if (err) return reject(err);
+            
+            const total = zipfile.entryCount;
+            let done = 0, lastPct = -1;
+
+            zipfile.readEntry();
+            zipfile.on("entry", (entry) => {
+                const dest = path.join(targetPath, entry.fileName);
+                const resDest = path.resolve(dest);
+                
+                if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
+                    process.stderr.write(`[ALERTE SÉCURITÉ] Entrée zip ignorée : ${entry.fileName}\n`);
+                    done++; zipfile.readEntry(); return;
+                }
+
+                if (/\/$/.test(entry.fileName)) {
+                    fs.mkdirSync(dest, { recursive: true });
+                    done++; reportProgress(); zipfile.readEntry();
+                } else {
+                    fs.mkdirSync(path.dirname(dest), { recursive: true });
+                    zipfile.openReadStream(entry, (err, readStream) => {
+                        if (err) { zipfile.close(); return reject(err); }
+                        const writeStream = fs.createWriteStream(dest);
+                        readStream.pipe(writeStream);
+                        writeStream.on("close", () => { done++; reportProgress(); zipfile.readEntry(); });
+                        writeStream.on("error", (e) => { zipfile.close(); reject(e); });
+                        readStream.on("error", (e) => { zipfile.close(); reject(e); });
+                    });
+                }
+            });
+
+            function reportProgress() {
+                if (onProgress && total > 0) {
+                    const pct = Math.floor((done / total) * 100);
+                    if (pct !== lastPct && (pct >= lastPct + 3 || pct === 100)) { onProgress(pct); lastPct = pct; }
+                }
+            }
+
+            zipfile.on("end", () => resolve());
+            zipfile.on("error", reject);
+        });
+    });
+}
+
+function applyDelta(deltaZipPath, targetPath, onProgress) {
+    return new Promise((resolve, reject) => {
+        const resolvedTarget = path.resolve(targetPath);
+        let deltaInfo = { deletedFiles: [] };
+
+        yauzl.open(deltaZipPath, { lazyEntries: true }, (err, zipfile) => {
+            if (err) return reject(err);
+            
+            const total = zipfile.entryCount;
+            let done = 0, lastPct = -1;
+
+            zipfile.readEntry();
+            zipfile.on("entry", (entry) => {
+                if (entry.fileName === '__delta__.json') {
+                    zipfile.openReadStream(entry, (err, readStream) => {
+                        if (err) { zipfile.close(); return reject(err); }
+                        let data = '';
+                        readStream.on('data', chunk => data += chunk);
+                        readStream.on('end', () => {
+                            try { deltaInfo = JSON.parse(data); } catch (_) {}
+                            done++; reportProgress(); zipfile.readEntry();
+                        });
+                    });
+                    return;
+                }
+
+                const dest = path.join(targetPath, entry.fileName);
+                const resDest = path.resolve(dest);
+                if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
+                    done++; zipfile.readEntry(); return;
+                }
+
+                if (/\/$/.test(entry.fileName)) {
+                    fs.mkdirSync(dest, { recursive: true });
+                    done++; reportProgress(); zipfile.readEntry();
+                } else {
+                    fs.mkdirSync(path.dirname(dest), { recursive: true });
+                    zipfile.openReadStream(entry, (err, readStream) => {
+                        if (err) { zipfile.close(); return reject(err); }
+                        const writeStream = fs.createWriteStream(dest);
+                        readStream.pipe(writeStream);
+                        writeStream.on("close", () => { done++; reportProgress(); zipfile.readEntry(); });
+                        writeStream.on("error", (e) => { zipfile.close(); reject(e); });
+                        readStream.on("error", (e) => { zipfile.close(); reject(e); });
+                    });
+                }
+            });
+
+            function reportProgress() {
+                if (onProgress && total > 0) {
+                    const pct = Math.floor((done / total) * 100);
+                    if (pct !== lastPct && (pct >= lastPct + 3 || pct === 100)) { onProgress(pct); lastPct = pct; }
+                }
+            }
+
+            zipfile.on("end", () => {
+                for (const relPath of (deltaInfo.deletedFiles || [])) {
+                    const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
+                    if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
+                    try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
+                }
+                resolve();
+            });
+            zipfile.on("error", reject);
+        });
+    });
 }
 
 function createRollbackSnapshot(instancePath, safeInst) {
@@ -64,79 +181,6 @@ function cleanupRollback(rollbackPath) {
     if (!rollbackPath) return;
     try { fs.rmSync(rollbackPath, { recursive: true, force: true }); }
     catch (_) {}
-}
-
-function extractZip(zipPath, targetPath, onProgress) {
-    const zip      = new AdmZip(zipPath);
-    const entries  = zip.getEntries();
-    const total    = entries.length;
-    const resolved = path.resolve(targetPath);
-    let done = 0, lastPct = -1;
-
-    for (const entry of entries) {
-        const dest    = path.join(targetPath, entry.entryName);
-        const resDest = path.resolve(dest);
-        if (!resDest.startsWith(resolved + path.sep) && resDest !== resolved) {
-            process.stderr.write(`[ALERTE SÉCURITÉ] Entrée zip ignorée (path traversal) : ${entry.entryName}\n`);
-            done++; continue;
-        }
-        if (entry.isDirectory) {
-            fs.mkdirSync(dest, { recursive: true });
-} else {
-            fs.mkdirSync(path.dirname(dest), { recursive: true });
-            zip.extractEntryTo(entry, path.dirname(dest), false, true);
-        }
-        done++;
-        if (onProgress && total > 0) {
-            const pct = Math.floor((done / total) * 100);
-            if (pct !== lastPct && (pct >= lastPct + 3 || pct === 100)) { onProgress(pct); lastPct = pct; }
-        }
-    }
-}
-
-function applyDelta(deltaZipPath, targetPath, onProgress) {
-    const zip      = new AdmZip(deltaZipPath);
-    const entries  = zip.getEntries();
-    const total    = entries.length;
-    const resolved = path.resolve(targetPath);
-    let done = 0, lastPct = -1;
-
-    const deltaEntry = entries.find(e => e.entryName === '__delta__.json');
-    let deltaInfo = { deletedFiles: [] };
-    if (deltaEntry) {
-        try { deltaInfo = JSON.parse(zip.readAsText(deltaEntry)); }
-        catch (_) { process.stderr.write('[WARN] __delta__.json corrompu, suppressions ignorées\n'); }
-    }
-
-    for (const entry of entries) {
-        if (entry.entryName === '__delta__.json') { done++; continue; }
-        const dest    = path.join(targetPath, entry.entryName);
-        const resDest = path.resolve(dest);
-        if (!resDest.startsWith(resolved + path.sep) && resDest !== resolved) {
-            process.stderr.write(`[ALERTE SÉCURITÉ] Entrée delta ignorée (path traversal) : ${entry.entryName}\n`);
-            done++; continue;
-        }
-if (entry.isDirectory) {
-            fs.mkdirSync(dest, { recursive: true });
-        } else {
-            fs.mkdirSync(path.dirname(dest), { recursive: true });
-            zip.extractEntryTo(entry, targetPath, true, true);
-        }
-        done++;
-        if (onProgress && total > 0) {
-            const pct = Math.floor((done / total) * 100);
-            if (pct !== lastPct && (pct >= lastPct + 3 || pct === 100)) { onProgress(pct); lastPct = pct; }
-        }
-    }
-
-    for (const relPath of (deltaInfo.deletedFiles || [])) {
-        const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
-        if (!path.resolve(absPath).startsWith(path.resolve(targetPath) + path.sep)) {
-            process.stderr.write(`[ALERTE SÉCURITÉ] Suppression ignorée (hors instance) : ${absPath}\n`);
-            continue;
-        }
-        try { if (fs.existsSync(absPath)) fs.unlinkSync(absPath); } catch (_) {}
-    }
 }
 
 async function syncAllInstances() {
@@ -271,7 +315,11 @@ async function syncAllInstances() {
                 }
 
                 if (!baseFile) {
-                    console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${inst} n'existe pas encore sur le Cloud.` }));
+                    if (targetInstance) {
+                        console.log(JSON.stringify({ type: 'ERROR', errorCode: 'NOT_ON_CLOUD', instance: inst, message: `${inst} n'existe pas sur le Cloud.` }));
+                    } else {
+                        console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${inst} n'existe pas encore sur le Cloud.` }));
+                    }
                     continue;
                 }
 
@@ -318,11 +366,11 @@ async function syncAllInstances() {
                         );
 
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 0, instance: inst }));
-                        verifyZipIntegrity(tempBase);
+                        await verifyZipIntegrity(tempBase);
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 100, instance: inst }));
 
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: 0, instance: inst }));
-                        extractZip(tempBase, targetPath,
+                        await extractZip(tempBase, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: pct, instance: inst }))
                         );
                     } finally {
@@ -342,9 +390,9 @@ async function syncAllInstances() {
                             { ...retryOpts, label: `downloadDelta(${inst}/${delta.name})` }
                         );
 
-                        verifyZipIntegrity(tempDelta);
+                        await verifyZipIntegrity(tempDelta);
 
-                        applyDelta(tempDelta, targetPath,
+                        await applyDelta(tempDelta, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'APPLYING_DELTA', value: pct, instance: inst, delta: delta.name }))
                         );
                     } finally {
