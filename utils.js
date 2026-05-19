@@ -34,10 +34,15 @@ function cleanupTemps() {
 function writeJsonAtomic(filePath, data) {
     const tmp = filePath + '.tmp';
     registerTemp(tmp);
+    let success = false;
     try {
         fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
         fs.renameSync(tmp, filePath);
+        success = true;
     } finally {
+        if (!success) {
+            try { fs.unlinkSync(tmp); } catch (_) {}
+        }
         unregisterTemp(tmp);
     }
 }

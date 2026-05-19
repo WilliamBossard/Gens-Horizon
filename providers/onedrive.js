@@ -120,7 +120,14 @@ class OneDriveProvider {
                     }, (r) => {
                         const chunks = [];
                         r.on('data', c => chunks.push(c));
-                        r.on('end', () => resolve({ statusCode: r.statusCode, body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {} }));
+                        r.on('end', () => {
+                            let parsed = {};
+                            if (chunks.length > 0) {
+                                try { parsed = JSON.parse(Buffer.concat(chunks).toString()); }
+                                catch (_) { parsed = {}; } 
+                            }
+                            resolve({ statusCode: r.statusCode, body: parsed });
+                        });
                     });
                     req.on('error', reject); req.write(buffer); req.end();
                 });
@@ -190,7 +197,7 @@ class OneDriveProvider {
                 method: 'GET', headers: { 'Authorization': `Bearer ${this._token}` },
             }, (res) => {
                 res.resume();
-                if (res.statusCode === 302 || res.statusCode === 303) resolve(res.headers.location);
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) resolve(res.headers.location);
                 else reject(Object.assign(new Error(`OneDrive download: statut inattendu ${res.statusCode}`), { statusCode: res.statusCode }));
             });
             req.on('error', reject); req.end();
@@ -238,13 +245,13 @@ class OneDriveProvider {
 
     async downloadJSON(fileId) {
         const tmp = path.join(os.tmpdir(), `horizon_db_${Date.now()}.json`);
-        registerTemp(tmp); 
-        await this.downloadFile(fileId, tmp, null, 0);
+        registerTemp(tmp);
         try {
+            await this.downloadFile(fileId, tmp, null, 0);
             return JSON.parse(fs.readFileSync(tmp, 'utf8'));
         } finally {
             try { fs.unlinkSync(tmp); } catch (_) {}
-            unregisterTemp(tmp); 
+            unregisterTemp(tmp);
         }
     }
 

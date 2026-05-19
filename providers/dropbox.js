@@ -17,6 +17,7 @@ function httpsRequest(options, bodyBuffer = null) {
                 resolve({ statusCode: res.statusCode, headers: res.headers, body });
             });
         });
+        req.setTimeout(30000, () => { req.destroy(new Error('Timeout réseau')); });
         req.on('error', reject);
         if (bodyBuffer && bodyBuffer.length > 0) req.write(bodyBuffer);
         req.end();
@@ -33,12 +34,14 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
 
         const req = https.request(options, (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                dest.destroy();
                 const loc = new URL(res.headers.location);
-                httpsDownload(
-                    { hostname: loc.hostname, path: loc.pathname + loc.search, method: 'GET' },
-                    destPath, onProgress, totalSize, redirectCount + 1
-                ).then(resolve).catch(reject);
+                dest.once('close', () => {
+                    httpsDownload(
+                        { hostname: loc.hostname, path: loc.pathname + loc.search, method: 'GET' },
+                        destPath, onProgress, totalSize, redirectCount + 1
+                    ).then(resolve).catch(reject);
+                });
+                dest.destroy(); 
                 return;
             }
             if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -228,6 +231,7 @@ class DropboxProvider {
                 res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { reject(e); } });
                 res.on('error', reject);
             });
+            req.setTimeout(30000, () => { req.destroy(new Error('Timeout réseau')); });
             req.on('error', reject); req.end();
         }).catch(async (e) => {
             if (e.statusCode === 401) { await this._refreshToken(); return this.downloadJSON(fileId); }

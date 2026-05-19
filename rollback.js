@@ -33,7 +33,7 @@ function rollback() {
         return;
     }
 
-    const safeInst   = sanitizeInstanceName(targetInstance);
+    const safeInst = getFolderFromName(targetInstance);
     const instDir    = getInstancesFolder();
     const targetPath = path.join(instDir, getFolderFromName(targetInstance));
 
