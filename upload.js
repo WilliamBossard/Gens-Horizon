@@ -55,7 +55,7 @@ function createFullZip(folder, tempZip, inst) {
         });
         archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
         output.on('close', resolve);
-        output.on('error', err => { try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+        output.on('error', err => { archive.abort(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
 
         archive.pipe(output);
         archive.directory(folder, false);
@@ -70,6 +70,7 @@ function createDeltaZip(folder, changed, deleted, tempZip, inst) {
 
         output.on('close', resolve);
         archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+        output.on('error', err => { archive.abort(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
 
         archive.pipe(output);
 

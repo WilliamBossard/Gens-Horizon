@@ -363,7 +363,7 @@ async function syncAllInstances() {
 
                 if (!fs.existsSync(targetPath)) {
                     fs.mkdirSync(targetPath, { recursive: true });
-                } else if (baseChanged) {
+                } else if (baseChanged || pendingDeltas.length > 0) { 
                     rollbackPath = createRollbackSnapshot(targetPath, safeInst);
                 }
 

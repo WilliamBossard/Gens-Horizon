@@ -11,7 +11,6 @@ const { credentials }    = require('./config');
 const { getProviderName, getTokenPath } = require('./provider');
 
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
-const CWD = process.cwd();
 
 function openBrowser(targetUrl) {
     console.log(JSON.stringify({ type: 'AUTH_URL', message: targetUrl }));
@@ -166,9 +165,11 @@ async function loginOneDrive() {
 }
 
 async function loginPlayer() {
+    const BASE_DIR = process.pkg ? path.dirname(process.execPath) : path.dirname(process.argv[1]);
+    
+    const settingsPath = path.join(BASE_DIR, 'horizon_settings.json');
     const settings = (() => {
-        const p = path.join(CWD, 'horizon_settings.json');
-        try { return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {}; } catch { return {}; }
+        try { return fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, 'utf8')) : {}; } catch { return {}; }
     })();
 
     const providerName = getProviderName(settings);
@@ -176,24 +177,22 @@ async function loginPlayer() {
 
     let tokens;
     switch (providerName) {
-        case 'google'  : tokens = await loginGoogle();   break;
-        case 'dropbox' : tokens = await loginDropbox();  break;
+        case 'google':   tokens = await loginGoogle();   break;
+        case 'dropbox':  tokens = await loginDropbox();  break;
         case 'onedrive': tokens = await loginOneDrive(); break;
-        default: throw new Error(`Provider inconnu : ${providerName}`);
+        default: throw new Error(`Fournisseur inconnu : ${providerName}`);
     }
 
     const { encryptToken } = require('./Auth');
-    const tokenPath = path.join(CWD, `token_${providerName}.json`);
+    const tokenPath = getTokenPath(providerName); 
     encryptToken(tokenPath, tokens);
-    if (providerName === 'google') encryptToken(path.join(CWD, 'token.json'), tokens);
-
-    const settingsFilePath = path.join(CWD, 'horizon_settings.json');
-    if (fs.existsSync(settingsFilePath)) {
+    
+    if (fs.existsSync(settingsPath)) {
         try {
-            const sets = JSON.parse(fs.readFileSync(settingsFilePath, 'utf8'));
+            const sets = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
             if (!sets.provider || sets.provider !== providerName) {
                 sets.provider = providerName;
-                fs.writeFileSync(settingsFilePath, JSON.stringify(sets, null, 2));
+                fs.writeFileSync(settingsPath, JSON.stringify(sets, null, 2));
             }
         } catch (_) {}
     }
