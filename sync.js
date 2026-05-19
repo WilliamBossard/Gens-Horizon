@@ -266,7 +266,23 @@ async function syncAllInstances() {
                 const baseFile   = cloudIndex[baseName];
                 const deltaFiles = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${instName}_`) && n.endsWith('.zip'));
                 const totalSizeBytes = deltaFiles.reduce((sum, n) => sum + (parseInt(cloudIndex[n].size, 10) || 0), 0) + (parseInt(baseFile?.size, 10) || 0);
-                return { name: instName, deltaCount: deltaFiles.length, sizeBytes: totalSizeBytes, lastBackup: baseFile?.modifiedTime || null };
+                
+                let realName = instName;
+                const localMetaPath = path.join(cwd, `meta_${instName}.json`);
+                if (fs.existsSync(localMetaPath)) {
+                    try {
+                        const metaObj = JSON.parse(fs.readFileSync(localMetaPath, 'utf8'));
+                        if (metaObj.realName) realName = metaObj.realName;
+                    } catch(_) {}
+                }
+
+                return { 
+                    name: instName, 
+                    realName: realName, 
+                    deltaCount: deltaFiles.length, 
+                    sizeBytes: totalSizeBytes, 
+                    lastBackup: baseFile?.modifiedTime || null 
+                };
             });
             console.log(JSON.stringify({ type: 'CLOUD_LIST', data: list, richData: richList }));
             return;

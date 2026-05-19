@@ -171,12 +171,13 @@ async function upload() {
                 const useSmartMode   = settings.syncMode === 'SMART';
 
                 const metaName = `GensHorizon_Meta_${safeInst}.json`;
-                let metaData = { iconData: "", loader: "vanilla" };
+                let metaData = { iconData: "", loader: "vanilla", realName: inst };
                 const instJsonPath = path.join(folder, 'instance.json');
                 if (fs.existsSync(instJsonPath)) {
                     try {
                         const instObj = JSON.parse(fs.readFileSync(instJsonPath, 'utf8'));
                         metaData.loader = instObj.loader || "vanilla";
+                        if (instObj.name) metaData.realName = instObj.name; 
                         if (instObj.icon && instObj.icon.startsWith('file://')) {
                             try {
                                 const localIconPath = require('url').fileURLToPath(instObj.icon);
