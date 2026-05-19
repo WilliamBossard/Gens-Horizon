@@ -8,6 +8,7 @@ const { credentials } = require('../config');
 const Auth = require('../Auth');
 const GRAPH_HOST = 'graph.microsoft.com';
 const APP_ROOT   = '/v1.0/me/drive/special/approot';
+const { registerTemp, unregisterTemp } = require('../utils');
 
 function graphRequest(method, graphPath, accessToken, body = null) {
     const bodyBuf = body ? Buffer.from(JSON.stringify(body)) : null;
@@ -237,11 +238,13 @@ class OneDriveProvider {
 
     async downloadJSON(fileId) {
         const tmp = path.join(os.tmpdir(), `horizon_db_${Date.now()}.json`);
+        registerTemp(tmp); 
         await this.downloadFile(fileId, tmp, null, 0);
         try {
             return JSON.parse(fs.readFileSync(tmp, 'utf8'));
         } finally {
             try { fs.unlinkSync(tmp); } catch (_) {}
+            unregisterTemp(tmp); 
         }
     }
 

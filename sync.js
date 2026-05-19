@@ -32,8 +32,8 @@ function verifyZipIntegrity(zipPath) {
                 zipfile.close();
                 resolve();
             });
-            zipfile.on("end", () => reject(new Error("Archive ZIP vide.")));
-            zipfile.on("error", (e) => reject(new Error(`Archive corrompue : ${e.message}`)));
+            zipfile.on("end", () => { zipfile.close(); reject(new Error("Archive ZIP vide.")); });
+            zipfile.on("error", (e) => { zipfile.close(); reject(new Error(`Archive corrompue : ${e.message}`)); });
         });
     });
 }
@@ -81,7 +81,7 @@ function extractZip(zipPath, targetPath, onProgress) {
             }
 
             zipfile.on("end", () => resolve());
-            zipfile.on("error", reject);
+            zipfile.on("error", (e) => { zipfile.close(); reject(e); });
         });
     });
 }
@@ -150,7 +150,7 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                 }
                 resolve();
             });
-            zipfile.on("error", reject);
+            zipfile.on("error", (e) => { zipfile.close(); reject(e); });
         });
     });
 }

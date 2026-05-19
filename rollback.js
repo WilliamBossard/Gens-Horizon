@@ -5,6 +5,7 @@ const path = require('path');
 
 const { getInstancesFolder }      = require('./paths');
 const { sanitizeInstanceName, getFolderFromName }    = require('./utils');
+const { acquireLock, releaseLock } = require('./lock');
 
 function rollback() {
     const args           = process.argv.slice(2);
@@ -55,6 +56,11 @@ function rollback() {
         return;
     }
 
+    if (!acquireLock()) {
+        console.log(JSON.stringify({ type: 'ERROR', instance: targetInstance, message: 'ERR_ALREADY_RUNNING' }));
+        return;
+    }
+
     try {
         if (fs.existsSync(targetPath)) {
             fs.rmSync(targetPath, { recursive: true, force: true });
@@ -69,6 +75,8 @@ function rollback() {
         }));
     } catch (e) {
         console.log(JSON.stringify({ type: 'ERROR', instance: targetInstance, message: e.message }));
+    } finally {
+        releaseLock();
     }
 }
 
