@@ -13,11 +13,10 @@ const {
     checkConnectivity,
     readJsonSafe,
     writeJsonAtomic,
-    sanitizeInstanceName,
+    getCanonicalName,
     registerTemp,
     unregisterTemp,
     setupProcessHandlers,
-    getFolderFromName,
 } = require('./utils');
 
 setupProcessHandlers();
@@ -29,11 +28,16 @@ function verifyZipIntegrity(zipPath) {
             
             zipfile.readEntry();
             zipfile.on("entry", () => {
-                zipfile.close();
-                resolve();
+                zipfile.readEntry();
             });
-            zipfile.on("end", () => { zipfile.close(); reject(new Error("Archive ZIP vide.")); });
-            zipfile.on("error", (e) => { zipfile.close(); reject(new Error(`Archive corrompue : ${e.message}`)); });
+            zipfile.on("end", () => { 
+                zipfile.close(); 
+                resolve(); 
+            });
+            zipfile.on("error", (e) => { 
+                zipfile.close(); 
+                reject(new Error(`Archive corrompue : ${e.message}`)); 
+            });
         });
     });
 }
@@ -80,7 +84,10 @@ function extractZip(zipPath, targetPath, onProgress) {
                 }
             }
 
-            zipfile.on("end", () => resolve());
+            zipfile.on("end", () => {
+                zipfile.close(); 
+                resolve();
+            })
             zipfile.on("error", (e) => { zipfile.close(); reject(e); });
         });
     });
@@ -148,6 +155,7 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                     if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
                     try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
                 }
+                zipfile.close();
                 resolve();
             });
             zipfile.on("error", (e) => { zipfile.close(); reject(e); });
@@ -155,14 +163,15 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
     });
 }
 
-function createRollbackSnapshot(instancePath, safeInst) {
+function createRollbackSnapshot(instancePath) {
     const instDir    = path.dirname(instancePath);
+    const folderName = path.basename(instancePath); 
     const timestamp  = Date.now();
-    const rollbackTo = path.join(instDir, `${safeInst}_rollback_${timestamp}`);
+    const rollbackTo = path.join(instDir, `${folderName}_rollback_${timestamp}`);
 
     try {
         for (const entry of fs.readdirSync(instDir)) {
-            if (entry.startsWith(`${safeInst}_rollback_`)) {
+            if (entry.startsWith(`${folderName}_rollback_`)) {
                 fs.rmSync(path.join(instDir, entry), { recursive: true, force: true });
             }
         }
@@ -289,7 +298,7 @@ async function syncAllInstances() {
         }
 
         if (isDelete && targetInstance) {
-            const safeTarget = sanitizeInstanceName(targetInstance);
+            const safeTarget = getCanonicalName(targetInstance);
             const toDelete   = Object.keys(cloudIndex).filter(n =>
                 n === `GensHorizon_Backup_${safeTarget}.zip` ||
                 n === `GensHorizon_Manifest_${safeTarget}.json` ||
@@ -323,7 +332,7 @@ async function syncAllInstances() {
         for (const inst of instancesToSync) {
             let rollbackPath = null;
             try {
-                const safeInst = sanitizeInstanceName(inst);
+                const safeInst = getCanonicalName(inst);
                 const baseName = `GensHorizon_Backup_${safeInst}.zip`;
                 const baseFile = cloudIndex[baseName];
 
@@ -340,7 +349,7 @@ async function syncAllInstances() {
                     continue;
                 }
 
-                const targetPath = path.join(getInstancesFolder(), getFolderFromName(inst));
+                const targetPath = path.join(getInstancesFolder(), safeInst);
                 const lastSync   = syncState[safeInst] ? new Date(syncState[safeInst]).getTime() : 0;
                 const baseTime   = new Date(baseFile.modifiedTime).getTime();
 
@@ -364,7 +373,7 @@ async function syncAllInstances() {
                 if (!fs.existsSync(targetPath)) {
                     fs.mkdirSync(targetPath, { recursive: true });
                 } else if (baseChanged || pendingDeltas.length > 0) { 
-                    rollbackPath = createRollbackSnapshot(targetPath, safeInst);
+                    rollbackPath = createRollbackSnapshot(targetPath);
                 }
 
                 if (baseChanged) {

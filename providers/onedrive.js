@@ -103,7 +103,7 @@ class OneDriveProvider {
         const sessionRes = await this._call('POST', `${APP_ROOT}:/${encodeURIComponent(name)}:/createUploadSession`, { item: { '@microsoft.graph.conflictBehavior': 'replace' } });
         if (sessionRes.statusCode >= 400 || !sessionRes.body.uploadUrl) throw new Error('OneDrive upload session failed');
         const uploadUrl = new URL(sessionRes.body.uploadUrl);
-        const fd = fs.openSync(srcPath, 'r');
+const fd = fs.openSync(srcPath, 'r');
 
         try {
             while (offset < total) {
@@ -142,6 +142,20 @@ class OneDriveProvider {
                     result = { id: res.body.id, modifiedTime: res.body.lastModifiedDateTime };
                 }
             }
+        } catch (error) {
+            try {
+                await new Promise((resolve) => {
+                    const req = https.request({
+                        hostname: uploadUrl.hostname,
+                        path: uploadUrl.pathname + uploadUrl.search,
+                        method: 'DELETE' 
+                    }, resolve);
+                    req.on('error', resolve); 
+                    req.end();
+                });
+            } catch (_) {}
+            
+            throw error; 
         } finally {
             fs.closeSync(fd);
         }

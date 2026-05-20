@@ -34,49 +34,46 @@ function cleanupTemps() {
 function writeJsonAtomic(filePath, data) {
     const tmp = filePath + '.tmp';
     registerTemp(tmp);
-    let success = false;
-    try {
-        fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-        fs.renameSync(tmp, filePath);
-        success = true;
-    } finally {
-        if (!success) {
-            try { fs.unlinkSync(tmp); } catch (_) {}
-        }
-        unregisterTemp(tmp);
-    }
+    const fd = fs.openSync(tmp, 'w');
+    fs.writeSync(fd, JSON.stringify(data, null, 2));
+    fs.fsyncSync(fd); 
+    fs.closeSync(fd);
+    fs.renameSync(tmp, filePath);
+    unregisterTemp(tmp);
 }
 
-
-function sanitizeInstanceName(name) {
-    return name.replace(/[/\\:.]/g, '_');
-}
-
-function getFolderFromName(name) {
-    if (!name) return '';
-    return name.replace(/[^a-z0-9]/gi, '_');
+function getCanonicalName(name) {
+    if (!name) return "";
+    return String(name).replace(/[^a-z0-9]/gi, "_");
 }
 
 let _handlersSetup = false;
 function setupProcessHandlers() {
     if (_handlersSetup) return;
     _handlersSetup = true;
-    process.on('exit', cleanupTemps);
+
+    const shutdown = (signal) => {
+        console.error(`[system] Signal reçu : ${signal}. Nettoyage en cours...`);
+        cleanupTemps();
+        process.exit(0);
+    };
+
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
     process.on('uncaughtException', (err) => {
-        console.error('Erreur critique inattendue :', err);
+        console.error('[CRITIQUE] Erreur inattendue :', err);
         cleanupTemps();
         process.exit(1);
     });
 }
 
 module.exports = {
+    getCanonicalName,
     checkConnectivity,
     readJsonSafe,
     writeJsonAtomic,
-    sanitizeInstanceName,
     registerTemp,
     unregisterTemp,
     cleanupTemps,
     setupProcessHandlers,
-    getFolderFromName,
 };

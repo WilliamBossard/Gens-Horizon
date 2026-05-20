@@ -5,7 +5,8 @@ const path = require('path');
 
 const { getInstancesFolder }             = require('./paths');
 const { getProvider }                    = require('./provider');
-const { checkConnectivity, readJsonSafe, sanitizeInstanceName, setupProcessHandlers, getFolderFromName } = require('./utils');
+const { checkConnectivity, readJsonSafe, getCanonicalName, setupProcessHandlers } = require('./utils');
+const { withRetry } = require('./retry');
 
 setupProcessHandlers();
 
@@ -30,7 +31,7 @@ async function check() {
 
         const syncInfo = readJsonSafe(SYNC_INFO_FILE);
 
-        const cloudFiles = await provider.listFiles('GensHorizon_');
+        const cloudFiles = await withRetry(() => provider.listFiles('GensHorizon_'), { maxRetries: 3, baseDelay: 1500, label: 'check_listFiles' });
         const cloudIndex = {};
         for (const f of cloudFiles) cloudIndex[f.name] = f;
 
@@ -54,9 +55,10 @@ async function check() {
                 .reduce((max, ts) => Math.max(max, ts), 0);
 
             const effectiveCloudTime = Math.max(cloudTime, latestDeltaTime);
-            const rawSyncTime  = syncInfo[instName] ? new Date(syncInfo[instName]).getTime() : 0;
+            const safeKey = getCanonicalName(instName);
+            const rawSyncTime  = syncInfo[safeKey] ? new Date(syncInfo[safeKey]).getTime() : 0;
             const lastSyncTime = isNaN(rawSyncTime) ? 0 : rawSyncTime;
-            const localPath  = path.join(getInstancesFolder(), getFolderFromName(instName));
+            const localPath  = path.join(getInstancesFolder(), safeKey);
             const localExists = fs.existsSync(localPath);
 
             if (localExists && effectiveCloudTime > lastSyncTime) {

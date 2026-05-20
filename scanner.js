@@ -33,7 +33,7 @@ function hashFile(filePath) {
     });
 }
 
-async function generateManifest(targetPath, basePath = targetPath) {
+async function generateManifest(targetPath, basePath = targetPath, oldManifest = {}) {
     const manifest = {};
     let items;
     try {
@@ -51,7 +51,7 @@ async function generateManifest(targetPath, basePath = targetPath) {
 
             if (item.isDirectory()) {
                 try {
-                    const subManifest = await generateManifest(fullPath, basePath);
+                    const subManifest = await generateManifest(fullPath, basePath, oldManifest);
                     Object.assign(manifest, subManifest);
                 } catch (err) {
                     if (err.code !== 'ENOENT') {
@@ -59,26 +59,36 @@ async function generateManifest(targetPath, basePath = targetPath) {
                     }
                 }
             } else {
-                try {
-                    manifest[relativePath] = await hashFile(fullPath);
-                } catch (_) {}
-            }
-        });
+    const stats = await fsP.stat(fullPath);
+    const cached = oldManifest[relativePath];
+
+    if (cached && cached.mtime === stats.mtimeMs && cached.size === stats.size) {
+        manifest[relativePath] = cached; 
+    } else {
+        const hash = await hashFile(fullPath);
+        manifest[relativePath] = {
+            hash: hash,
+            mtime: stats.mtimeMs,
+            size: stats.size
+        };
+    }
+}
+});
 
     await withConcurrency(16, tasks);
     return manifest;
 }
 
 function compareManifests(oldM, newM) {
-    const added    = Object.keys(newM).filter(f => !oldM[f]);
-    const modified = Object.keys(newM).filter(f => oldM[f] && oldM[f] !== newM[f]);
-    const deleted  = Object.keys(oldM).filter(f => !newM[f]);
+    const added = Object.keys(newM).filter(f => !oldM[f]);
+    const deleted = Object.keys(oldM).filter(f => !newM[f]);
+    const modified = Object.keys(newM).filter(f => 
+        oldM[f] && newM[f].hash !== oldM[f].hash
+    );
 
     return {
         hasChanges: added.length > 0 || modified.length > 0 || deleted.length > 0,
-        added,
-        modified,
-        deleted,
+        added, modified, deleted,
     };
 }
 

@@ -4,7 +4,7 @@ const fs   = require('fs');
 const path = require('path');
 
 const { getInstancesFolder }      = require('./paths');
-const { sanitizeInstanceName, getFolderFromName }    = require('./utils');
+const { getCanonicalName } = require('./utils');
 const { acquireLock, releaseLock } = require('./lock');
 
 function rollback() {
@@ -33,9 +33,9 @@ function rollback() {
         return;
     }
 
-    const safeInst = getFolderFromName(targetInstance);
+    const safeInst = getCanonicalName(targetInstance);
     const instDir    = getInstancesFolder();
-    const targetPath = path.join(instDir, getFolderFromName(targetInstance));
+    const targetPath = path.join(instDir, safeInst);
 
     let rollbackFolder = null;
     let rollbackTime   = 0;

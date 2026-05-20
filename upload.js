@@ -13,11 +13,10 @@ const {
     checkConnectivity,
     readJsonSafe,
     writeJsonAtomic,
-    sanitizeInstanceName,
+    getCanonicalName,
     registerTemp,
     unregisterTemp,
     setupProcessHandlers,
-    getFolderFromName,
 } = require('./utils');
 
 setupProcessHandlers();
@@ -94,7 +93,6 @@ function createDeltaZip(folder, changed, deleted, tempZip, inst) {
         }
         
         archive.finalize();
-        archive.finalize();
     });
 }
 
@@ -143,7 +141,7 @@ async function upload() {
         let localInstances = [];
         if (targetInstance) {
             console.log(JSON.stringify({ type: 'PROGRESS', step: 'CHECKING', value: 0, instance: targetInstance }));
-            const targetFolder = path.join(getInstancesFolder(), getFolderFromName(targetInstance));
+            const targetFolder = path.join(getInstancesFolder(), getCanonicalName(targetInstance));
             if (!fs.existsSync(targetFolder)) {
                 console.log(JSON.stringify({ type: 'ERROR', message: `Instance ${targetInstance} introuvable localement.` }));
                 return;
@@ -161,14 +159,14 @@ async function upload() {
 
         for (const inst of localInstances) {
             try {
-                const folder = path.join(getInstancesFolder(), getFolderFromName(inst));
-                const safeInst = sanitizeInstanceName(inst);
+                const folder = path.join(getInstancesFolder(), getCanonicalName(inst));
+                const safeInst = getCanonicalName(inst); 
                 const baseName     = `GensHorizon_Backup_${safeInst}.zip`;
                 const manifestName = `GensHorizon_Manifest_${safeInst}.json`;
                 const manifestPath = path.join(cwd, `manifest_${safeInst}.json`);
 
                 const oldManifest     = readJsonSafe(manifestPath);
-                const currentManifest = await generateManifest(folder);
+                const currentManifest = await generateManifest(folder, folder, oldManifest);
                 const diff            = compareManifests(oldManifest, currentManifest);
 
                 const hasBaseOnCloud = !!cloudIndex[baseName];
@@ -321,7 +319,8 @@ async function upload() {
                         { ...retryOpts, label: `uploadMeta(${inst})` }
                     );
 
-                    syncState[safeInst] = deltaResult?.modifiedTime || new Date().toISOString();
+                    syncState[safeInst] = new Date(timestamp).toISOString(); 
+                    
                     writeJsonAtomic(syncInfoPath, syncState);
                     writeJsonAtomic(manifestPath, currentManifest);
                     const summary = `+${diff.added.length} ajouté(s), ~${diff.modified.length} modifié(s), -${diff.deleted.length} supprimé(s)`;
