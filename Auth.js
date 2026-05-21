@@ -1,9 +1,19 @@
 'use strict';
 
+/**
+ * ==============================================================================
+ * GENS HORIZON — CHIFFREMENT DES TOKENS OAuth
+ * ==============================================================================
+ * DÉCISION : salt.key et token_*.json vivent dans getHorizonDataDir() (bin),
+ * aligné avec horizon_settings.json et horizon.lock — pas le dossier de l'exe seul.
+ * ==============================================================================
+ */
+
 const fs     = require('fs');
 const crypto = require('crypto');
 const os     = require('os');
 const path   = require('path');
+const { getHorizonDataDir } = require('./paths');
 
 let username = 'default';
 try {
@@ -12,9 +22,7 @@ try {
     username = process.env.USER || process.env.LOGNAME || 'unknown';
 }
 const machineID = os.hostname() + '_' + username;
-const BASE_DIR = process.pkg
-    ? path.dirname(process.execPath)   
-    : path.dirname(process.argv[1]);  
+const BASE_DIR = getHorizonDataDir();
 
 const SALT_FILE       = path.join(BASE_DIR, 'salt.key');
 const TOKEN_FILE_MODE = 0o600;
@@ -54,14 +62,13 @@ function _decrypt(text) {
     }
 }
 
-
 function getSecureToken(filePath) {
     if (!fs.existsSync(filePath)) return null;
     const raw = fs.readFileSync(filePath, 'utf8').trim();
     if (raw.startsWith('{')) {
         const parsed = JSON.parse(raw);
         process.stderr.write(JSON.stringify({ type: 'INFO', message: 'Sécurisation du token en cours...' }) + '\n');
-        fs.writeFileSync(filePath, _encrypt(JSON.stringify(parsed)), { encoding: 'utf8', mode: TOKEN_FILE_MODE });
+        encryptToken(filePath, parsed);
         return parsed;
     }
     try {
@@ -72,7 +79,16 @@ function getSecureToken(filePath) {
 }
 
 function encryptToken(filePath, tokenData) {
-    fs.writeFileSync(filePath, _encrypt(JSON.stringify(tokenData)), { encoding: 'utf8', mode: TOKEN_FILE_MODE });
+    const tmp = filePath + '.tmp';
+    if (typeof registerTemp === 'function') registerTemp(tmp);
+
+    fs.writeFileSync(tmp, _encrypt(JSON.stringify(tokenData)), {
+        encoding: 'utf8',
+        mode: TOKEN_FILE_MODE
+    });
+
+    fs.renameSync(tmp, filePath);
+    if (typeof unregisterTemp === 'function') unregisterTemp(tmp);
 }
 
 module.exports = { getSecureToken, encryptToken };

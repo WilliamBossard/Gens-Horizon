@@ -61,7 +61,32 @@ function setupProcessHandlers() {
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
     process.on('uncaughtException', (err) => {
-        console.error('[CRITIQUE] Erreur inattendue :', err);
+        try {
+            process.stdout.write(JSON.stringify({
+                type: 'ERROR',
+                errorCode: 'UNCAUGHT_EXCEPTION',
+                message: err.message || String(err),
+            }) + '\n');
+        } catch (_) {}
+
+        process.stderr.write(`[CRITIQUE] ${err.stack || err}\n`);
+
+        cleanupTemps();
+        process.exit(1);
+    });
+
+    process.on('unhandledRejection', (reason) => {
+        const msg = reason?.message || String(reason);
+        try {
+            process.stdout.write(JSON.stringify({
+                type: 'ERROR',
+                errorCode: 'UNHANDLED_REJECTION',
+                message: msg,
+            }) + '\n');
+        } catch (_) {}
+
+        process.stderr.write(`[CRITIQUE] Promesse rejetée : ${msg}\n`);
+
         cleanupTemps();
         process.exit(1);
     });

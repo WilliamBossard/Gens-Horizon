@@ -31,7 +31,9 @@
       "login.js",
       "check.js",
       "sync.js",
-      "upload.js"
+      "upload.js",
+      "quota.js",
+      "rollback.js"
     ]
   },
   "dependencies": {

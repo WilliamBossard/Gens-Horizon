@@ -2,9 +2,20 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { getHorizonDataDir } = require('./paths');
 
-const LOCK_FILE = path.join(process.cwd(), 'horizon.lock');
+const LOCK_FILE = path.join(getHorizonDataDir(), 'horizon.lock');
 const MAX_LOCK_RETRIES = 5;
+const STALE_LOCK_MS = 30 * 60 * 1000;
+
+function isLockStale() {
+    try {
+        const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+        return age > STALE_LOCK_MS;
+    } catch (_) {
+        return true;
+    }
+}
 
 function acquireLock(attempt = 0) {
     let fd;
@@ -27,7 +38,15 @@ function acquireLock(attempt = 0) {
                     process.kill(pid, 0);
                     return false; 
                 } catch (killErr) {
-                    if (killErr.code === 'EPERM') return false; 
+                    if (killErr.code === 'EPERM') {
+                        if (isLockStale()) {
+                            process.stderr.write(`[lock] Verrou EPERM et périmé — nettoyage.\n`);
+                            fs.unlinkSync(LOCK_FILE);
+                            if (attempt >= MAX_LOCK_RETRIES) return false;
+                            return acquireLock(attempt + 1);
+                        }
+                        return false;
+                    }
                     process.stderr.write(`[lock] Verrou périmé (PID ${pid} mort) — nettoyage.\n`);
                     fs.unlinkSync(LOCK_FILE);
                     if (attempt >= MAX_LOCK_RETRIES) {

@@ -4,8 +4,10 @@ const fs   = require('fs');
 const path = require('path');
 
 const { getInstancesFolder }      = require('./paths');
-const { getCanonicalName } = require('./utils');
+const { getCanonicalName, setupProcessHandlers } = require('./utils');
 const { acquireLock, releaseLock } = require('./lock');
+
+setupProcessHandlers();
 
 function rollback() {
     const args           = process.argv.slice(2);

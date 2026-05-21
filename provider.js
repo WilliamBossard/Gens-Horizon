@@ -1,48 +1,50 @@
 'use strict';
 
+/**
+ * ==============================================================================
+ * GENS HORIZON — FACTORY FOURNISSEUR CLOUD
+ * ==============================================================================
+ * DÉCISION : tokens dans getHorizonDataDir() via paths.js (pas BASE_DIR local).
+ * getProviderName vit dans paths.js pour un seul point de vérité.
+ * ==============================================================================
+ */
+
 const fs   = require('fs');
 const path = require('path');
 const { getSecureToken }  = require('./Auth');
 const { credentials }     = require('./config');
-const BASE_DIR = process.pkg
-    ? path.dirname(process.execPath)
-    : path.dirname(process.argv[1]);
+const { getHorizonDataDir, getProviderName } = require('./paths');
 
-function getProviderName(settings) {
-    const cliArg = process.argv.find(a => a.startsWith('--provider='));
-    if (cliArg) return cliArg.split('=')[1].trim();
-    return (settings && settings.provider) || 'google';
-}
-
-function getTokenPath(providerName, _cwd) {
-    const specific = path.join(BASE_DIR, `token_${providerName}.json`);
+function getTokenPath(providerName) {
+    const base = getHorizonDataDir();
+    const specific = path.join(base, `token_${providerName}.json`);
     if (fs.existsSync(specific)) return specific;
 
     if (providerName === 'google') {
-        const legacy = path.join(BASE_DIR, 'token.json');
+        const legacy = path.join(base, 'token.json');
         if (fs.existsSync(legacy)) return legacy;
     }
     return specific;
 }
 
-async function getProvider(settings, _cwd) {
+async function getProvider(settings) {
     const name      = getProviderName(settings);
     const tokenPath = getTokenPath(name);
 
     if (!fs.existsSync(tokenPath)) return null;
 
-let tokenData;
+    let tokenData;
     try {
         tokenData = getSecureToken(tokenPath);
     } catch (e) {
         process.stderr.write(`[provider] Token illisible pour "${name}" : ${e.message}\n`);
-        try { fs.unlinkSync(tokenPath); } catch (_) {} 
+        try { fs.unlinkSync(tokenPath); } catch (_) {}
         return null;
     }
 
     if (!tokenData) return null;
 
-switch (name) {
+    switch (name) {
         case 'google': {
             const { GoogleProvider } = require('./providers/google');
             return new GoogleProvider(tokenData, credentials.google, tokenPath);

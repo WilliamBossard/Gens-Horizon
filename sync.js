@@ -4,9 +4,9 @@ const fs     = require('fs');
 const yauzl  = require('yauzl');
 const path   = require('path');
 
-const { getInstancesFolder }           = require('./paths');
+const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getProvider }                  = require('./provider');
-const { generateManifest }             = require('./scanner');
+const { generateManifest, withConcurrency } = require('./scanner');
 const { acquireLock, releaseLock }     = require('./lock');
 const { withRetry }                    = require('./retry');
 const {
@@ -27,8 +27,14 @@ function verifyZipIntegrity(zipPath) {
             if (err) return reject(new Error(`Archive invalide : ${err.message}`));
             
             zipfile.readEntry();
-            zipfile.on("entry", () => {
-                zipfile.readEntry();
+            zipfile.on("entry", (entry) => {
+                zipfile.openReadStream(entry, (err, readStream) => {
+                    if (err) { zipfile.close(); return reject(new Error(`Archive corrompue : ${err.message}`)); }
+                    
+                    readStream.on('error', (e) => { zipfile.close(); reject(new Error(`CRC invalide : ${e.message}`)); });
+                    readStream.on('end', () => zipfile.readEntry());
+                    readStream.resume(); 
+                });
             });
             zipfile.on("end", () => { 
                 zipfile.close(); 
@@ -112,7 +118,14 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                         let data = '';
                         readStream.on('data', chunk => data += chunk);
                         readStream.on('end', () => {
-                            try { deltaInfo = JSON.parse(data); } catch (_) {}
+                            try {
+                                deltaInfo = JSON.parse(data);
+                            } catch (parseErr) {
+                                zipfile.close();
+                                const err = new Error('Métadonnées delta invalides (__delta__.json)');
+                                err.errorCode = 'DELTA_METADATA_INVALID';
+                                return reject(err);
+                            }
                             done++; reportProgress(); zipfile.readEntry();
                         });
                         readStream.on('error', (e) => { zipfile.close(); reject(e); }); 
@@ -215,9 +228,9 @@ async function syncAllInstances() {
             return;
         }
 
-        const cwd          = process.cwd();
-        const settingsPath = path.join(cwd, 'horizon_settings.json');
-        const syncInfoPath = path.join(cwd, 'last_sync.json');
+        const dataDir      = getHorizonDataDir();
+        const settingsPath = path.join(dataDir, 'horizon_settings.json');
+        const syncInfoPath = path.join(dataDir, 'last_sync.json');
         const force        = args.includes('--force');
         const isDelete     = args.includes('--delete');
         const COMMANDS     = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
@@ -230,7 +243,7 @@ async function syncAllInstances() {
 
         const retryOpts = { maxRetries: settings.maxRetries || 3, baseDelay: settings.retryBaseDelay || 1500 };
 
-        const provider = await getProvider(settings, cwd);
+        const provider = await getProvider(settings);
         if (!provider) {
             console.log(JSON.stringify({ 
     type: 'ERROR', 
@@ -246,25 +259,25 @@ async function syncAllInstances() {
 
         if (isList) {
             const metaFiles = Object.keys(cloudIndex).filter(n => n.startsWith('GensHorizon_Meta_'));
-            const downloadPromises = metaFiles.map(async (mName) => {
+            const metaTasks = metaFiles.map((mName) => async () => {
                 const instName = mName.replace('GensHorizon_Meta_', '').replace('.json', '');
-                const localMetaPath = path.join(cwd, `meta_${instName}.json`);
-                
+                const localMetaPath = path.join(dataDir, `meta_${instName}.json`);
+
                 let needsDownload = true;
                 if (fs.existsSync(localMetaPath)) {
                     const localStat = fs.statSync(localMetaPath);
                     const cloudTime = new Date(cloudIndex[mName].modifiedTime).getTime();
                     if (localStat.mtime.getTime() >= cloudTime) needsDownload = false;
                 }
-                
+
                 if (needsDownload) {
                     try {
                         const data = await provider.downloadJSON(cloudIndex[mName].id);
                         writeJsonAtomic(localMetaPath, data);
-                    } catch(_) {} 
+                    } catch (_) {}
                 }
             });
-            await Promise.all(downloadPromises);
+            await withConcurrency(6, metaTasks);
             const list = [...new Set(
                 Object.keys(cloudIndex)
                     .filter(n => n.startsWith('GensHorizon_Backup_'))
@@ -277,7 +290,7 @@ async function syncAllInstances() {
                 const totalSizeBytes = deltaFiles.reduce((sum, n) => sum + (parseInt(cloudIndex[n].size, 10) || 0), 0) + (parseInt(baseFile?.size, 10) || 0);
                 
                 let realName = instName;
-                const localMetaPath = path.join(cwd, `meta_${instName}.json`);
+                const localMetaPath = path.join(dataDir, `meta_${instName}.json`);
                 if (fs.existsSync(localMetaPath)) {
                     try {
                         const metaObj = JSON.parse(fs.readFileSync(localMetaPath, 'utf8'));
@@ -308,14 +321,14 @@ async function syncAllInstances() {
             for (const n of toDelete) {
                 await withRetry(() => provider.deleteFile(cloudIndex[n].id), { ...retryOpts, label: `deleteFile(${n})` });
             }
-            const manifestPath = path.join(cwd, `manifest_${safeTarget}.json`);
+            const manifestPath = path.join(dataDir, `manifest_${safeTarget}.json`);
             if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
             if (fs.existsSync(syncInfoPath)) {
                 const syncState = readJsonSafe(syncInfoPath);
                 delete syncState[safeTarget];
                 writeJsonAtomic(syncInfoPath, syncState);
             }
-            const metaPath = path.join(cwd, `meta_${safeTarget}.json`);
+            const metaPath = path.join(dataDir, `meta_${safeTarget}.json`);
             if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
             console.log(JSON.stringify({ type: 'SUCCESS', instance: targetInstance, message: 'Supprimé du cloud.' }));
             return;
@@ -377,7 +390,7 @@ async function syncAllInstances() {
                 }
 
                 if (baseChanged) {
-                    const tempBase = path.join(cwd, `download_base_${safeInst}.zip`);
+                    const tempBase = path.join(dataDir, `download_base_${safeInst}.zip`);
                     registerTemp(tempBase);
                     try {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'DOWNLOADING', value: 0, instance: inst }));
@@ -396,6 +409,10 @@ async function syncAllInstances() {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 100, instance: inst }));
 
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: 0, instance: inst }));
+                        // DÉCISION : remplacement complet de la base ; les deltas gèrent seuls les suppressions incrémentales.
+                        for (const entry of fs.readdirSync(targetPath)) {
+                            fs.rmSync(path.join(targetPath, entry), { recursive: true, force: true });
+                        }
                         await extractZip(tempBase, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: pct, instance: inst }))
                         );
@@ -406,7 +423,7 @@ async function syncAllInstances() {
                 }
 
                 for (const delta of pendingDeltas) {
-                    const tempDelta = path.join(cwd, `download_delta_${safeInst}_${delta.ts}.zip`);
+                    const tempDelta = path.join(dataDir, `download_delta_${safeInst}_${delta.ts}.zip`);
                     registerTemp(tempDelta);
                     try {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'APPLYING_DELTA', value: 0, instance: inst, delta: delta.name }));
@@ -436,7 +453,7 @@ async function syncAllInstances() {
 
                 try {
                     const newManifest = await generateManifest(targetPath);
-                    writeJsonAtomic(path.join(cwd, `manifest_${safeInst}.json`), newManifest);
+                    writeJsonAtomic(path.join(dataDir, `manifest_${safeInst}.json`), newManifest);
                 } catch (_) {}
 
                 const deltasApplied = pendingDeltas.length;
@@ -458,6 +475,7 @@ async function syncAllInstances() {
                     type       : 'ERROR',
                     instance   : inst,
                     message    : instErr.message + rollbackMsg,
+                    errorCode  : instErr.errorCode || undefined,
                     hasRollback: !!rollbackPath,
                 }));
             }

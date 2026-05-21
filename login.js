@@ -7,10 +7,16 @@ const url   = require('url');
 const path  = require('path');
 const { exec, execSync } = require('child_process');
 
+const crypto = require('crypto');
 const { credentials }    = require('./config');
 const { getProviderName, getTokenPath } = require('./provider');
+const { getHorizonDataDir } = require('./paths');
 
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+
+function createOAuthState() {
+    return crypto.randomBytes(16).toString('hex');
+}
 
 function openBrowser(targetUrl) {
     console.log(JSON.stringify({ type: 'AUTH_URL', message: targetUrl }));
@@ -46,13 +52,14 @@ function httpsPost(hostname, path, body) {
                 catch (e) { reject(e); }
             });
         });
+        req.setTimeout(15000, () => { req.destroy(new Error('OAuth token exchange timeout')); });
         req.on('error', reject);
         req.write(buf);
         req.end();
     });
 }
 
-function waitForCallback(exchangeCode, port) {
+function waitForCallback(exchangeCode, port, expectedState) {
     return new Promise((resolve, reject) => {
         let settled = false;
 
@@ -66,6 +73,15 @@ function waitForCallback(exchangeCode, port) {
                 return;
             }
             if (!parsed.searchParams.has('code')) return;
+
+            // SÉCURITÉ : state OAuth — empêche qu'un tiers injecte un code via redirection CSRF
+            const returnedState = parsed.searchParams.get('state');
+            if (!returnedState || returnedState !== expectedState) {
+                res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end('<h1 style="color:red;text-align:center;font-family:sans-serif;">❌ State OAuth invalide.</h1>');
+                if (!settled) { settled = true; clearTimeout(timer); setTimeout(() => { server.close(); reject(new Error('State OAuth invalide (CSRF ?).')); }, 600); }
+                return;
+            }
 
             const code = parsed.searchParams.get('code');
             try {
@@ -95,6 +111,7 @@ async function loginGoogle() {
     const cred         = credentials.google;
     const REDIRECT_URI = cred.redirect_uri;
     const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
+    const oauthState   = createOAuthState();
     const authUrl = `${cred.auth_uri}?${new URLSearchParams({
         client_id    : cred.client_id,
         redirect_uri : REDIRECT_URI,
@@ -102,6 +119,7 @@ async function loginGoogle() {
         access_type  : 'offline',
         prompt       : 'consent',
         scope        : 'https://www.googleapis.com/auth/drive.appdata',
+        state        : oauthState,
     }).toString()}`;
 
     openBrowser(authUrl);
@@ -112,7 +130,7 @@ async function loginGoogle() {
         }).toString());
         if (tokens.error) throw new Error(tokens.error_description || tokens.error);
         return tokens;
-    }, port);
+    }, port, oauthState);
 }
 
 async function loginDropbox() {
@@ -120,8 +138,9 @@ async function loginDropbox() {
     const REDIRECT_URI = cred.redirect_uri;
     const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
     const DROPBOX_AUTH_URL = 'https://www.dropbox.com/oauth2/authorize';
+    const oauthState = createOAuthState();
 
-    openBrowser(`${DROPBOX_AUTH_URL}?response_type=code&client_id=${cred.client_id}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline`);
+    openBrowser(`${DROPBOX_AUTH_URL}?response_type=code&client_id=${cred.client_id}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline&state=${oauthState}`);
     return waitForCallback(async (code) => {
         const tokens = await httpsPost('api.dropbox.com', '/oauth2/token', new URLSearchParams({
             code, client_id: cred.client_id, client_secret: cred.client_secret,
@@ -129,7 +148,7 @@ async function loginDropbox() {
         }).toString());
         if (tokens.error) throw new Error(tokens.error_description || tokens.error);
         return tokens;
-    }, port);
+    }, port, oauthState);
 }
 
 async function loginOneDrive() {
@@ -145,9 +164,10 @@ async function loginOneDrive() {
         challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
     }
 
+    const oauthState = createOAuthState();
     const params = new URLSearchParams({
         client_id: cred.client_id, response_type: 'code', redirect_uri: REDIRECT_URI,
-        scope: cred.scope, prompt: 'select_account',
+        scope: cred.scope, prompt: 'select_account', state: oauthState,
         ...(usePKCE && { code_challenge: challenge, code_challenge_method: 'S256' })
     });
 
@@ -161,13 +181,11 @@ async function loginOneDrive() {
             }).toString());
         if (tokens.error) throw new Error(tokens.error_description || tokens.error);
         return tokens;
-    }, port);
+    }, port, oauthState);
 }
 
 async function loginPlayer() {
-    const BASE_DIR = process.pkg ? path.dirname(process.execPath) : path.dirname(process.argv[1]);
-    
-    const settingsPath = path.join(BASE_DIR, 'horizon_settings.json');
+    const settingsPath = path.join(getHorizonDataDir(), 'horizon_settings.json');
     const settings = (() => {
         try { return fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, 'utf8')) : {}; } catch { return {}; }
     })();

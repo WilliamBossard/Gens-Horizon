@@ -65,6 +65,10 @@ class OneDriveProvider {
         let res = await graphRequest(method, graphPath, this._token, body);
         if (res.statusCode === 401 && !_retried) { await this._refreshToken(); return this._call(method, graphPath, body, true); }
         if (res.statusCode === 401) throw new Error('OneDrive : token invalide après refresh (accès révoqué ?)');
+        if (res.statusCode >= 400) {
+            const msg = res.body?.error?.message || res.body?.message || JSON.stringify(res.body).slice(0, 300);
+            throw new Error(`OneDrive API ${res.statusCode}: ${msg}`);
+        }
         return res;
     }
 
@@ -181,6 +185,9 @@ const fd = fs.openSync(srcPath, 'r');
         });
         let res = await _doUpload();
         if (res.statusCode === 401) { await this._refreshToken(); res = await _doUpload(); }
+        if (res.statusCode >= 400) {
+            throw new Error(`OneDrive uploadZip error ${res.statusCode}: ${res.body?.error?.message || res.body?.message || ''}`);
+        }
         onProgress && onProgress(100);
         return { id: res.body.id, modifiedTime: res.body.lastModifiedDateTime };
     }
@@ -241,16 +248,27 @@ const fd = fs.openSync(srcPath, 'r');
                 ));
             }
             
+            const onError = (e) => {
+                res.destroy();
+                dest.destroy();
+                try { fs.unlinkSync(destPath); } catch (_) {}
+                reject(e);
+            };
             res.on('data', chunk => {
                 downloaded += chunk.length;
-                    if (totalSize > 0 && onProgress) {
-                        const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
-                        if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) { onProgress(pct); lastPct = pct; }
-                    }
-                    dest.write(chunk);
-                });
-                res.on('end',   () => dest.end(resolve));
-                res.on('error', e  => { dest.destroy(); reject(e); });
+                if (totalSize > 0 && onProgress) {
+                    const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
+                    if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) { onProgress(pct); lastPct = pct; }
+                }
+                if (!dest.write(chunk)) {
+                    res.pause();
+                    dest.once('drain', () => res.resume());
+                }
+            });
+            res.on('end', () => dest.end());
+            res.on('error', onError);
+            dest.on('finish', resolve);
+            dest.on('error', onError);
             });
             req.on('error', e => { dest.destroy(); reject(e); });
             req.end();

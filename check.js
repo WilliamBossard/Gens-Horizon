@@ -3,21 +3,21 @@
 const fs   = require('fs');
 const path = require('path');
 
-const { getInstancesFolder }             = require('./paths');
+const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getProvider }                    = require('./provider');
 const { checkConnectivity, readJsonSafe, getCanonicalName, setupProcessHandlers } = require('./utils');
 const { withRetry } = require('./retry');
 
 setupProcessHandlers();
 
-const SYNC_INFO_FILE = path.join(process.cwd(), 'last_sync.json');
-const SETTINGS_PATH  = path.join(process.cwd(), 'horizon_settings.json');
+const SYNC_INFO_FILE = path.join(getHorizonDataDir(), 'last_sync.json');
+const SETTINGS_PATH  = path.join(getHorizonDataDir(), 'horizon_settings.json');
 
 async function check() {
     try {
         const online = await checkConnectivity();
         if (!online) {
-            console.log(JSON.stringify({ status: 'OFFLINE', message: 'Internet indisponible.' }));
+            console.log(JSON.stringify({ type: 'OFFLINE', status: 'OFFLINE', message: 'Internet indisponible.' }));
             return;
         }
 
@@ -25,7 +25,7 @@ async function check() {
 
         const provider = await getProvider(settings);
         if (!provider) {
-            console.log(JSON.stringify({ status: 'NOT_LOGGED_IN' }));
+            console.log(JSON.stringify({ type: 'CHECK_RESULT', status: 'NOT_LOGGED_IN', updates: [] }));
             return;
         }
 
@@ -67,13 +67,17 @@ async function check() {
             }
         }
 
-        console.log(JSON.stringify(report));
+        console.log(JSON.stringify({
+            type    : 'CHECK_RESULT',
+            status  : report.status,
+            updates : report.updates,
+        }));
 
     } catch (e) {
         if (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN' || e.code === 'ECONNREFUSED') {
-            console.log(JSON.stringify({ status: 'OFFLINE', message: 'Internet indisponible.' }));
+            console.log(JSON.stringify({ type: 'OFFLINE', status: 'OFFLINE', message: 'Internet indisponible.' }));
         } else {
-            console.log(JSON.stringify({ status: 'ERROR', message: e.message }));
+            console.log(JSON.stringify({ type: 'ERROR', status: 'ERROR', message: e.message }));
         }
     }
 }

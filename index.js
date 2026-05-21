@@ -2,8 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const { getHorizonDataDir } = require('./paths');
 
-const SETTINGS_PATH = path.join(process.cwd(), 'horizon_settings.json');
+// DÉCISION : horizon_settings.json dans bin ; systemEnabled/autoSync/autoUpload sont lus par le launcher uniquement.
+const SETTINGS_PATH = path.join(getHorizonDataDir(), 'horizon_settings.json');
 
 if (!fs.existsSync(SETTINGS_PATH)) {
     const defaultSettings = {

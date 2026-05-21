@@ -55,6 +55,11 @@ class GoogleProvider {
         let downloaded = 0, lastPct = -1;
 
         return new Promise((resolve, reject) => {
+            const onError = (e) => {
+                res.data.destroy();
+                dest.destroy();
+                reject(e);
+            };
             res.data.on('data', chunk => {
                 downloaded += chunk.length;
                 if (totalSize > 0) {
@@ -64,10 +69,15 @@ class GoogleProvider {
                         lastPct = pct;
                     }
                 }
+                if (!dest.write(chunk)) {
+                    res.data.pause();
+                    dest.once('drain', () => res.data.resume());
+                }
             });
-            res.data.pipe(dest);
-            res.data.on('end',   () => dest.end(resolve));
-            res.data.on('error', e  => { dest.destroy(); reject(e); });
+            res.data.on('end', () => dest.end());
+            res.data.on('error', onError);
+            dest.on('finish', resolve);
+            dest.on('error', onError);
         });
     }
 

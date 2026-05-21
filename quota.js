@@ -3,8 +3,10 @@
 const fs   = require('fs');
 const path = require('path');
 
-const { getProvider }          = require('./provider');
+const { getProvider } = require('./provider');
+const { getHorizonDataDir } = require('./paths');
 const { checkConnectivity, setupProcessHandlers } = require('./utils');
+const { withRetry } = require('./retry');
 
 setupProcessHandlers();
 
@@ -16,26 +18,28 @@ async function quota() {
             return;
         }
 
-        const cwd          = process.cwd();
-        const settingsPath = path.join(cwd, 'horizon_settings.json');
+        const dataDir      = getHorizonDataDir();
+        const settingsPath = path.join(dataDir, 'horizon_settings.json');
         let settings = {};
         if (fs.existsSync(settingsPath)) {
             try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch (_) {}
         }
 
-        const provider = await getProvider(settings, cwd);
+        const retryOpts = { maxRetries: settings.maxRetries || 3, baseDelay: settings.retryBaseDelay || 1500 };
+
+        const provider = await getProvider(settings);
         if (!provider) {
-            console.log(JSON.stringify({ 
-    type: 'ERROR', 
-    errorCode: 'AUTH_EXPIRED', 
-    message: "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres." 
-}));
+            console.log(JSON.stringify({
+                type: 'ERROR',
+                errorCode: 'AUTH_EXPIRED',
+                message: "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres."
+            }));
             return;
         }
 
-        const quotaInfo = await provider.getQuota();
+        const quotaInfo = await withRetry(() => provider.getQuota(), { ...retryOpts, label: 'getQuota' });
 
-        const cloudFiles  = await provider.listFiles('GensHorizon_');
+        const cloudFiles  = await withRetry(() => provider.listFiles('GensHorizon_'), { ...retryOpts, label: 'listFiles' });
         const horizonUsed = cloudFiles.reduce((s, f) => s + (parseInt(f.size, 10) || 0), 0);
 
         const instanceMap   = {};
@@ -55,7 +59,7 @@ async function quota() {
                 isDelta  = true;
             } else if (f.name.startsWith('GensHorizon_Manifest_')) {
                 instName = f.name.replace('GensHorizon_Manifest_', '').replace('.json', '');
-            }else if (f.name.startsWith('GensHorizon_Meta_')) { 
+            } else if (f.name.startsWith('GensHorizon_Meta_')) {
                 instName = f.name.replace('GensHorizon_Meta_', '').replace('.json', '');
             }
 

@@ -1,6 +1,21 @@
+/**
+ * ==============================================================================
+ * GENS HORIZON — CHEMINS & SCAN INSTANCES
+ * ==============================================================================
+ * DÉCISION ARCHITECTURALE :
+ * - getHorizonDataDir() = même dossier que le cwd du spawn Gens-Launcher
+ *   (%AppData%/GensLauncher/bin). En pkg : répertoire de Horizon.exe, pas le cwd shell.
+ * - scanInstances() retourne toujours le nom de DOSSIER (clé disque / Horizon), pas data.name.
+ * ==============================================================================
+ */
+
 const os   = require('os');
 const path = require('path');
 const fs   = require('fs');
+
+function getHorizonDataDir() {
+    return process.pkg ? path.dirname(process.execPath) : process.cwd();
+}
 
 function getAppDataPath() {
     if (process.platform === 'win32') {
@@ -22,6 +37,10 @@ function getInstancesFolder() {
     return path.join(appData, 'GensLauncher', 'instances');
 }
 
+/**
+ * DÉCISION : la clé instance côté Horizon = nom du dossier sous instances/
+ * (safeDir). instance.json peut contenir un nom affiché différent (espaces, etc.).
+ */
 function scanInstances() {
     const instancesDir = getInstancesFolder();
     if (!fs.existsSync(instancesDir)) {
@@ -37,17 +56,18 @@ function scanInstances() {
             if (fs.statSync(fullPath).isDirectory()) {
                 const jsonPath = path.join(fullPath, 'instance.json');
                 if (fs.existsSync(jsonPath)) {
-                    const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
-                    if (data.name) {
-                        instances.push(data.name);
-                        continue; 
-                    }
+                    instances.push(item);
                 }
-                instances.push(item);
             }
         } catch (_) {}
     }
     return instances;
 }
 
-module.exports = { getInstancesFolder, scanInstances };
+function getProviderName(settings) {
+    const cliArg = process.argv.find(a => a.startsWith('--provider='));
+    if (cliArg) return cliArg.split('=')[1].trim();
+    return (settings && settings.provider) || 'google';
+}
+
+module.exports = { getHorizonDataDir, getInstancesFolder, scanInstances, getProviderName };

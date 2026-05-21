@@ -57,16 +57,27 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
                 });
                 return;
             }
+            const onError = (e) => {
+                res.destroy();
+                dest.destroy();
+                try { fs.unlinkSync(destPath); } catch (_) {}
+                reject(e);
+            };
             res.on('data', chunk => {
                 downloaded += chunk.length;
                 if (totalSize > 0) {
                     const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
                     if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) { onProgress && onProgress(pct); lastPct = pct; }
                 }
-                dest.write(chunk);
+                if (!dest.write(chunk)) {
+                    res.pause();
+                    dest.once('drain', () => res.resume());
+                }
             });
-            res.on('end',   () => dest.end(() => resolve()));
-            res.on('error', e  => { dest.destroy(); reject(e); });
+            res.on('end', () => dest.end());
+            res.on('error', onError);
+            dest.on('finish', resolve);
+            dest.on('error', onError);
         });
         req.on('error', e => { dest.destroy(); reject(e); });
         req.end();
@@ -102,6 +113,10 @@ class DropboxProvider {
             return this._api(endpoint, body, true);
         }
         if (res.statusCode === 401) throw new Error('Dropbox : token invalide après refresh (accès révoqué ?)');
+        if (res.statusCode >= 400) {
+            const msg = res.body?.error_summary || res.body?.error?.['.tag'] || JSON.stringify(res.body).slice(0, 300);
+            throw new Error(`Dropbox API ${res.statusCode}: ${msg}`);
+        }
         return res.body;
     }
 

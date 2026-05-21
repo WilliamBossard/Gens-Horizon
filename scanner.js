@@ -13,14 +13,24 @@ const IGNORED = new Set([
 
 async function withConcurrency(limit, tasks) {
     const executing = new Set();
+    const errors = [];
 
     for (let i = 0; i < tasks.length; i++) {
-        const p = tasks[i]().finally(() => executing.delete(p));
+        const p = tasks[i]()
+            .catch(e => {
+                errors.push(e);
+            })
+            .finally(() => executing.delete(p));
+            
         executing.add(p);
-        if (executing.size >= limit) await Promise.race(executing);
+        if (executing.size >= limit) {
+            await Promise.race(executing);
+        }
     }
 
     await Promise.all(executing);
+    
+    if (errors.length > 0) throw errors[0];
 }
 
 function hashFile(filePath) {
