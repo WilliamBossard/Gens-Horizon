@@ -50,35 +50,46 @@ class GoogleProvider {
     }
 
     async downloadFile(fileId, destPath, onProgress, totalSize) {
-        const dest = fs.createWriteStream(destPath);
-        const res  = await this._drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
-        let downloaded = 0, lastPct = -1;
+        const controller  = new AbortController();
+        const timeoutId   = setTimeout(() => controller.abort(new Error('Google Drive: timeout téléchargement (10 min)')), 10 * 60_000);
+        const dest        = fs.createWriteStream(destPath);
+        let downloaded    = 0, lastPct = -1;
 
-        return new Promise((resolve, reject) => {
-            const onError = (e) => {
-                res.data.destroy();
-                dest.destroy();
-                reject(e);
-            };
-            res.data.on('data', chunk => {
-                downloaded += chunk.length;
-                if (totalSize > 0) {
-                    const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
-                    if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
-                        onProgress && onProgress(pct);
-                        lastPct = pct;
+        try {
+            const res = await this._drive.files.get(
+                { fileId, alt: 'media' },
+                { responseType: 'stream', signal: controller.signal }
+            );
+
+            return await new Promise((resolve, reject) => {
+                const onError = (e) => {
+                    res.data.destroy();
+                    dest.destroy();
+                    try { fs.unlinkSync(destPath); } catch (_) {}
+                    reject(e);
+                };
+                res.data.on('data', chunk => {
+                    downloaded += chunk.length;
+                    if (totalSize > 0) {
+                        const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
+                        if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
+                            onProgress && onProgress(pct);
+                            lastPct = pct;
+                        }
                     }
-                }
-                if (!dest.write(chunk)) {
-                    res.data.pause();
-                    dest.once('drain', () => res.data.resume());
-                }
+                    if (!dest.write(chunk)) {
+                        res.data.pause();
+                        dest.once('drain', () => res.data.resume());
+                    }
+                });
+                res.data.on('end', () => dest.end());
+                res.data.on('error', onError);
+                dest.on('finish', resolve);
+                dest.on('error', onError);
             });
-            res.data.on('end', () => dest.end());
-            res.data.on('error', onError);
-            dest.on('finish', resolve);
-            dest.on('error', onError);
-        });
+        } finally {
+            clearTimeout(timeoutId);
+        }
     }
 
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {
@@ -117,8 +128,15 @@ class GoogleProvider {
     }
 
     async downloadJSON(fileId) {
-        const res = await this._drive.files.get({ fileId, alt: 'media' });
-        return typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+        const res  = await this._drive.files.get({ fileId, alt: 'media' });
+        const data = res.data;
+        if (data && typeof data === 'object' && !Buffer.isBuffer(data)) return data;
+        const str = Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
+        try {
+            return JSON.parse(str);
+        } catch (e) {
+            throw new Error(`[google] downloadJSON : JSON invalide pour fileId=${fileId} — ${e.message}`);
+        }
     }
 
     async deleteFile(fileId) {

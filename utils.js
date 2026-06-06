@@ -20,7 +20,8 @@ function readJsonSafe(filePath, fallback = {}) {
 }
 
 
-const _tempFiles = new Set();
+const _tempFiles    = new Set();
+const _shutdownHooks = [];
 
 function registerTemp(p)   { _tempFiles.add(p); }
 function unregisterTemp(p) { _tempFiles.delete(p); }
@@ -28,6 +29,16 @@ function cleanupTemps() {
     for (const f of _tempFiles) {
         try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (_) {}
     }
+}
+
+/**
+ * Enregistre une fonction à appeler lors de tout shutdown (SIGINT, SIGTERM,
+ * uncaughtException, unhandledRejection). Utilisé par lock.js pour releaseLock().
+ */
+function onShutdown(fn) { _shutdownHooks.push(fn); }
+
+function _runShutdownHooks() {
+    for (const fn of _shutdownHooks) { try { fn(); } catch (_) {} }
 }
 
 
@@ -54,6 +65,7 @@ function setupProcessHandlers() {
 
     const shutdown = (signal) => {
         console.error(`[system] Signal reçu : ${signal}. Nettoyage en cours...`);
+        _runShutdownHooks();
         cleanupTemps();
         process.exit(0);
     };
@@ -71,6 +83,7 @@ function setupProcessHandlers() {
 
         process.stderr.write(`[CRITIQUE] ${err.stack || err}\n`);
 
+        _runShutdownHooks();
         cleanupTemps();
         process.exit(1);
     });
@@ -87,6 +100,7 @@ function setupProcessHandlers() {
 
         process.stderr.write(`[CRITIQUE] Promesse rejetée : ${msg}\n`);
 
+        _runShutdownHooks();
         cleanupTemps();
         process.exit(1);
     });
@@ -100,5 +114,6 @@ module.exports = {
     registerTemp,
     unregisterTemp,
     cleanupTemps,
+    onShutdown,
     setupProcessHandlers,
 };

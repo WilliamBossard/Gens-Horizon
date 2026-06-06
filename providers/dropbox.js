@@ -35,13 +35,14 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
         const req = https.request(options, (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 const loc = new URL(res.headers.location);
+                dest.once('error', () => {});
                 dest.once('close', () => {
                     httpsDownload(
                         { hostname: loc.hostname, path: loc.pathname + loc.search, method: 'GET' },
                         destPath, onProgress, totalSize, redirectCount + 1
                     ).then(resolve).catch(reject);
                 });
-                dest.destroy(); 
+                dest.destroy();
                 return;
             }
             if (res.statusCode < 200 || res.statusCode >= 300) {

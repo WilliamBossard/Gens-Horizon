@@ -7,7 +7,7 @@ const path     = require('path');
 const { getInstancesFolder, scanInstances, getHorizonDataDir } = require('./paths');
 const { generateManifest, compareManifests }   = require('./scanner');
 const { getProvider }                          = require('./provider');
-const { acquireLock, releaseLock }             = require('./lock');
+const { acquireLock, releaseLock, LOCK_FILE } = require('./lock');
 const { withRetry }                            = require('./retry');
 const {
     checkConnectivity,
@@ -53,6 +53,15 @@ function createFullZip(folder, tempZip, inst) {
                 lastPct = pct;
             }
         });
+        archive.on('warning', (warn) => {
+            if (warn.code === 'ENOENT') {
+                process.stderr.write(`[upload] Fichier absent ignoré lors de la compression : ${warn.message}\n`);
+            } else {
+                output.destroy();
+                try { fs.unlinkSync(tempZip); } catch (_) {}
+                reject(warn);
+            }
+        });
         archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
         output.on('close', resolve);
         output.on('error', err => { archive.abort(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
@@ -69,6 +78,15 @@ function createDeltaZip(folder, changed, deleted, tempZip, inst) {
         const archive = archiver('zip', { zlib: { level: 6 } });
 
         output.on('close', resolve);
+        archive.on('warning', (warn) => {
+            if (warn.code === 'ENOENT') {
+                process.stderr.write(`[upload] Fichier absent ignoré lors de la compression delta : ${warn.message}\n`);
+            } else {
+                output.destroy();
+                try { fs.unlinkSync(tempZip); } catch (_) {}
+                reject(warn);
+            }
+        });
         archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
         output.on('error', err => { archive.abort(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
 
@@ -106,6 +124,9 @@ async function upload() {
         }));
         process.exit(1);
     }
+    const lockHeartbeat = setInterval(() => {
+        try { fs.utimesSync(LOCK_FILE, new Date(), new Date()); } catch (_) {}
+    }, 5 * 60_000);
 
     try {
         const online = await checkConnectivity();
@@ -131,11 +152,11 @@ async function upload() {
 
         const provider = await getProvider(settings);
         if (!provider) {
-            console.log(JSON.stringify({ 
-    type: 'ERROR', 
-    errorCode: 'AUTH_EXPIRED', 
-    message: "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres." 
-}));
+            console.log(JSON.stringify({
+                type     : 'ERROR',
+                errorCode: 'AUTH_EXPIRED',
+                message  : "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.",
+            }));
             return;
         }
 
@@ -155,6 +176,28 @@ async function upload() {
         const cloudFiles = await withRetry(() => provider.listFiles('GensHorizon_'), { ...retryOpts, label: 'listFiles' });
         const cloudIndex = {};
         for (const f of cloudFiles) cloudIndex[f.name] = f;
+
+        for (const name of Object.keys(cloudIndex)) {
+            if (!name.startsWith('GensHorizon_Delta_')) continue;
+            const body  = name.replace('GensHorizon_Delta_', '').replace('.zip', '');
+            const parts = body.split('_');
+            const ts    = parseInt(parts.pop(), 10);
+            if (isNaN(ts)) continue;
+            const instName  = parts.join('_');
+            const baseName  = `GensHorizon_Backup_${instName}.zip`;
+            const baseEntry = cloudIndex[baseName];
+            if (!baseEntry) continue;
+            const baseTime = new Date(baseEntry.modifiedTime).getTime();
+            if (ts < baseTime) {
+                try {
+                    await withRetry(() => provider.deleteFile(cloudIndex[name].id), { ...retryOpts, label: `gc_orphanDelta(${name})` });
+                    delete cloudIndex[name];
+                    process.stderr.write(`[upload] GC : delta orphelin supprimé : ${name}\n`);
+                } catch (e) {
+                    process.stderr.write(`[upload] GC : échec suppression delta orphelin ${name}: ${e.message}\n`);
+                }
+            }
+        }
 
         let syncState = readJsonSafe(syncInfoPath);
 
@@ -302,7 +345,17 @@ async function upload() {
 
                 const changedFiles = [...diff.added, ...diff.modified];
                 const deletedFiles = diff.deleted;
-                const timestamp    = Date.now();
+                
+                let timestamp = Date.now();
+                let maxTs = 0;
+                for (const n of existingDeltas) {
+                    const ts = parseInt(n.replace(`GensHorizon_Delta_${safeInst}_`, '').replace('.zip', ''), 10);
+                    if (!isNaN(ts) && ts > maxTs) maxTs = ts;
+                }
+                if (timestamp <= maxTs) {
+                    timestamp = maxTs + 1000;
+                }
+                
                 const deltaName    = `GensHorizon_Delta_${safeInst}_${timestamp}.zip`;
                 const tempDelta    = path.join(dataDir, `delta_${safeInst}_${timestamp}.zip`);
 
@@ -328,7 +381,11 @@ async function upload() {
                         { ...retryOpts, label: `uploadMeta(${inst})` }
                     );
 
-                    syncState[safeInst] = deltaResult?.modifiedTime || new Date(timestamp).toISOString(); 
+                    // DÉCISION TEMPORELLE : on utilise le timestamp local encodé dans le nom
+                    // du fichier delta, pas le modifiedTime cloud. check.js extrait ce même
+                    // timestamp depuis le nom de fichier — la comparaison reste cohérente même
+                    // si l'horloge du serveur cloud diverge de l'horloge locale.
+                    syncState[safeInst] = new Date(timestamp).toISOString();
                     
                     writeJsonAtomic(syncInfoPath, syncState);
                     writeJsonAtomic(manifestPath, currentManifest);
@@ -353,6 +410,7 @@ async function upload() {
             console.log(JSON.stringify({ type: 'ERROR', message: e.message }));
         }
     } finally {
+        clearInterval(lockHeartbeat);
         releaseLock();
     }
 }

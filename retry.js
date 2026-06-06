@@ -27,10 +27,11 @@ async function withRetry(fn, { maxRetries = 3, baseDelay = 1500, label = 'opéra
             const isLast = attempt > maxRetries;
             if (isLast || !isRetryable(err)) throw err;
 
-            const delay = baseDelay * Math.pow(2, attempt - 1); 
+            const cap   = 30_000;
+            const delay = Math.random() * Math.min(cap, baseDelay * Math.pow(2, attempt - 1));
             process.stderr.write(
                 `[retry] "${label}" échoué (tentative ${attempt}/${maxRetries}) : ${err.message}` +
-                ` — nouvel essai dans ${delay}ms\n`
+                ` — nouvel essai dans ${Math.round(delay)}ms\n`
             );
             await new Promise(r => setTimeout(r, delay));
         }

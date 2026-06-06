@@ -13,7 +13,8 @@ const fs     = require('fs');
 const crypto = require('crypto');
 const os     = require('os');
 const path   = require('path');
-const { getHorizonDataDir } = require('./paths');
+const { getHorizonDataDir }          = require('./paths');
+const { registerTemp, unregisterTemp } = require('./utils');
 
 let username = 'default';
 try {
@@ -80,7 +81,7 @@ function getSecureToken(filePath) {
 
 function encryptToken(filePath, tokenData) {
     const tmp = filePath + '.tmp';
-    if (typeof registerTemp === 'function') registerTemp(tmp);
+    registerTemp(tmp);
 
     fs.writeFileSync(tmp, _encrypt(JSON.stringify(tokenData)), {
         encoding: 'utf8',
@@ -88,7 +89,7 @@ function encryptToken(filePath, tokenData) {
     });
 
     fs.renameSync(tmp, filePath);
-    if (typeof unregisterTemp === 'function') unregisterTemp(tmp);
+    unregisterTemp(tmp);
 }
 
 module.exports = { getSecureToken, encryptToken };

@@ -30,7 +30,15 @@ async function withConcurrency(limit, tasks) {
 
     await Promise.all(executing);
     
-    if (errors.length > 0) throw errors[0];
+    if (errors.length > 0) {
+        if (errors.length > 1) {
+            process.stderr.write(
+                `[scanner] ${errors.length - 1} erreur(s) secondaire(s) ignorée(s) :\n` +
+                errors.slice(1).map(e => `  - ${e.message}`).join('\n') + '\n'
+            );
+        }
+        throw errors[0];
+    }
 }
 
 function hashFile(filePath) {

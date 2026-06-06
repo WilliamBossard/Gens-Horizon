@@ -3,10 +3,11 @@
 const fs   = require('fs');
 const path = require('path');
 const { getHorizonDataDir } = require('./paths');
+const { onShutdown }        = require('./utils');
 
-const LOCK_FILE = path.join(getHorizonDataDir(), 'horizon.lock');
-const MAX_LOCK_RETRIES = 5;
-const STALE_LOCK_MS = 30 * 60 * 1000;
+const LOCK_FILE         = path.join(getHorizonDataDir(), 'horizon.lock');
+const MAX_LOCK_RETRIES  = 5;
+const STALE_LOCK_MS     = 2 * 60 * 60 * 1000; 
 
 function isLockStale() {
     try {
@@ -41,7 +42,12 @@ function acquireLock(attempt = 0) {
                     if (killErr.code === 'EPERM') {
                         if (isLockStale()) {
                             process.stderr.write(`[lock] Verrou EPERM et périmé — nettoyage.\n`);
-                            fs.unlinkSync(LOCK_FILE);
+                            try {
+                                fs.unlinkSync(LOCK_FILE);
+                            } catch (_) {
+                                process.stderr.write(`[lock] Impossible de supprimer le verrou EPERM — abandon.\n`);
+                                return false;
+                            }
                             if (attempt >= MAX_LOCK_RETRIES) return false;
                             return acquireLock(attempt + 1);
                         }
@@ -67,10 +73,8 @@ function acquireLock(attempt = 0) {
         return false;
     }
 
-    const release = () => releaseLock();
-    process.once('exit',    release); 
-    process.once('SIGTERM', () => { release(); process.exit(0); });
-    process.once('SIGINT',  () => { release(); process.exit(0); });
+    onShutdown(() => releaseLock());
+    process.once('exit', () => releaseLock()); 
 
     return true;
 }
@@ -83,4 +87,4 @@ function releaseLock() {
     } catch (_) {}
 }
 
-module.exports = { acquireLock, releaseLock };
+module.exports = { acquireLock, releaseLock, LOCK_FILE };

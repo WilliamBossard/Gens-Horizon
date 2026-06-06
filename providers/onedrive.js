@@ -25,6 +25,7 @@ function graphRequest(method, graphPath, accessToken, body = null) {
                 resolve({ statusCode: res.statusCode, body: parsed });
             });
         });
+        req.setTimeout(30_000, () => { req.destroy(new Error('OneDrive: timeout réseau graphRequest (30s)')); });
         req.on('error', reject);
         if (bodyBuf) req.write(bodyBuf);
         req.end();
@@ -53,6 +54,7 @@ class OneDriveProvider {
                 r.on('data', c => chunks.push(c));
                 r.on('end', () => { try { resolve({ statusCode: r.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) }); } catch (e) { reject(e); } });
             });
+            req.setTimeout(20_000, () => { req.destroy(new Error('OneDrive: timeout refresh token (20s)')); });
             req.on('error', reject); req.write(buf); req.end();
         });
         if (!res.body.access_token) throw new Error('OneDrive token refresh failed: ' + (res.body.error_description || res.body.error || res.statusCode));
@@ -128,10 +130,13 @@ const fd = fs.openSync(srcPath, 'r');
                             let parsed = {};
                             if (chunks.length > 0) {
                                 try { parsed = JSON.parse(Buffer.concat(chunks).toString()); }
-                                catch (_) { parsed = {}; } 
+                                catch (_) { parsed = {}; }
                             }
                             resolve({ statusCode: r.statusCode, body: parsed });
                         });
+                    });
+                    req.setTimeout(120_000, () => {
+                        req.destroy(new Error(`OneDrive: timeout chunk PUT offset=${offset} (120s)`));
                     });
                     req.on('error', reject); req.write(buffer); req.end();
                 });
@@ -152,14 +157,15 @@ const fd = fs.openSync(srcPath, 'r');
                     const req = https.request({
                         hostname: uploadUrl.hostname,
                         path: uploadUrl.pathname + uploadUrl.search,
-                        method: 'DELETE' 
+                        method: 'DELETE'
                     }, resolve);
-                    req.on('error', resolve); 
+                    req.setTimeout(15_000, () => { req.destroy(); resolve(); }); // best-effort
+                    req.on('error', resolve);
                     req.end();
                 });
             } catch (_) {}
-            
-            throw error; 
+
+            throw error;
         } finally {
             fs.closeSync(fd);
         }
@@ -181,6 +187,7 @@ const fd = fs.openSync(srcPath, 'r');
                 r.on('data', c => chunks.push(c));
                 r.on('end', () => resolve({ statusCode: r.statusCode, body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {} }));
             });
+            req.setTimeout(60_000, () => { req.destroy(new Error('OneDrive: timeout uploadZip simple (60s)')); });
             req.on('error', reject); req.write(content); req.end();
         });
         let res = await _doUpload();
@@ -203,6 +210,7 @@ const fd = fs.openSync(srcPath, 'r');
                 r.on('data', c => chunks.push(c));
                 r.on('end', () => { try { resolve({ statusCode: r.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) }); } catch (e) { reject(e); } });
             });
+            req.setTimeout(30_000, () => { req.destroy(new Error('OneDrive: timeout uploadJSON (30s)')); });
             req.on('error', reject); req.write(buf); req.end();
         });
         let res = await _doUpload();
@@ -221,6 +229,7 @@ const fd = fs.openSync(srcPath, 'r');
                 if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) resolve(res.headers.location);
                 else reject(Object.assign(new Error(`OneDrive download: statut inattendu ${res.statusCode}`), { statusCode: res.statusCode }));
             });
+            req.setTimeout(20_000, () => { req.destroy(new Error('OneDrive: timeout _getDownloadUrl (20s)')); });
             req.on('error', reject); req.end();
         });
     }
