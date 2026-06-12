@@ -1,16 +1,19 @@
 'use strict';
 
-const fs    = require('fs');
-const http  = require('http');
+const fs = require('fs');
+const http = require('http');
 const https = require('https');
-const url   = require('url');
-const path  = require('path');
-const { exec, execSync } = require('child_process');
+const url = require('url');
+const path = require('path');
+const { execFile, execSync } = require('child_process');
 
 const crypto = require('crypto');
-const { credentials }    = require('./config');
+const { credentials } = require('./config');
 const { getProviderName, getTokenPath } = require('./provider');
 const { getHorizonDataDir } = require('./paths');
+const { setupProcessHandlers } = require('./utils');
+
+setupProcessHandlers();
 
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -23,19 +26,18 @@ function openBrowser(targetUrl) {
 
     let cmd;
     if (process.platform === 'win32') {
-        cmd = `start "" "${targetUrl}"`;
+        execFile('cmd', ['/c', 'start', '', targetUrl], () => { });
     } else if (process.platform === 'darwin') {
-        cmd = `open "${targetUrl}"`;
+        execFile('open', [targetUrl], () => { });
     } else {
         try {
             execSync('which xdg-open', { stdio: 'ignore' });
-            cmd = `xdg-open "${targetUrl}"`;
+            execFile('xdg-open', [targetUrl], () => { });
         } catch (_) {
             console.log(JSON.stringify({ type: 'INFO', message: 'Environnement headless détecté. Ouvre l\'URL manuellement dans un navigateur.' }));
             return;
         }
     }
-    exec(cmd, () => {});
 }
 
 function httpsPost(hostname, path, body) {
@@ -74,7 +76,6 @@ function waitForCallback(exchangeCode, port, expectedState) {
             }
             if (!parsed.searchParams.has('code')) return;
 
-            // SÉCURITÉ : state OAuth — empêche qu'un tiers injecte un code via redirection CSRF
             const returnedState = parsed.searchParams.get('state');
             if (!returnedState || returnedState !== expectedState) {
                 res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -97,7 +98,7 @@ function waitForCallback(exchangeCode, port, expectedState) {
         });
 
         const timer = setTimeout(() => {
-            if (!settled) { settled = true; server.close(); reject(new Error('Délai d\'authentification dépassé.')); process.exit(1); }
+            if (!settled) { settled = true; server.close(); reject(new Error('Délai d\'authentification dépassé.')); }
         }, AUTH_TIMEOUT_MS);
 
         server.listen(port, '127.0.0.1', () => {
@@ -108,18 +109,18 @@ function waitForCallback(exchangeCode, port, expectedState) {
 }
 
 async function loginGoogle() {
-    const cred         = credentials.google;
+    const cred = credentials.google;
     const REDIRECT_URI = cred.redirect_uri;
-    const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
-    const oauthState   = createOAuthState();
+    const port = parseInt(new URL(REDIRECT_URI).port) || 80;
+    const oauthState = createOAuthState();
     const authUrl = `${cred.auth_uri}?${new URLSearchParams({
-        client_id    : cred.client_id,
-        redirect_uri : REDIRECT_URI,
+        client_id: cred.client_id,
+        redirect_uri: REDIRECT_URI,
         response_type: 'code',
-        access_type  : 'offline',
-        prompt       : 'consent',
-        scope        : 'https://www.googleapis.com/auth/drive.appdata',
-        state        : oauthState,
+        access_type: 'offline',
+        prompt: 'consent',
+        scope: 'https://www.googleapis.com/auth/drive.appdata',
+        state: oauthState,
     }).toString()}`;
 
     openBrowser(authUrl);
@@ -134,9 +135,9 @@ async function loginGoogle() {
 }
 
 async function loginDropbox() {
-    const cred         = credentials.dropbox;
+    const cred = credentials.dropbox;
     const REDIRECT_URI = cred.redirect_uri;
-    const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
+    const port = parseInt(new URL(REDIRECT_URI).port) || 80;
     const DROPBOX_AUTH_URL = 'https://www.dropbox.com/oauth2/authorize';
     const oauthState = createOAuthState();
 
@@ -152,15 +153,15 @@ async function loginDropbox() {
 }
 
 async function loginOneDrive() {
-    const cred         = credentials.onedrive;
+    const cred = credentials.onedrive;
     const REDIRECT_URI = cred.redirect_uri;
-    const port         = parseInt(new URL(REDIRECT_URI).port) || 80;
-    const usePKCE      = !cred.client_secret;
+    const port = parseInt(new URL(REDIRECT_URI).port) || 80;
+    const usePKCE = !cred.client_secret;
 
     let verifier, challenge;
     if (usePKCE) {
         const crypto = require('crypto');
-        verifier  = crypto.randomBytes(32).toString('base64url');
+        verifier = crypto.randomBytes(32).toString('base64url');
         challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
     }
 
@@ -195,16 +196,16 @@ async function loginPlayer() {
 
     let tokens;
     switch (providerName) {
-        case 'google':   tokens = await loginGoogle();   break;
-        case 'dropbox':  tokens = await loginDropbox();  break;
+        case 'google': tokens = await loginGoogle(); break;
+        case 'dropbox': tokens = await loginDropbox(); break;
         case 'onedrive': tokens = await loginOneDrive(); break;
         default: throw new Error(`Fournisseur inconnu : ${providerName}`);
     }
 
     const { encryptToken } = require('./Auth');
-    const tokenPath = getTokenPath(providerName); 
+    const tokenPath = getTokenPath(providerName);
     encryptToken(tokenPath, tokens);
-    
+
     if (fs.existsSync(settingsPath)) {
         try {
             const sets = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
@@ -212,7 +213,7 @@ async function loginPlayer() {
                 sets.provider = providerName;
                 fs.writeFileSync(settingsPath, JSON.stringify(sets, null, 2));
             }
-        } catch (_) {}
+        } catch (_) { }
     }
 }
 

@@ -1,13 +1,13 @@
 'use strict';
 
-const fs    = require('fs');
+const fs = require('fs');
 const https = require('https');
-const path  = require('path');
-const os    = require('os');
+const path = require('path');
+const os = require('os');
 const { credentials } = require('../config');
 const Auth = require('../Auth');
 const GRAPH_HOST = 'graph.microsoft.com';
-const APP_ROOT   = '/v1.0/me/drive/special/approot';
+const APP_ROOT = '/v1.0/me/drive/special/approot';
 const { registerTemp, unregisterTemp } = require('../utils');
 
 function graphRequest(method, graphPath, accessToken, body = null) {
@@ -34,9 +34,9 @@ function graphRequest(method, graphPath, accessToken, body = null) {
 
 class OneDriveProvider {
     constructor(tokenData, credentials, tokenPath) {
-        this._token   = tokenData.access_token;
+        this._token = tokenData.access_token;
         this._refresh = tokenData.refresh_token;
-        this._creds   = credentials;
+        this._creds = credentials;
         this._tokenPath = tokenPath;
     }
 
@@ -60,7 +60,7 @@ class OneDriveProvider {
         if (!res.body.access_token) throw new Error('OneDrive token refresh failed: ' + (res.body.error_description || res.body.error || res.statusCode));
         this._token = res.body.access_token;
         if (res.body.refresh_token) this._refresh = res.body.refresh_token;
-        Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'Bearer' }); 
+        Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'Bearer' });
     }
 
     async _call(method, graphPath, body = null, _retried = false) {
@@ -109,13 +109,13 @@ class OneDriveProvider {
         const sessionRes = await this._call('POST', `${APP_ROOT}:/${encodeURIComponent(name)}:/createUploadSession`, { item: { '@microsoft.graph.conflictBehavior': 'replace' } });
         if (sessionRes.statusCode >= 400 || !sessionRes.body.uploadUrl) throw new Error('OneDrive upload session failed');
         const uploadUrl = new URL(sessionRes.body.uploadUrl);
-const fd = fs.openSync(srcPath, 'r');
+        const fd = fs.openSync(srcPath, 'r');
 
         try {
             while (offset < total) {
-                const end         = Math.min(offset + CHUNK, total);
+                const end = Math.min(offset + CHUNK, total);
                 const bytesToRead = end - offset;
-                const buffer      = Buffer.alloc(bytesToRead);
+                const buffer = Buffer.alloc(bytesToRead);
                 fs.readSync(fd, buffer, 0, bytesToRead, offset);
                 const isLast = end === total;
 
@@ -159,11 +159,11 @@ const fd = fs.openSync(srcPath, 'r');
                         path: uploadUrl.pathname + uploadUrl.search,
                         method: 'DELETE'
                     }, resolve);
-                    req.setTimeout(15_000, () => { req.destroy(); resolve(); }); // best-effort
+                    req.setTimeout(15_000, () => { req.destroy(); resolve(); });
                     req.on('error', resolve);
                     req.end();
                 });
-            } catch (_) {}
+            } catch (_) { }
 
             throw error;
         } finally {
@@ -247,37 +247,37 @@ const fd = fs.openSync(srcPath, 'r');
             const dest = fs.createWriteStream(destPath);
             let downloaded = 0, lastPct = -1;
             const req = https.request({ hostname: loc.hostname, path: loc.pathname + loc.search, method: 'GET' }, (res) => {
-            if (res.statusCode < 200 || res.statusCode >= 300) {
-                res.resume();
-                dest.destroy();
-                try { fs.unlinkSync(destPath); } catch (_) {}
-                return reject(Object.assign(
-                    new Error(`OneDrive download HTTP ${res.statusCode}`),
-                    { statusCode: res.statusCode }
-                ));
-            }
-            
-            const onError = (e) => {
-                res.destroy();
-                dest.destroy();
-                try { fs.unlinkSync(destPath); } catch (_) {}
-                reject(e);
-            };
-            res.on('data', chunk => {
-                downloaded += chunk.length;
-                if (totalSize > 0 && onProgress) {
-                    const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
-                    if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) { onProgress(pct); lastPct = pct; }
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    res.resume();
+                    dest.destroy();
+                    try { fs.unlinkSync(destPath); } catch (_) { }
+                    return reject(Object.assign(
+                        new Error(`OneDrive download HTTP ${res.statusCode}`),
+                        { statusCode: res.statusCode }
+                    ));
                 }
-                if (!dest.write(chunk)) {
-                    res.pause();
-                    dest.once('drain', () => res.resume());
-                }
-            });
-            res.on('end', () => dest.end());
-            res.on('error', onError);
-            dest.on('finish', resolve);
-            dest.on('error', onError);
+
+                const onError = (e) => {
+                    res.destroy();
+                    dest.destroy();
+                    try { fs.unlinkSync(destPath); } catch (_) { }
+                    reject(e);
+                };
+                res.on('data', chunk => {
+                    downloaded += chunk.length;
+                    if (totalSize > 0 && onProgress) {
+                        const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
+                        if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) { onProgress(pct); lastPct = pct; }
+                    }
+                    if (!dest.write(chunk)) {
+                        res.pause();
+                        dest.once('drain', () => res.resume());
+                    }
+                });
+                res.on('end', () => dest.end());
+                res.on('error', onError);
+                dest.on('finish', resolve);
+                dest.on('error', onError);
             });
             req.on('error', e => { dest.destroy(); reject(e); });
             req.end();
@@ -291,7 +291,7 @@ const fd = fs.openSync(srcPath, 'r');
             await this.downloadFile(fileId, tmp, null, 0);
             return JSON.parse(fs.readFileSync(tmp, 'utf8'));
         } finally {
-            try { fs.unlinkSync(tmp); } catch (_) {}
+            try { fs.unlinkSync(tmp); } catch (_) { }
             unregisterTemp(tmp);
         }
     }
@@ -300,10 +300,10 @@ const fd = fs.openSync(srcPath, 'r');
 
     async getQuota() {
         const res = await this._call('GET', '/v1.0/me/drive?$select=quota');
-        const q   = res.body.quota || {};
+        const q = res.body.quota || {};
         return {
-            used     : q.used      || 0,
-            total    : q.total     || 0,
+            used: q.used || 0,
+            total: q.total || 0,
             remaining: q.remaining || 0,
         };
     }

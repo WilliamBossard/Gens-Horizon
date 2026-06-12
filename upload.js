@@ -95,7 +95,7 @@ function createDeltaZip(folder, changed, deleted, tempZip, inst) {
         const deltaInfo = { deletedFiles: deleted, createdAt: new Date().toISOString() };
         archive.append(JSON.stringify(deltaInfo, null, 2), { name: '__delta__.json' });
 
-        let done = 0, lastPct = -1;
+        let lastPct = -1;
         archive.on('progress', (p) => {
             if (changed.length === 0) return;
             const pct = Math.min(100, Math.round((p.entries.processed / changed.length) * 100));
