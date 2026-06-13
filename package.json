@@ -38,7 +38,6 @@
   },
   "dependencies": {
     "archiver": "^7.0.1",
-    "googleapis": "^118.0.0",
     "yauzl": "^3.3.0"
   },
   "devDependencies": {
