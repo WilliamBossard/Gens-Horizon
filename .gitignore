@@ -5,3 +5,4 @@ last_sync.json
 token*.json
 *.zip
 node_modules/
+dist/
