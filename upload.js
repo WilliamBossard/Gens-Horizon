@@ -21,25 +21,28 @@ const {
 
 setupProcessHandlers();
 
-function getFolderSize(dir, currentDepth = 0) {
+async function getFolderSize(dir, currentDepth = 0) {
     if (currentDepth > 20) return 0; 
     let total = 0;
     try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true });
         for (const entry of entries) {
             const fullPath = path.join(dir, entry.name);
             if (entry.isDirectory()) {
-                total += getFolderSize(fullPath, currentDepth + 1); 
+                total += await getFolderSize(fullPath, currentDepth + 1); 
             } else {
-                try { total += fs.statSync(fullPath).size; } catch (_) {}
+                try {
+                    const stat = await fs.promises.stat(fullPath);
+                    total += stat.size;
+                } catch (_) {}
             }
         }
     } catch (_) {}
     return total;
 }
 
-function createFullZip(folder, tempZip, inst) {
-    const realTotal = getFolderSize(folder);
+async function createFullZip(folder, tempZip, inst) {
+    const realTotal = await getFolderSize(folder);
     let lastPct = -1;
     return new Promise((resolve, reject) => {
         const output  = fs.createWriteStream(tempZip);

@@ -1,4 +1,5 @@
 'use strict';
+process.env.NODE_NO_WARNINGS = "1";
 
 const fs = require('fs');
 const path = require('path');
