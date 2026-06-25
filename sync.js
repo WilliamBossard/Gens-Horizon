@@ -7,6 +7,7 @@ const { getProvider }                  = require('./provider');
 const { generateManifest, withConcurrency } = require('./scanner');
 const { acquireLock, releaseLock }     = require('./lock');
 const { withRetry }                    = require('./retry');
+const {
     checkConnectivity,
     readJsonSafe,
     writeJsonAtomic,
