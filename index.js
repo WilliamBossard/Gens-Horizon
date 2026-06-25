@@ -1,13 +1,11 @@
 'use strict';
 process.env.NODE_NO_WARNINGS = "1";
-
 const fs = require('fs');
 const path = require('path');
-const { getHorizonDataDir } = require('./paths');
-
-// DÉCISION : horizon_settings.json dans bin ; systemEnabled/autoSync/autoUpload sont lus par le launcher uniquement.
+const dns = require('dns');
+if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv4first');
+const { getHorizonDataDir } = require('./paths');
 const SETTINGS_PATH = path.join(getHorizonDataDir(), 'horizon_settings.json');
-
 if (!fs.existsSync(SETTINGS_PATH)) {
     const defaultSettings = {
         systemEnabled    : true,
@@ -21,9 +19,7 @@ if (!fs.existsSync(SETTINGS_PATH)) {
     };
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify(defaultSettings, null, 2));
 }
-
 const args = process.argv.slice(2);
-
 if (args.includes('--login')) {
     require('./login.js');
 } else if (args.includes('--check')) {

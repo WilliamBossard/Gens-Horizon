@@ -1,5 +1,4 @@
 'use strict';
-
 /**
  * ==============================================================================
  * GENS HORIZON — FACTORY FOURNISSEUR CLOUD
@@ -8,31 +7,25 @@
  * getProviderName vit dans paths.js pour un seul point de vérité.
  * ==============================================================================
  */
-
 const fs   = require('fs');
 const path = require('path');
 const { getSecureToken }  = require('./Auth');
 const { credentials }     = require('./config');
 const { getHorizonDataDir, getProviderName } = require('./paths');
-
 function getTokenPath(providerName) {
     const base = getHorizonDataDir();
     const specific = path.join(base, `token_${providerName}.json`);
     if (fs.existsSync(specific)) return specific;
-
     if (providerName === 'google') {
         const legacy = path.join(base, 'token.json');
         if (fs.existsSync(legacy)) return legacy;
     }
     return specific;
 }
-
 async function getProvider(settings) {
     const name      = getProviderName(settings);
     const tokenPath = getTokenPath(name);
-
     if (!fs.existsSync(tokenPath)) return null;
-
     let tokenData;
     try {
         tokenData = getSecureToken(tokenPath);
@@ -41,9 +34,7 @@ async function getProvider(settings) {
         try { fs.unlinkSync(tokenPath); } catch (_) {}
         return null;
     }
-
     if (!tokenData) return null;
-
     switch (name) {
         case 'google': {
             const { GoogleProvider } = require('./providers/google');
@@ -61,5 +52,4 @@ async function getProvider(settings) {
             throw new Error(`Fournisseur inconnu : "${name}". Valeurs acceptées : google, dropbox, onedrive`);
     }
 }
-
 module.exports = { getProvider, getProviderName, getTokenPath };

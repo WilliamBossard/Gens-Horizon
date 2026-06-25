@@ -1,14 +1,11 @@
 'use strict';
-
 const fs   = require('fs');
 const path = require('path');
 const { getHorizonDataDir } = require('./paths');
 const { onShutdown }        = require('./utils');
-
 const LOCK_FILE         = path.join(getHorizonDataDir(), 'horizon.lock');
 const MAX_LOCK_RETRIES  = 5;
 const STALE_LOCK_MS     = 2 * 60 * 60 * 1000; 
-
 function isLockStale() {
     try {
         const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
@@ -17,7 +14,6 @@ function isLockStale() {
         return true;
     }
 }
-
 function acquireLock(attempt = 0) {
     let fd;
     try {
@@ -29,11 +25,9 @@ function acquireLock(attempt = 0) {
         fs.closeSync(fd);
     } catch (err) {
         if (err.code !== 'EEXIST') throw err;
-
         try {
             const raw = fs.readFileSync(LOCK_FILE, 'utf8').trim();
             const pid = parseInt(raw, 10);
-
             if (!isNaN(pid) && pid !== process.pid) {
                 try {
                     process.kill(pid, 0);
@@ -69,16 +63,12 @@ function acquireLock(attempt = 0) {
             }
             return acquireLock(attempt + 1);
         }
-
         return false;
     }
-
     onShutdown(() => releaseLock());
     process.once('exit', () => releaseLock()); 
-
     return true;
 }
-
 function releaseLock() {
     try {
         if (!fs.existsSync(LOCK_FILE)) return;
@@ -86,5 +76,4 @@ function releaseLock() {
         if (pid === process.pid) fs.unlinkSync(LOCK_FILE);
     } catch (_) {}
 }
-
 module.exports = { acquireLock, releaseLock, LOCK_FILE };

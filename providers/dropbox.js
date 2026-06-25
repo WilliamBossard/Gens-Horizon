@@ -1,11 +1,9 @@
 'use strict';
-
 const fs    = require('fs');
 const https = require('https');
 const path  = require('path');
 const { credentials } = require('../config');
 const Auth = require('../Auth');
-
 function httpsRequest(options, bodyBuffer = null) {
     return new Promise((resolve, reject) => {
         const req = https.request(options, (res) => {
@@ -23,7 +21,6 @@ function httpsRequest(options, bodyBuffer = null) {
         req.end();
     });
 }
-
 function httpsDownload(options, destPath, onProgress, totalSize, redirectCount = 0) {
     return new Promise((resolve, reject) => {
         if (redirectCount > 5) {
@@ -31,7 +28,6 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
         }
         const dest = fs.createWriteStream(destPath);
         let downloaded = 0, lastPct = -1;
-
         const req = https.request(options, (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 const loc = new URL(res.headers.location);
@@ -84,7 +80,6 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
         req.end();
     });
 }
-
 class DropboxProvider {
     constructor(tokenData, credentials, tokenPath) {
         this._token   = tokenData.access_token;
@@ -92,9 +87,7 @@ class DropboxProvider {
         this._creds   = credentials;
         this._tokenPath = tokenPath;
     }
-
     _authHeader() { return `Bearer ${this._token}`; }
-
     async _api(endpoint, body, _retried = false) {
         const hasBody  = body !== null && body !== undefined;
         const bodyBuf  = hasBody ? Buffer.from(JSON.stringify(body)) : Buffer.alloc(0);
@@ -103,12 +96,10 @@ class DropboxProvider {
             'Content-Length': bodyBuf.length,
         };
         if (hasBody) headers['Content-Type'] = 'application/json';
-
         const res = await httpsRequest(
             { hostname: 'api.dropboxapi.com', path: `/2/${endpoint}`, method: 'POST', headers },
             bodyBuf.length > 0 ? bodyBuf : null
         );
-
         if (res.statusCode === 401 && !_retried) {
             await this._refreshToken();
             return this._api(endpoint, body, true);
@@ -120,7 +111,6 @@ class DropboxProvider {
         }
         return res.body;
     }
-
     async _refreshToken() {
         const params = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: this._refresh, client_id: this._creds.client_id, client_secret: this._creds.client_secret });
         const buf = Buffer.from(params.toString());
@@ -132,27 +122,22 @@ class DropboxProvider {
         this._token = res.body.access_token;
         Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'bearer' }); 
     }
-
     async listFiles(nameContains = '') {
         let entries = [];
         let res = await this._api('files/list_folder', { path: '', recursive: false });
         entries = entries.concat(res.entries || []);
-
         while (res.has_more) {
             res = await this._api('files/list_folder/continue', { cursor: res.cursor });
             entries = entries.concat(res.entries || []);
         }
-
         return entries
             .filter(e => e['.tag'] === 'file')
             .filter(e => !nameContains || e.name.includes(nameContains))
             .map(e => ({ id: e.id, name: e.name, modifiedTime: e.server_modified, size: e.size }));
     }
-
     async _uploadSession(name, srcPath, onProgress) {
         const CHUNK = 8 * 1024 * 1024;
         const total = fs.statSync(srcPath).size;
-
         if (total === 0) throw new Error(`Dropbox _uploadSession : fichier vide non supporté (${name}).`);
         let offset = 0, lastPct = -1;
         const fd = fs.openSync(srcPath, 'r');
@@ -172,7 +157,6 @@ class DropboxProvider {
             const sessionId = startRes.body.session_id;
             offset += bytesToRead;
             _report(offset);
-
             while (offset + CHUNK < total) {
                 bytesToRead = Math.min(CHUNK, total - offset);
                 buffer = Buffer.alloc(bytesToRead);
@@ -184,7 +168,6 @@ class DropboxProvider {
                 offset += bytesToRead;
                 _report(offset);
             }
-
             const lastBytes = total - offset;
             buffer = Buffer.alloc(lastBytes);
             if (lastBytes > 0) fs.readSync(fd, buffer, 0, lastBytes, offset);
@@ -202,11 +185,9 @@ class DropboxProvider {
             fs.closeSync(fd);
         }
     }
-
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {
         return this._uploadSession(name, srcPath, onProgress);
     }
-
     async downloadFile(fileId, destPath, onProgress, totalSize) {
         const _doDownload = (authHeader) => httpsDownload({
             hostname: 'content.dropboxapi.com', path: '/2/files/download', method: 'POST',
@@ -221,7 +202,6 @@ class DropboxProvider {
             } else { throw e; }
         }
     }
-
     async uploadJSON(name, content, existingId = null) {
         const buf = Buffer.from(JSON.stringify(content, null, 2));
         const arg = JSON.stringify({ path: `/${name}`, mode: 'overwrite' });
@@ -234,7 +214,6 @@ class DropboxProvider {
         if (res.statusCode >= 400) throw new Error(`Dropbox uploadJSON error ${res.statusCode}: ${res.body?.error_summary || ''}`);
         return { id: res.body.id, modifiedTime: res.body.server_modified };
     }
-
     async downloadJSON(fileId) {
         return new Promise((resolve, reject) => {
             const chunks = [];
@@ -254,9 +233,7 @@ class DropboxProvider {
             throw e;
         });
     }
-
     async deleteFile(fileId) { await this._api('files/delete_v2', { path: fileId }); }
-
     async getQuota() {
         const res = await this._api('users/get_space_usage', null);
         return {
@@ -265,5 +242,4 @@ class DropboxProvider {
         };
     }
 }
-
 module.exports = { DropboxProvider };

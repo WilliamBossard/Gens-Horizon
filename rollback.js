@@ -1,19 +1,14 @@
 'use strict';
-
 const fs   = require('fs');
 const path = require('path');
-
 const { getInstancesFolder }      = require('./paths');
 const { getCanonicalName, setupProcessHandlers } = require('./utils');
 const { acquireLock, releaseLock } = require('./lock');
-
 setupProcessHandlers();
-
 function rollback() {
     const args           = process.argv.slice(2);
     const COMMANDS       = new Set(['rollback']);
     const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
-
     if (!targetInstance) {
         const instDir = getInstancesFolder();
         if (!fs.existsSync(instDir)) {
@@ -34,11 +29,9 @@ function rollback() {
         console.log(JSON.stringify({ type: 'ROLLBACK_LIST', data: rollbacks }));
         return;
     }
-
     const safeInst = getCanonicalName(targetInstance);
     const instDir    = getInstancesFolder();
     const targetPath = path.join(instDir, safeInst);
-
     let rollbackFolder = null;
     let rollbackTime   = 0;
     if (fs.existsSync(instDir)) {
@@ -52,24 +45,19 @@ function rollback() {
             }
         }
     }
-
     if (!rollbackFolder) {
         console.log(JSON.stringify({ type: 'ERROR', instance: targetInstance, message: 'Aucune sauvegarde rollback disponible pour cette instance.' }));
         return;
     }
-
     if (!acquireLock()) {
         console.log(JSON.stringify({ type: 'ERROR', instance: targetInstance, message: 'ERR_ALREADY_RUNNING' }));
         return;
     }
-
     try {
         if (fs.existsSync(targetPath)) {
             fs.rmSync(targetPath, { recursive: true, force: true });
         }
-
         fs.renameSync(rollbackFolder, targetPath);
-
         console.log(JSON.stringify({
             type    : 'SUCCESS',
             instance: targetInstance,
@@ -81,5 +69,4 @@ function rollback() {
         releaseLock();
     }
 }
-
 rollback();

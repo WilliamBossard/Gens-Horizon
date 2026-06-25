@@ -1,8 +1,6 @@
 'use strict';
-
 const fs  = require('fs');
 const dns = require('dns').promises;
-
 async function checkConnectivity() {
     const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
     try {
@@ -12,17 +10,12 @@ async function checkConnectivity() {
         return false;
     }
 }
-
-
 function readJsonSafe(filePath, fallback = {}) {
     try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
     catch (_) { return fallback; }
 }
-
-
 const _tempFiles    = new Set();
 const _shutdownHooks = [];
-
 function registerTemp(p)   { _tempFiles.add(p); }
 function unregisterTemp(p) { _tempFiles.delete(p); }
 function cleanupTemps() {
@@ -30,18 +23,14 @@ function cleanupTemps() {
         try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (_) {}
     }
 }
-
 /**
  * Enregistre une fonction à appeler lors de tout shutdown (SIGINT, SIGTERM,
  * uncaughtException, unhandledRejection). Utilisé par lock.js pour releaseLock().
  */
 function onShutdown(fn) { _shutdownHooks.push(fn); }
-
 function _runShutdownHooks() {
     for (const fn of _shutdownHooks) { try { fn(); } catch (_) {} }
 }
-
-
 function writeJsonAtomic(filePath, data) {
     const tmp = filePath + '.tmp';
     registerTemp(tmp);
@@ -52,24 +41,34 @@ function writeJsonAtomic(filePath, data) {
     fs.renameSync(tmp, filePath);
     unregisterTemp(tmp);
 }
-
+async function writeJsonAtomicAsync(filePath, data) {
+    const tmp = filePath + '.tmp';
+    registerTemp(tmp);
+    let filehandle;
+    try {
+        filehandle = await fs.promises.open(tmp, 'w');
+        await filehandle.writeFile(JSON.stringify(data, null, 2));
+        await filehandle.sync();
+    } finally {
+        if (filehandle) await filehandle.close();
+    }
+    await fs.promises.rename(tmp, filePath);
+    unregisterTemp(tmp);
+}
 function getCanonicalName(name) {
     if (!name) return "";
     return String(name).replace(/[^a-z0-9]/gi, "_");
 }
-
 let _handlersSetup = false;
 function setupProcessHandlers() {
     if (_handlersSetup) return;
     _handlersSetup = true;
-
     const shutdown = (signal) => {
         console.error(`[system] Signal reçu : ${signal}. Nettoyage en cours...`);
         _runShutdownHooks();
         cleanupTemps();
         process.exit(0);
     };
-
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
     process.on('uncaughtException', (err) => {
@@ -80,14 +79,11 @@ function setupProcessHandlers() {
                 message: err.message || String(err),
             }) + '\n');
         } catch (_) {}
-
         process.stderr.write(`[CRITIQUE] ${err.stack || err}\n`);
-
         _runShutdownHooks();
         cleanupTemps();
         process.exit(1);
     });
-
     process.on('unhandledRejection', (reason) => {
         const msg = reason?.message || String(reason);
         try {
@@ -97,20 +93,18 @@ function setupProcessHandlers() {
                 message: msg,
             }) + '\n');
         } catch (_) {}
-
         process.stderr.write(`[CRITIQUE] Promesse rejetée : ${msg}\n`);
-
         _runShutdownHooks();
         cleanupTemps();
         process.exit(1);
     });
 }
-
 module.exports = {
     getCanonicalName,
     checkConnectivity,
     readJsonSafe,
     writeJsonAtomic,
+    writeJsonAtomicAsync,
     registerTemp,
     unregisterTemp,
     cleanupTemps,

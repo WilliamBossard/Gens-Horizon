@@ -1,5 +1,4 @@
 'use strict';
-
 /**
  * ==============================================================================
  * GENS HORIZON — CHIFFREMENT DES TOKENS OAuth
@@ -8,14 +7,12 @@
  * aligné avec horizon_settings.json et horizon.lock — pas le dossier de l'exe seul.
  * ==============================================================================
  */
-
 const fs     = require('fs');
 const crypto = require('crypto');
 const os     = require('os');
 const path   = require('path');
 const { getHorizonDataDir }          = require('./paths');
 const { registerTemp, unregisterTemp } = require('./utils');
-
 let username = 'default';
 try {
     username = os.userInfo().username;
@@ -24,10 +21,8 @@ try {
 }
 const machineID = os.hostname() + '_' + username;
 const BASE_DIR = getHorizonDataDir();
-
 const SALT_FILE       = path.join(BASE_DIR, 'salt.key');
 const TOKEN_FILE_MODE = 0o600;
-
 let salt;
 if (fs.existsSync(SALT_FILE)) {
     salt = fs.readFileSync(SALT_FILE);
@@ -39,9 +34,7 @@ if (fs.existsSync(SALT_FILE)) {
         throw new Error(`[Auth] ERREUR CRITIQUE : Impossible d'écrire le fichier de sécurité (salt.key). Vérifiez les permissions. Détail : ${e.message}`);
     }
 }
-
 const SECRET_KEY = crypto.pbkdf2Sync(machineID, salt, 100000, 32, 'sha256');
-
 function _encrypt(text) {
     const iv     = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv('aes-256-cbc', SECRET_KEY, iv);
@@ -49,7 +42,6 @@ function _encrypt(text) {
     encrypted    += cipher.final('hex');
     return iv.toString('hex') + ':' + encrypted;
 }
-
 function _decrypt(text) {
     try {
         const parts    = text.split(':');
@@ -62,7 +54,6 @@ function _decrypt(text) {
         throw new Error('Impossible de déchiffrer le token. (Machine différente ou fichier corrompu ?)');
     }
 }
-
 function getSecureToken(filePath) {
     if (!fs.existsSync(filePath)) return null;
     const raw = fs.readFileSync(filePath, 'utf8').trim();
@@ -78,18 +69,14 @@ function getSecureToken(filePath) {
         throw new Error('Impossible de déchiffrer le token. (Machine différente ?)');
     }
 }
-
 function encryptToken(filePath, tokenData) {
     const tmp = filePath + '.tmp';
     registerTemp(tmp);
-
     fs.writeFileSync(tmp, _encrypt(JSON.stringify(tokenData)), {
         encoding: 'utf8',
         mode: TOKEN_FILE_MODE
     });
-
     fs.renameSync(tmp, filePath);
     unregisterTemp(tmp);
 }
-
 module.exports = { getSecureToken, encryptToken };

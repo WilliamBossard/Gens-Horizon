@@ -1,18 +1,13 @@
 'use strict';
-
 const fs   = require('fs');
 const path = require('path');
-
 const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getProvider }                    = require('./provider');
 const { checkConnectivity, readJsonSafe, getCanonicalName, setupProcessHandlers } = require('./utils');
 const { withRetry } = require('./retry');
-
 setupProcessHandlers();
-
 const SYNC_INFO_FILE = path.join(getHorizonDataDir(), 'last_sync.json');
 const SETTINGS_PATH  = path.join(getHorizonDataDir(), 'horizon_settings.json');
-
 async function check() {
     try {
         const online = await checkConnectivity();
@@ -20,32 +15,24 @@ async function check() {
             console.log(JSON.stringify({ type: 'OFFLINE', status: 'OFFLINE', message: 'Internet indisponible.' }));
             return;
         }
-
         const settings = readJsonSafe(SETTINGS_PATH);
-
         const provider = await getProvider(settings);
         if (!provider) {
             console.log(JSON.stringify({ type: 'CHECK_RESULT', status: 'NOT_LOGGED_IN', updates: [] }));
             return;
         }
-
         const syncInfo = readJsonSafe(SYNC_INFO_FILE);
-
         const cloudFiles = await withRetry(() => provider.listFiles('GensHorizon_'), { maxRetries: 3, baseDelay: 1500, label: 'check_listFiles' });
         const cloudIndex = {};
         for (const f of cloudFiles) cloudIndex[f.name] = f;
-
         const cloudInstances = Object.keys(cloudIndex)
             .filter(n => n.startsWith('GensHorizon_Backup_'))
             .map(n => n.replace('GensHorizon_Backup_', '').replace('.zip', ''));
-
         let report = { status: 'UP_TO_DATE', updates: [] };
-
         for (const instName of cloudInstances) {
             const baseName  = `GensHorizon_Backup_${instName}.zip`;
             const baseFile  = cloudIndex[baseName];
             const cloudTime = new Date(baseFile.modifiedTime).getTime();
-
             const latestDeltaTime = Object.keys(cloudIndex)
                 .filter(n => n.startsWith(`GensHorizon_Delta_${instName}_`))
                 .map(n => {
@@ -53,26 +40,22 @@ async function check() {
                     return isNaN(ts) ? 0 : ts;
                 })
                 .reduce((max, ts) => Math.max(max, ts), 0);
-
             const effectiveCloudTime = Math.max(cloudTime, latestDeltaTime);
             const safeKey = getCanonicalName(instName);
             const rawSyncTime  = syncInfo[safeKey] ? new Date(syncInfo[safeKey]).getTime() : 0;
             const lastSyncTime = isNaN(rawSyncTime) ? 0 : rawSyncTime;
             const localPath  = path.join(getInstancesFolder(), safeKey);
             const localExists = fs.existsSync(localPath);
-
             if (localExists && effectiveCloudTime > lastSyncTime) {
                 report.status = 'UPDATE_AVAILABLE';
                 report.updates.push(instName);
             }
         }
-
         console.log(JSON.stringify({
             type    : 'CHECK_RESULT',
             status  : report.status,
             updates : report.updates,
         }));
-
     } catch (e) {
         if (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN' || e.code === 'ECONNREFUSED') {
             console.log(JSON.stringify({ type: 'OFFLINE', status: 'OFFLINE', message: 'Internet indisponible.' }));
@@ -81,5 +64,4 @@ async function check() {
         }
     }
 }
-
 check();

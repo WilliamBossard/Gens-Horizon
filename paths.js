@@ -8,15 +8,12 @@
  * - scanInstances() retourne toujours le nom de DOSSIER (clé disque / Horizon), pas data.name.
  * ==============================================================================
  */
-
 const os   = require('os');
 const path = require('path');
 const fs   = require('fs');
-
 function getHorizonDataDir() {
     return process.pkg ? path.dirname(process.execPath) : process.cwd();
 }
-
 function getAppDataPath() {
     if (process.platform === 'win32') {
         const appdata = process.env.APPDATA;
@@ -31,12 +28,10 @@ function getAppDataPath() {
         return path.join(os.homedir(), '.config');
     }
 }
-
 function getInstancesFolder() {
     const appData = getAppDataPath();
     return path.join(appData, 'GensLauncher', 'instances');
 }
-
 /**
  * DÉCISION : la clé instance côté Horizon = nom du dossier sous instances/
  * (safeDir). instance.json peut contenir un nom affiché différent (espaces, etc.).
@@ -47,7 +42,6 @@ function scanInstances() {
         fs.mkdirSync(instancesDir, { recursive: true });
         return [];
     }
-
     const items = fs.readdirSync(instancesDir);
     const instances = [];
     for (const item of items) {
@@ -63,11 +57,9 @@ function scanInstances() {
     }
     return instances;
 }
-
 function getProviderName(settings) {
     const cliArg = process.argv.find(a => a.startsWith('--provider='));
     if (cliArg) return cliArg.split('=')[1].trim();
     return (settings && settings.provider) || 'google';
 }
-
 module.exports = { getHorizonDataDir, getInstancesFolder, scanInstances, getProviderName };

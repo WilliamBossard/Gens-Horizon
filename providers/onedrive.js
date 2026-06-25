@@ -1,5 +1,4 @@
 'use strict';
-
 const fs = require('fs');
 const https = require('https');
 const path = require('path');
@@ -9,7 +8,6 @@ const Auth = require('../Auth');
 const GRAPH_HOST = 'graph.microsoft.com';
 const APP_ROOT = '/v1.0/me/drive/special/approot';
 const { registerTemp, unregisterTemp } = require('../utils');
-
 function graphRequest(method, graphPath, accessToken, body = null) {
     const bodyBuf = body ? Buffer.from(JSON.stringify(body)) : null;
     return new Promise((resolve, reject) => {
@@ -31,7 +29,6 @@ function graphRequest(method, graphPath, accessToken, body = null) {
         req.end();
     });
 }
-
 class OneDriveProvider {
     constructor(tokenData, credentials, tokenPath) {
         this._token = tokenData.access_token;
@@ -39,7 +36,6 @@ class OneDriveProvider {
         this._creds = credentials;
         this._tokenPath = tokenPath;
     }
-
     async _refreshToken() {
         const scope = this._creds.scope || 'Files.ReadWrite offline_access';
         const params = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: this._refresh, client_id: this._creds.client_id, scope });
@@ -62,7 +58,6 @@ class OneDriveProvider {
         if (res.body.refresh_token) this._refresh = res.body.refresh_token;
         Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'Bearer' });
     }
-
     async _call(method, graphPath, body = null, _retried = false) {
         let res = await graphRequest(method, graphPath, this._token, body);
         if (res.statusCode === 401 && !_retried) { await this._refreshToken(); return this._call(method, graphPath, body, true); }
@@ -73,11 +68,9 @@ class OneDriveProvider {
         }
         return res;
     }
-
     async listFiles(nameContains = '') {
         let items = [];
         let nextPath = `${APP_ROOT}/children?$top=1000`;
-
         while (nextPath) {
             const res = await this._call('GET', nextPath);
             items = items.concat(res.body.value || []);
@@ -89,28 +82,22 @@ class OneDriveProvider {
                 nextPath = null;
             }
         }
-
         return items
             .filter(i => i.file)
             .filter(i => !nameContains || i.name.includes(nameContains))
             .map(i => ({ id: i.id, name: i.name, modifiedTime: i.lastModifiedDateTime, size: i.size }));
     }
-
     async _uploadSession(name, srcPath, onProgress) {
         const CHUNK = 10 * 1024 * 1024;
         const total = fs.statSync(srcPath).size;
-
         if (total === 0) {
             return this.uploadZip(name, srcPath, null, onProgress);
         }
-
         let offset = 0, lastPct = -1, result = null;
-
         const sessionRes = await this._call('POST', `${APP_ROOT}:/${encodeURIComponent(name)}:/createUploadSession`, { item: { '@microsoft.graph.conflictBehavior': 'replace' } });
         if (sessionRes.statusCode >= 400 || !sessionRes.body.uploadUrl) throw new Error('OneDrive upload session failed');
         const uploadUrl = new URL(sessionRes.body.uploadUrl);
         const fd = fs.openSync(srcPath, 'r');
-
         try {
             while (offset < total) {
                 const end = Math.min(offset + CHUNK, total);
@@ -118,7 +105,6 @@ class OneDriveProvider {
                 const buffer = Buffer.alloc(bytesToRead);
                 fs.readSync(fd, buffer, 0, bytesToRead, offset);
                 const isLast = end === total;
-
                 const res = await new Promise((resolve, reject) => {
                     const req = https.request({
                         hostname: uploadUrl.hostname, path: uploadUrl.pathname + uploadUrl.search, method: 'PUT',
@@ -140,7 +126,6 @@ class OneDriveProvider {
                     });
                     req.on('error', reject); req.write(buffer); req.end();
                 });
-
                 if (res.statusCode >= 400) throw new Error(`OneDrive chunk error ${res.statusCode}`);
                 offset = end;
                 if (onProgress && total > 0) {
@@ -164,19 +149,16 @@ class OneDriveProvider {
                     req.end();
                 });
             } catch (_) { }
-
             throw error;
         } finally {
             fs.closeSync(fd);
         }
         return result;
     }
-
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {
         const stats = fs.statSync(srcPath);
         const SIMPLE_LIMIT = 4 * 1024 * 1024;
         if (stats.size > SIMPLE_LIMIT) return this._uploadSession(name, srcPath, onProgress);
-
         const content = fs.readFileSync(srcPath);
         const _doUpload = async () => new Promise((resolve, reject) => {
             const req = https.request({
@@ -198,7 +180,6 @@ class OneDriveProvider {
         onProgress && onProgress(100);
         return { id: res.body.id, modifiedTime: res.body.lastModifiedDateTime };
     }
-
     async uploadJSON(name, content, existingId = null) {
         const buf = Buffer.from(JSON.stringify(content, null, 2));
         const _doUpload = async () => new Promise((resolve, reject) => {
@@ -218,7 +199,6 @@ class OneDriveProvider {
         if (res.statusCode >= 400) throw new Error(`OneDrive uploadJSON error ${res.statusCode}: ${res.body?.message || ''}`);
         return { id: res.body.id, modifiedTime: res.body.lastModifiedDateTime };
     }
-
     async _getDownloadUrl(fileId) {
         return new Promise((resolve, reject) => {
             const req = https.request({
@@ -233,7 +213,6 @@ class OneDriveProvider {
             req.on('error', reject); req.end();
         });
     }
-
     async downloadFile(fileId, destPath, onProgress, totalSize) {
         let redirectUrl;
         try {
@@ -256,7 +235,6 @@ class OneDriveProvider {
                         { statusCode: res.statusCode }
                     ));
                 }
-
                 const onError = (e) => {
                     res.destroy();
                     dest.destroy();
@@ -283,7 +261,6 @@ class OneDriveProvider {
             req.end();
         });
     }
-
     async downloadJSON(fileId) {
         const tmp = path.join(os.tmpdir(), `horizon_db_${Date.now()}.json`);
         registerTemp(tmp);
@@ -295,9 +272,7 @@ class OneDriveProvider {
             unregisterTemp(tmp);
         }
     }
-
     async deleteFile(fileId) { await this._call('DELETE', `/v1.0/me/drive/items/${fileId}`); }
-
     async getQuota() {
         const res = await this._call('GET', '/v1.0/me/drive?$select=quota');
         const q = res.body.quota || {};
@@ -308,5 +283,4 @@ class OneDriveProvider {
         };
     }
 }
-
 module.exports = { OneDriveProvider };

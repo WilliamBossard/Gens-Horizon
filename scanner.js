@@ -1,35 +1,28 @@
 'use strict';
-
 const fs     = require('fs');
 const fsP    = fs.promises;
 const path   = require('path');
 const crypto = require('crypto');
-
 const IGNORED = new Set([
     'versions', 'libraries', 'assets', 'logs',
     'crash-reports', 'cache', 'webcache', 'temp',
     'screenshots', 'backups', '.git', 'node_modules',
 ]);
-
 async function withConcurrency(limit, tasks) {
     const executing = new Set();
     const errors = [];
-
     for (let i = 0; i < tasks.length; i++) {
         const p = tasks[i]()
             .catch(e => {
                 errors.push(e);
             })
             .finally(() => executing.delete(p));
-            
         executing.add(p);
         if (executing.size >= limit) {
             await Promise.race(executing);
         }
     }
-
     await Promise.all(executing);
-    
     if (errors.length > 0) {
         if (errors.length > 1) {
             process.stderr.write(
@@ -40,7 +33,6 @@ async function withConcurrency(limit, tasks) {
         throw errors[0];
     }
 }
-
 function hashFile(filePath) {
     return new Promise((resolve, reject) => {
         const hash   = crypto.createHash('sha1');
@@ -50,7 +42,6 @@ function hashFile(filePath) {
         stream.on('error', (err) => { stream.destroy(); reject(err); });
     });
 }
-
 async function generateManifest(targetPath, basePath = targetPath, oldManifest = {}) {
     const manifest = {};
     let items;
@@ -60,13 +51,11 @@ async function generateManifest(targetPath, basePath = targetPath, oldManifest =
         if (err.code === 'ENOENT') return manifest;
         throw err;
     }
-
     const tasks = items
         .filter(item => !IGNORED.has(item.name) && !item.name.startsWith('.'))
         .map(item => async () => {
             const fullPath     = path.join(targetPath, item.name);
             const relativePath = path.relative(basePath, fullPath).replace(/\\/g, '/');
-
             if (item.isDirectory()) {
                 try {
                     const subManifest = await generateManifest(fullPath, basePath, oldManifest);
@@ -79,7 +68,6 @@ async function generateManifest(targetPath, basePath = targetPath, oldManifest =
             } else {
     const stats = await fsP.stat(fullPath);
     const cached = oldManifest[relativePath];
-
     if (cached && cached.mtime === stats.mtimeMs && cached.size === stats.size) {
         manifest[relativePath] = cached; 
     } else {
@@ -92,22 +80,18 @@ async function generateManifest(targetPath, basePath = targetPath, oldManifest =
     }
 }
 });
-
     await withConcurrency(16, tasks);
     return manifest;
 }
-
 function compareManifests(oldM, newM) {
     const added = Object.keys(newM).filter(f => !oldM[f]);
     const deleted = Object.keys(oldM).filter(f => !newM[f]);
     const modified = Object.keys(newM).filter(f => 
         oldM[f] && newM[f].hash !== oldM[f].hash
     );
-
     return {
         hasChanges: added.length > 0 || modified.length > 0 || deleted.length > 0,
         added, modified, deleted,
     };
 }
-
 module.exports = { generateManifest, compareManifests, withConcurrency };
