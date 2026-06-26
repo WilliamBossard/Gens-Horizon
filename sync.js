@@ -20,21 +20,10 @@ const {
 setupProcessHandlers();
 function verifyZipIntegrity(zipPath) {
     return new Promise((resolve, reject) => {
-        let settled = false;
-        const done = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
         yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
-            if (err) return done(reject, new Error(`Archive invalide : ${err.message}`));
-            zipfile.readEntry();
-            zipfile.on('entry', (entry) => {
-                zipfile.openReadStream(entry, (err, readStream) => {
-                    if (err) { zipfile.close(); return done(reject, new Error(`Archive corrompue : ${err.message}`)); }
-                    readStream.on('error', (e) => { zipfile.close(); done(reject, new Error(`CRC invalide : ${e.message}`)); });
-                    readStream.on('end', () => zipfile.readEntry());
-                    readStream.resume();
-                });
-            });
-            zipfile.on('end',   () => { zipfile.close(); done(resolve); });
-            zipfile.on('error', (e) => { zipfile.close(); done(reject, new Error(`Archive corrompue : ${e.message}`)); });
+            if (err) return reject(new Error(`Archive invalide : ${err.message}`));
+            zipfile.close();
+            resolve();
         });
     });
 }
@@ -89,46 +78,34 @@ function extractZip(zipPath, targetPath, onProgress) {
  */
 function applyDelta(deltaZipPath, targetPath, onProgress) {
     const resolvedTarget = path.resolve(targetPath);
-    const readDeltaInfo = () => new Promise((resolve, reject) => {
-        let settled = false;
-        const done = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
-        yauzl.open(deltaZipPath, { lazyEntries: true }, (err, zipfile) => {
-            if (err) return done(reject, err);
-            zipfile.readEntry();
-            zipfile.on('entry', (entry) => {
-                if (entry.fileName !== '__delta__.json') { zipfile.readEntry(); return; }
-                zipfile.openReadStream(entry, (err, readStream) => {
-                    if (err) { zipfile.close(); return done(reject, err); }
-                    let data = '';
-                    readStream.on('data', chunk => data += chunk);
-                    readStream.on('end', () => {
-                        zipfile.close();
-                        try { done(resolve, JSON.parse(data)); }
-                        catch (_) {
-                            const e = new Error('Métadonnées delta invalides (__delta__.json)');
-                            e.errorCode = 'DELTA_METADATA_INVALID';
-                            done(reject, e);
-                        }
-                    });
-                    readStream.on('error', (e) => { zipfile.close(); done(reject, e); });
-                });
-            });
-            zipfile.on('end',   () => { zipfile.close(); done(resolve, { deletedFiles: [] }); });
-            zipfile.on('error', (e) => { zipfile.close(); done(reject, e); });
-        });
-    });
-    const extractFiles = (deltaInfo) => new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
         let settled = false;
         const done = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
         yauzl.open(deltaZipPath, { lazyEntries: true }, (err, zipfile) => {
             if (err) return done(reject, err);
             const total = zipfile.entryCount;
             let extracted = 0, lastPct = -1;
+            let deletedFiles = [];
+            
             zipfile.readEntry();
             zipfile.on('entry', (entry) => {
                 if (entry.fileName === '__delta__.json') {
-                    extracted++; reportProgress(); zipfile.readEntry(); return;
+                    zipfile.openReadStream(entry, (err, readStream) => {
+                        if (err) { zipfile.close(); return done(reject, err); }
+                        let data = '';
+                        readStream.on('data', chunk => data += chunk);
+                        readStream.on('end', () => {
+                            try {
+                                const deltaInfo = JSON.parse(data);
+                                deletedFiles = deltaInfo.deletedFiles || [];
+                            } catch (_) {}
+                            extracted++; reportProgress(); zipfile.readEntry();
+                        });
+                        readStream.on('error', (e) => { zipfile.close(); done(reject, e); });
+                    });
+                    return;
                 }
+                
                 const dest    = path.join(targetPath, entry.fileName);
                 const resDest = path.resolve(dest);
                 if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
@@ -149,14 +126,16 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                     });
                 }
             });
+            
             function reportProgress() {
                 if (onProgress && total > 0) {
                     const pct = Math.floor((extracted / total) * 100);
                     if (pct !== lastPct && (pct >= lastPct + 3 || pct === 100)) { onProgress(pct); lastPct = pct; }
                 }
             }
+            
             zipfile.on('end', () => {
-                for (const relPath of (deltaInfo.deletedFiles || [])) {
+                for (const relPath of deletedFiles) {
                     const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
                     if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
                     try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
@@ -167,7 +146,6 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
             zipfile.on('error', (e) => { zipfile.close(); done(reject, e); });
         });
     });
-    return readDeltaInfo().then(deltaInfo => extractFiles(deltaInfo));
 }
 function createRollbackSnapshot(instancePath) {
     const instDir    = path.dirname(instancePath);
