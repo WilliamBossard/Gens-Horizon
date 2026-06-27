@@ -63,6 +63,11 @@ jobs:
           mv dist/Horizon-win.exe dist/Horizon.exe || true
           mv dist/Horizon-linux dist/Horizon-linux || true
 
+      - name: Génération des checksums SHA256
+        run: |
+          sha256sum dist/Horizon.exe | awk '{print $1}' > dist/Horizon.exe.sha256
+          sha256sum dist/Horizon-linux | awk '{print $1}' > dist/Horizon-linux.sha256
+
       - name: Publication sur GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
@@ -70,6 +75,8 @@ jobs:
           name: Release ${{ github.event.inputs.tag_name }}
           files: |
             dist/Horizon.exe
+            dist/Horizon.exe.sha256
             dist/Horizon-linux
+            dist/Horizon-linux.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

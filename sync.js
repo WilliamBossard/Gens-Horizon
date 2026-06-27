@@ -20,8 +20,23 @@ const {
 setupProcessHandlers();
 function verifyZipIntegrity(zipPath) {
     return new Promise((resolve, reject) => {
+        // Vérification des magic bytes (PK\x03\x04) avant d'ouvrir avec yauzl
+        // Evite le crash si Google Drive a retourné une page d'erreur HTML/JSON
+        try {
+            const fd = fs.openSync(zipPath, 'r');
+            const buf = Buffer.alloc(4);
+            fs.readSync(fd, buf, 0, 4, 0);
+            fs.closeSync(fd);
+            // Signature ZIP valide : 50 4B 03 04
+            if (buf[0] !== 0x50 || buf[1] !== 0x4B || buf[2] !== 0x03 || buf[3] !== 0x04) {
+                const hex = buf.toString('hex').toUpperCase();
+                return reject(new Error(`Fichier téléchargé invalide (pas un ZIP). Signature reçue: 0x${hex}. Le serveur cloud a peut-être retourné une erreur à la place du fichier.`));
+            }
+        } catch (e) {
+            return reject(new Error(`Impossible de lire le fichier téléchargé : ${e.message}`));
+        }
         yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
-            if (err) return reject(new Error(`Archive invalide : ${err.message}`));
+            if (err) return reject(new Error(`Archive corrompue : ${err.message}`));
             zipfile.close();
             resolve();
         });

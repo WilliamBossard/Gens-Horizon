@@ -82,15 +82,31 @@ class GoogleProvider {
         const token = await this._getAccessToken();
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(new Error('Google Drive: timeout téléchargement (10 min)')), 10 * 60_000);
-        let res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+        const buildUrl = (confirm) => {
+            const url = new URL(`https://www.googleapis.com/drive/v3/files/${fileId}`);
+            url.searchParams.set('alt', 'media');
+            if (confirm) url.searchParams.set('acknowledgeAbuse', 'true');
+            return url.toString();
+        };
+        let res = await fetch(buildUrl(false), {
             headers: { Authorization: `Bearer ${token}` },
             signal: controller.signal
         });
         if (res.status === 401) {
             await this._refreshToken();
             const newToken = await this._getAccessToken();
-            res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+            res = await fetch(buildUrl(false), {
                 headers: { Authorization: `Bearer ${newToken}` },
+                signal: controller.signal
+            });
+        }
+        // Google Drive renvoie une page HTML/JSON de confirmation pour les gros fichiers
+        // Détection : Content-Type text/html ou application/json au lieu d'application/octet-stream
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && (contentType.includes('text/html') || (contentType.includes('application/json') && !contentType.includes('octet')))) {
+            process.stderr.write(`[google] Réponse de confirmation détectée, relance avec acknowledgeAbuse=true\n`);
+            res = await fetch(buildUrl(true), {
+                headers: { Authorization: `Bearer ${token}` },
                 signal: controller.signal
             });
         }
