@@ -7,6 +7,7 @@ const IGNORED = new Set([
     'versions', 'libraries', 'assets', 'logs',
     'crash-reports', 'cache', 'webcache', 'temp',
     'screenshots', 'backups', '.git', 'node_modules',
+    '.mixin.out'
 ]);
 async function withConcurrency(limit, tasks) {
     const executing = new Set();

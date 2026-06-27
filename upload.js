@@ -23,18 +23,17 @@ async function getFolderSize(dir, currentDepth = 0) {
     let total = 0;
     try {
         const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-        const sizes = await Promise.all(entries.map(async (entry) => {
+        for (const entry of entries) {
             const fullPath = path.join(dir, entry.name);
             if (entry.isDirectory()) {
-                return await getFolderSize(fullPath, currentDepth + 1); 
+                total += await getFolderSize(fullPath, currentDepth + 1); 
             } else {
                 try {
                     const stat = await fs.promises.stat(fullPath);
-                    return stat.size;
-                } catch (_) { return 0; }
+                    total += stat.size;
+                } catch (_) {}
             }
-        }));
-        total = sizes.reduce((acc, curr) => acc + curr, 0);
+        }
     } catch (_) {}
     return total;
 }

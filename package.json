@@ -9,7 +9,7 @@
     "check": "node index.js --check",
     "upload": "node index.js --upload",
     "sync": "node index.js --sync",
-    "dist": "pkg . --targets node20-win-x64,node20-linux-x64,node20-macos-x64 --out-path dist"
+    "dist": "pkg . --targets node24-win-x64,node24-linux-x64,node24-macos-x64 --out-path dist"
   },
   "repository": {
     "type": "git",

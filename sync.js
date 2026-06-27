@@ -36,24 +36,48 @@ function extractZip(zipPath, targetPath, onProgress) {
             if (err) return done(reject, err);
             const total = zipfile.entryCount;
             let extracted = 0, lastPct = -1;
-            zipfile.readEntry();
+            let activeStreams = 0;
+            let isEndEmitted = false;
+            const MAX_CONCURRENCY = 10;
+
+            function nextEntry() {
+                if (!isEndEmitted && activeStreams < MAX_CONCURRENCY) {
+                    try { zipfile.readEntry(); } catch(_) {}
+                }
+            }
+
+            function onEntryDone() {
+                extracted++; reportProgress();
+                activeStreams--;
+                if (isEndEmitted && activeStreams === 0) {
+                    zipfile.close(); done(resolve);
+                } else {
+                    nextEntry();
+                }
+            }
+
+            nextEntry();
+
             zipfile.on('entry', (entry) => {
+                activeStreams++;
+                nextEntry();
+
                 const dest    = path.join(targetPath, entry.fileName);
                 const resDest = path.resolve(dest);
                 if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
                     process.stderr.write(`[ALERTE SÉCURITÉ] Entrée zip ignorée : ${entry.fileName}\n`);
-                    extracted++; zipfile.readEntry(); return;
+                    onEntryDone(); return;
                 }
                 if (/\/$/.test(entry.fileName)) {
                     fs.mkdirSync(dest, { recursive: true });
-                    extracted++; reportProgress(); zipfile.readEntry();
+                    onEntryDone();
                 } else {
                     fs.mkdirSync(path.dirname(dest), { recursive: true });
                     zipfile.openReadStream(entry, (err, readStream) => {
                         if (err) { zipfile.close(); return done(reject, err); }
                         const writeStream = fs.createWriteStream(dest);
                         readStream.pipe(writeStream);
-                        writeStream.on('close', () => { extracted++; reportProgress(); zipfile.readEntry(); });
+                        writeStream.on('close', onEntryDone);
                         writeStream.on('error', (e) => { readStream.destroy(); writeStream.destroy(); zipfile.close(); done(reject, e); });
                         readStream.on('error',  (e) => { writeStream.destroy(); zipfile.close(); done(reject, e); });
                     });
@@ -65,7 +89,12 @@ function extractZip(zipPath, targetPath, onProgress) {
                     if (pct !== lastPct && (pct >= lastPct + 3 || pct === 100)) { onProgress(pct); lastPct = pct; }
                 }
             }
-            zipfile.on('end',   () => { zipfile.close(); done(resolve); });
+            zipfile.on('end',   () => { 
+                isEndEmitted = true;
+                if (activeStreams === 0) {
+                    zipfile.close(); done(resolve);
+                }
+            });
             zipfile.on('error', (e) => { zipfile.close(); done(reject, e); });
         });
     });
@@ -86,9 +115,32 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
             const total = zipfile.entryCount;
             let extracted = 0, lastPct = -1;
             let deletedFiles = [];
-            
-            zipfile.readEntry();
+            let activeStreams = 0;
+            let isEndEmitted = false;
+            const MAX_CONCURRENCY = 10;
+
+            function nextEntry() {
+                if (!isEndEmitted && activeStreams < MAX_CONCURRENCY) {
+                    try { zipfile.readEntry(); } catch(_) {}
+                }
+            }
+
+            function onEntryDone() {
+                extracted++; reportProgress();
+                activeStreams--;
+                if (isEndEmitted && activeStreams === 0) {
+                    finishDelta();
+                } else {
+                    nextEntry();
+                }
+            }
+
+            nextEntry();
+
             zipfile.on('entry', (entry) => {
+                activeStreams++;
+                nextEntry();
+
                 if (entry.fileName === '__delta__.json') {
                     zipfile.openReadStream(entry, (err, readStream) => {
                         if (err) { zipfile.close(); return done(reject, err); }
@@ -99,7 +151,7 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                                 const deltaInfo = JSON.parse(data);
                                 deletedFiles = deltaInfo.deletedFiles || [];
                             } catch (_) {}
-                            extracted++; reportProgress(); zipfile.readEntry();
+                            onEntryDone();
                         });
                         readStream.on('error', (e) => { zipfile.close(); done(reject, e); });
                     });
@@ -109,18 +161,18 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                 const dest    = path.join(targetPath, entry.fileName);
                 const resDest = path.resolve(dest);
                 if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                    extracted++; zipfile.readEntry(); return;
+                    onEntryDone(); return;
                 }
                 if (/\/$/.test(entry.fileName)) {
                     fs.mkdirSync(dest, { recursive: true });
-                    extracted++; reportProgress(); zipfile.readEntry();
+                    onEntryDone();
                 } else {
                     fs.mkdirSync(path.dirname(dest), { recursive: true });
                     zipfile.openReadStream(entry, (err, readStream) => {
                         if (err) { zipfile.close(); return done(reject, err); }
                         const writeStream = fs.createWriteStream(dest);
                         readStream.pipe(writeStream);
-                        writeStream.on('close', () => { extracted++; reportProgress(); zipfile.readEntry(); });
+                        writeStream.on('close', onEntryDone);
                         writeStream.on('error', (e) => { readStream.destroy(); writeStream.destroy(); zipfile.close(); done(reject, e); });
                         readStream.on('error',  (e) => { writeStream.destroy(); zipfile.close(); done(reject, e); });
                     });
@@ -134,7 +186,7 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                 }
             }
             
-            zipfile.on('end', () => {
+            function finishDelta() {
                 for (const relPath of deletedFiles) {
                     const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
                     if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
@@ -142,25 +194,33 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                 }
                 zipfile.close();
                 done(resolve);
+            }
+
+            zipfile.on('end', () => {
+                isEndEmitted = true;
+                if (activeStreams === 0) {
+                    finishDelta();
+                }
             });
             zipfile.on('error', (e) => { zipfile.close(); done(reject, e); });
         });
     });
 }
-function createRollbackSnapshot(instancePath) {
+async function createRollbackSnapshot(instancePath) {
     const instDir    = path.dirname(instancePath);
     const folderName = path.basename(instancePath); 
     const timestamp  = Date.now();
     const rollbackTo = path.join(instDir, `${folderName}_rollback_${timestamp}`);
     try {
-        for (const entry of fs.readdirSync(instDir)) {
+        const entries = await fs.promises.readdir(instDir);
+        for (const entry of entries) {
             if (entry.startsWith(`${folderName}_rollback_`)) {
-                try { fs.rmSync(path.join(instDir, entry), { recursive: true, force: true }); } catch (_) {}
+                try { await fs.promises.rm(path.join(instDir, entry), { recursive: true, force: true }); } catch (_) {}
             }
         }
     } catch (_) {}
     try {
-        fs.cpSync(instancePath, rollbackTo, { recursive: true });
+        await fs.promises.cp(instancePath, rollbackTo, { recursive: true });
         process.stderr.write(`[sync] Rollback créé : ${path.basename(rollbackTo)}\n`);
         return rollbackTo;
     } catch (e) {
@@ -332,7 +392,7 @@ async function syncAllInstances() {
                     fs.mkdirSync(targetPath, { recursive: true });
                     isNewInstance = true;
                 } else if (baseChanged || pendingDeltas.length > 0) {
-                    rollbackPath = createRollbackSnapshot(targetPath);
+                    rollbackPath = await createRollbackSnapshot(targetPath);
                 }
                 if (baseChanged) {
                     const tempBase = path.join(dataDir, `download_base_${safeInst}.zip`);

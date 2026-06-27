@@ -194,6 +194,7 @@ class GoogleProvider {
             });
             req.on('error', reject);
             const readStream = fs.createReadStream(srcPath);
+            readStream.on('error', (err) => { req.destroy(); reject(err); });
             let uploaded = 0;
             let lastPct = -1;
             readStream.on('data', chunk => {
