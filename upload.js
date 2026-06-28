@@ -65,9 +65,6 @@ async function createFullZip(folder, tempZip, inst) {
         output.on('error', err => { archive.abort(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
         archive.pipe(output);
         archive.directory(folder, false, (data) => {
-            if (/\.(jar|zip|png|jpg|jpeg|ogg|mp3|mp4|mrpack)$/i.test(data.name)) {
-                data.store = true;
-            }
             return data;
         });
         archive.finalize();
@@ -104,8 +101,7 @@ function createDeltaZip(folder, changed, deleted, tempZip, inst) {
         for (const relPath of changed) {
             const absPath = path.join(folder, relPath.replace(/\//g, path.sep));
             if (!fs.existsSync(absPath)) continue;
-            const isCompressed = /\.(jar|zip|png|jpg|jpeg|ogg|mp3|mp4|mrpack)$/i.test(relPath);
-            archive.file(absPath, { name: relPath, store: isCompressed });
+            archive.file(absPath, { name: relPath });
         }
         archive.finalize();
     });

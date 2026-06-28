@@ -37,119 +37,183 @@ function verifyZipIntegrity(zipPath) {
     });
 }
 
-function extractZip(zipPath, targetPath, onProgress) {
-    return new Promise((resolve, reject) => {
-        const resolvedTarget = path.resolve(targetPath);
-        let count = 0;
-        let activeWrites = 0;
-        let zipFinished = false;
+async function extractZip(zipPath, targetPath, onProgress) {
+    let directory;
+    try {
+        directory = await unzipper.Open.file(zipPath);
+    } catch (err) {
+        // Fallback to Parse if Open fails (e.g., truncated central directory)
+        return new Promise((resolve, reject) => {
+            const resolvedTarget = path.resolve(targetPath);
+            let count = 0;
+            let activeWrites = 0;
+            let zipFinished = false;
+            const checkFinish = () => { if (zipFinished && activeWrites === 0) resolve(); };
+            fs.createReadStream(zipPath)
+                .pipe(unzipper.Parse())
+                .on('entry', function (entry) {
+                    const dest = path.join(targetPath, entry.path);
+                    const resDest = path.resolve(dest);
+                    if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
+                        entry.autodrain();
+                        return;
+                    }
+                    if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
+                        fs.mkdirSync(dest, { recursive: true });
+                        entry.autodrain();
+                    } else {
+                        fs.mkdirSync(path.dirname(dest), { recursive: true });
+                        const ws = fs.createWriteStream(dest);
+                        activeWrites++;
+                        ws.on('finish', () => { activeWrites--; checkFinish(); });
+                        ws.on('error', () => { activeWrites--; checkFinish(); });
+                        entry.pipe(ws);
+                    }
+                    count++;
+                    if (onProgress && count % 50 === 0) {
+                        const fakePct = Math.min(99, Math.floor(count / 50));
+                        onProgress(fakePct);
+                    }
+                })
+                .on('close', () => { zipFinished = true; checkFinish(); })
+                .on('error', () => { zipFinished = true; checkFinish(); });
+        });
+    }
 
-        const checkFinish = () => {
-            if (zipFinished && activeWrites === 0) {
-                resolve();
-            }
-        };
-        
-        fs.createReadStream(zipPath)
-            .pipe(unzipper.Parse())
-            .on('entry', function (entry) {
-                const dest = path.join(targetPath, entry.path);
-                const resDest = path.resolve(dest);
-                if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                    entry.autodrain();
-                    return;
-                }
-                
-                if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
-                    fs.mkdirSync(dest, { recursive: true });
-                    entry.autodrain();
-                } else {
-                    fs.mkdirSync(path.dirname(dest), { recursive: true });
-                    const ws = fs.createWriteStream(dest);
-                    activeWrites++;
-                    ws.on('finish', () => { activeWrites--; checkFinish(); });
-                    ws.on('error', () => { activeWrites--; checkFinish(); });
-                    entry.pipe(ws);
-                }
-                
-                count++;
-                if (onProgress && count % 50 === 0) {
-                    const fakePct = Math.min(99, Math.floor(count / 50));
-                    onProgress(fakePct);
-                }
-            })
-            .on('close', () => {
-                zipFinished = true;
-                checkFinish();
-            })
-            .on('error', (err) => {
-                zipFinished = true;
-                checkFinish();
-            });
-    });
+    const resolvedTarget = path.resolve(targetPath);
+    let count = 0;
+    const total = directory.files.length;
+    const limit = 20;
+    const active = new Set();
+    let errs = [];
+
+    for (const file of directory.files) {
+        if (errs.length > 0) break;
+        const dest = path.join(targetPath, file.path);
+        const resDest = path.resolve(dest);
+        if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
+            continue;
+        }
+        if (file.type === 'Directory' || /[\/\\]$/.test(file.path)) {
+            fs.mkdirSync(dest, { recursive: true });
+        } else {
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            const p = new Promise((resolve, reject) => {
+                file.stream()
+                    .pipe(fs.createWriteStream(dest))
+                    .on('finish', resolve)
+                    .on('error', reject);
+            }).catch(e => { errs.push(e); });
+            active.add(p);
+            p.then(() => active.delete(p));
+            if (active.size >= limit) await Promise.race(active);
+        }
+        count++;
+        if (onProgress && count % 50 === 0) {
+            const fakePct = Math.min(99, Math.floor((count / total) * 100));
+            onProgress(fakePct);
+        }
+    }
+    await Promise.all(active);
+    if (errs.length > 0) throw errs[0];
 }
 
-function applyDelta(deltaZipPath, targetPath, onProgress) {
+async function applyDelta(deltaZipPath, targetPath, onProgress) {
+    let directory;
     const resolvedTarget = path.resolve(targetPath);
-    return new Promise((resolve, reject) => {
-        let deletedFiles = [];
-        let activeWrites = 0;
-        let zipFinished = false;
+    try {
+        directory = await unzipper.Open.file(deltaZipPath);
+    } catch (err) {
+        return new Promise((resolve, reject) => {
+            let deletedFiles = [];
+            let activeWrites = 0;
+            let zipFinished = false;
+            const checkFinish = () => {
+                if (zipFinished && activeWrites === 0) {
+                    for (const relPath of deletedFiles) {
+                        const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
+                        if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
+                        try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
+                    }
+                    resolve();
+                }
+            };
+            fs.createReadStream(deltaZipPath)
+                .pipe(unzipper.Parse())
+                .on('entry', function (entry) {
+                    if (entry.path === '__delta__.json') {
+                        let data = '';
+                        entry.on('data', chunk => data += chunk);
+                        entry.on('end', () => {
+                            try { deletedFiles = JSON.parse(data).deletedFiles || []; } catch (_) {}
+                        });
+                        return;
+                    }
+                    const dest = path.join(targetPath, entry.path);
+                    const resDest = path.resolve(dest);
+                    if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
+                        entry.autodrain();
+                        return;
+                    }
+                    if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
+                        fs.mkdirSync(dest, { recursive: true });
+                        entry.autodrain();
+                    } else {
+                        fs.mkdirSync(path.dirname(dest), { recursive: true });
+                        const ws = fs.createWriteStream(dest);
+                        activeWrites++;
+                        ws.on('finish', () => { activeWrites--; checkFinish(); });
+                        ws.on('error', () => { activeWrites--; checkFinish(); });
+                        entry.pipe(ws);
+                    }
+                })
+                .on('close', () => { zipFinished = true; checkFinish(); })
+                .on('error', () => { zipFinished = true; checkFinish(); });
+        });
+    }
 
-        const checkFinish = () => {
-            if (zipFinished && activeWrites === 0) {
-                for (const relPath of deletedFiles) {
-                    const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
-                    if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
-                    try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
-                }
-                resolve();
-            }
-        };
-        
-        fs.createReadStream(deltaZipPath)
-            .pipe(unzipper.Parse())
-            .on('entry', function (entry) {
-                if (entry.path === '__delta__.json') {
-                    let data = '';
-                    entry.on('data', chunk => data += chunk);
-                    entry.on('end', () => {
-                        try {
-                            const deltaInfo = JSON.parse(data);
-                            deletedFiles = deltaInfo.deletedFiles || [];
-                        } catch (_) {}
-                    });
-                    return;
-                }
+    let deletedFiles = [];
+    const deltaFile = directory.files.find(f => f.path === '__delta__.json');
+    if (deltaFile) {
+        const buf = await deltaFile.buffer();
+        try { deletedFiles = JSON.parse(buf.toString()).deletedFiles || []; } catch (_) {}
+    }
 
-                const dest = path.join(targetPath, entry.path);
-                const resDest = path.resolve(dest);
-                if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                    entry.autodrain();
-                    return;
-                }
-                
-                if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
-                    fs.mkdirSync(dest, { recursive: true });
-                    entry.autodrain();
-                } else {
-                    fs.mkdirSync(path.dirname(dest), { recursive: true });
-                    const ws = fs.createWriteStream(dest);
-                    activeWrites++;
-                    ws.on('finish', () => { activeWrites--; checkFinish(); });
-                    ws.on('error', () => { activeWrites--; checkFinish(); });
-                    entry.pipe(ws);
-                }
-            })
-            .on('close', () => {
-                zipFinished = true;
-                checkFinish();
-            })
-            .on('error', (err) => {
-                zipFinished = true;
-                checkFinish();
-            });
-    });
+    const limit = 20;
+    const active = new Set();
+    let errs = [];
+
+    for (const file of directory.files) {
+        if (file.path === '__delta__.json') continue;
+        if (errs.length > 0) break;
+        const dest = path.join(targetPath, file.path);
+        const resDest = path.resolve(dest);
+        if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
+            continue;
+        }
+        if (file.type === 'Directory' || /[\/\\]$/.test(file.path)) {
+            fs.mkdirSync(dest, { recursive: true });
+        } else {
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            const p = new Promise((resolve, reject) => {
+                file.stream()
+                    .pipe(fs.createWriteStream(dest))
+                    .on('finish', resolve)
+                    .on('error', reject);
+            }).catch(e => { errs.push(e); });
+            active.add(p);
+            p.then(() => active.delete(p));
+            if (active.size >= limit) await Promise.race(active);
+        }
+    }
+    await Promise.all(active);
+    if (errs.length > 0) throw errs[0];
+
+    for (const relPath of deletedFiles) {
+        const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
+        if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
+        try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
+    }
 }
 async function createRollbackSnapshot(instancePath) {
     const instDir    = path.dirname(instancePath);
