@@ -66,7 +66,7 @@ async function extractZip(zipPath, targetPath, onProgress) {
                         const ws = fs.createWriteStream(dest);
                         activeWrites++;
                         ws.on('finish', () => { activeWrites--; checkFinish(); });
-                        ws.on('error', () => { activeWrites--; checkFinish(); });
+                        ws.on('error', (err) => { activeWrites--; reject(err); });
                         entry.pipe(ws);
                     }
                     count++;
@@ -76,7 +76,7 @@ async function extractZip(zipPath, targetPath, onProgress) {
                     }
                 })
                 .on('close', () => { zipFinished = true; checkFinish(); })
-                .on('error', () => { zipFinished = true; checkFinish(); });
+                .on('error', (err) => { reject(err); });
         });
     }
 
@@ -163,12 +163,12 @@ async function applyDelta(deltaZipPath, targetPath, onProgress) {
                         const ws = fs.createWriteStream(dest);
                         activeWrites++;
                         ws.on('finish', () => { activeWrites--; checkFinish(); });
-                        ws.on('error', () => { activeWrites--; checkFinish(); });
+                        ws.on('error', (err) => { activeWrites--; reject(err); });
                         entry.pipe(ws);
                     }
                 })
                 .on('close', () => { zipFinished = true; checkFinish(); })
-                .on('error', () => { zipFinished = true; checkFinish(); });
+                .on('error', (err) => { reject(err); });
         });
     }
 
