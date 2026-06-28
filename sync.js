@@ -421,7 +421,7 @@ async function syncAllInstances() {
                     rollbackPath = await createRollbackSnapshot(targetPath);
                 }
                 if (baseChanged) {
-                    const tempBase = path.join(dataDir, `download_base_${safeInst}.zip`);
+                    tempBase = path.join(dataDir, `download_base_${safeInst}.zip`);
                     registerTemp(tempBase);
                     try {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'DOWNLOADING', value: 0, instance: inst }));
