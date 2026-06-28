@@ -118,42 +118,33 @@ class GoogleProvider {
         const dest = fs.createWriteStream(destPath);
         let downloaded = 0, lastPct = -1;
         return new Promise((resolve, reject) => {
-            const onError = (e) => {
-                dest.destroy();
-                try { fs.unlinkSync(destPath); } catch (_) {}
-                reject(e);
-            };
-            const reader = res.body.getReader();
-            const read = () => {
-                reader.read().then(({ done, value }) => {
-                    if (done) {
-                        dest.end();
-                        return;
+            const { pipeline } = require('stream');
+            const { Readable } = require('stream');
+            const nodeStream = Readable.fromWeb(res.body);
+            
+            nodeStream.on('data', (chunk) => {
+                downloaded += chunk.length;
+                if (totalSize > 0) {
+                    const pct = Math.min(100, Math.round((downloaded / totalSize) * 100));
+                    if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
+                        onProgress && onProgress(pct);
+                        lastPct = pct;
                     }
-                    downloaded += value.length;
-                    if (totalSize > 0) {
-                        const pct = Math.min(100, Math.round(downloaded / totalSize * 100));
-                        if (pct !== lastPct && (pct >= lastPct + 2 || pct === 100)) {
-                            onProgress && onProgress(pct);
-                            lastPct = pct;
-                        }
-                    }
-                    if (!dest.write(value)) {
-                        dest.once('drain', read);
-                    } else {
-                        read();
-                    }
-                }).catch(onError);
-            };
-            dest.on('finish', () => {
+                }
+            });
+
+            pipeline(nodeStream, dest, (err) => {
                 clearTimeout(timeoutId);
+                if (err) {
+                    try { fs.unlinkSync(destPath); } catch (_) {}
+                    return reject(err);
+                }
                 if (totalSize > 0 && downloaded < totalSize) {
-                    return onError(new Error(`Téléchargement incomplet: ${downloaded} / ${totalSize} bytes reçus. La connexion a probablement été coupée.`));
+                    try { fs.unlinkSync(destPath); } catch (_) {}
+                    return reject(new Error(`Téléchargement incomplet: ${downloaded} / ${totalSize} bytes reçus.`));
                 }
                 resolve();
             });
-            dest.on('error', onError);
-            read();
         });
     }
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {
