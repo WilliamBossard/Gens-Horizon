@@ -161,8 +161,8 @@ class GoogleProvider {
         const metadata = { name, parents: existingId ? undefined : ['appDataFolder'] };
         const initMethod = existingId ? 'PATCH' : 'POST';
         const initUrl = existingId 
-            ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=resumable`
-            : `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable`;
+            ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=resumable&fields=id,name,size`
+            : `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size`;
         let resInit = await fetch(initUrl, {
             method: initMethod,
             headers: {
@@ -205,7 +205,16 @@ class GoogleProvider {
                 res.on('end', () => {
                     if (res.statusCode === 200 || res.statusCode === 201) {
                         onProgress && onProgress(100);
-                        resolve(JSON.parse(data));
+                        try {
+                            const parsedData = JSON.parse(data);
+                            // Verifier si Google Drive a bien recu tout le fichier (API peut omettre size pour certains types, mais ZIP devrait l'avoir)
+                            if (parsedData.size && parseInt(parsedData.size, 10) !== fileSize) {
+                                return reject(new Error(`Upload corrompu: Google Drive a enregistré ${parsedData.size} octets, mais le fichier fait ${fileSize} octets.`));
+                            }
+                            resolve(parsedData);
+                        } catch (err) {
+                            reject(new Error(`Upload failed to parse response: ${err.message}`));
+                        }
                     } else {
                         reject(new Error(`Upload failed: ${res.statusCode} ${data}`));
                     }
