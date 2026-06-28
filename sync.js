@@ -382,6 +382,8 @@ async function syncAllInstances() {
         for (const inst of instancesToSync) {
             let rollbackPath   = null;
             let isNewInstance  = false;
+            let tempBase = null;
+            let tempDelta = null;
             try {
                 const safeInst = getCanonicalName(inst);
                 const baseName = `GensHorizon_Backup_${safeInst}.zip`;
@@ -449,7 +451,7 @@ async function syncAllInstances() {
                     }
                 }
                 for (const delta of pendingDeltas) {
-                    const tempDelta = path.join(dataDir, `download_delta_${safeInst}_${delta.ts}.zip`);
+                    tempDelta = path.join(dataDir, `download_delta_${safeInst}_${delta.ts}.zip`);
                     registerTemp(tempDelta);
                     try {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'APPLYING_DELTA', value: 0, instance: inst, delta: delta.name }));
