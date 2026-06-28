@@ -77,6 +77,11 @@ function extractZip(zipPath, targetPath, onProgress) {
                 activeStreams++;
                 nextEntry();
 
+                if (entry.fileName.includes('\0')) {
+                    process.stderr.write(`[ALERTE SÉCURITÉ] Entrée zip ignorée car contenant des octets nuls : ${Buffer.from(entry.fileName).toString('hex')}\n`);
+                    onEntryDone(); return;
+                }
+
                 const dest    = path.join(targetPath, entry.fileName);
                 const resDest = path.resolve(dest);
                 if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {

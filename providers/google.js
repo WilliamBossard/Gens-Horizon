@@ -146,6 +146,9 @@ class GoogleProvider {
             };
             dest.on('finish', () => {
                 clearTimeout(timeoutId);
+                if (totalSize > 0 && downloaded < totalSize) {
+                    return onError(new Error(`Téléchargement incomplet: ${downloaded} / ${totalSize} bytes reçus. La connexion a probablement été coupée.`));
+                }
                 resolve();
             });
             dest.on('error', onError);
