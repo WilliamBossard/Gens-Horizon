@@ -295,7 +295,13 @@ async function syncAllInstances() {
         }
         const cloudFiles = await withRetry(() => provider.listFiles('GensHorizon_'), { ...retryOpts, label: 'listFiles' });
         const cloudIndex = {};
-        for (const f of cloudFiles) cloudIndex[f.name] = f;
+        for (const f of cloudFiles) {
+            if (!cloudIndex[f.name]) cloudIndex[f.name] = f;
+            else {
+                // Si on a un doublon, c'est l'ancien fichier (car listFiles trie par date decroissante).
+                // L'idéal serait de le supprimer, mais pour l'instant on l'ignore juste.
+            }
+        }
         if (isList) {
             const metaFiles = Object.keys(cloudIndex).filter(n => n.startsWith('GensHorizon_Meta_'));
             const metaTasks = metaFiles.map((mName) => async () => {

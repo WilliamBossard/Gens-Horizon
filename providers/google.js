@@ -62,7 +62,8 @@ class GoogleProvider {
             const params = new URLSearchParams({
                 spaces: 'appDataFolder',
                 fields: 'nextPageToken, files(id, name, modifiedTime, size)',
-                pageSize: '1000'
+                pageSize: '1000',
+                orderBy: 'modifiedTime desc'
             });
             if (pageToken) params.append('pageToken', pageToken);
             if (nameContains) params.append('q', `name contains '${nameContains.replace(/'/g, "\\'")}'`);
