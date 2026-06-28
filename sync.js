@@ -1,6 +1,5 @@
 'use strict';
 const fs     = require('fs');
-const yauzl  = require('yauzl'); // Kept for backwards compat if needed somewhere else
 const unzipper = require('unzipper');
 const path   = require('path');
 const { getInstancesFolder, getHorizonDataDir } = require('./paths');

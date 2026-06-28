@@ -38,8 +38,7 @@
   },
   "dependencies": {
     "archiver": "^8.0.0",
-    "unzipper": "^0.12.5",
-    "yauzl": "^3.4.0"
+    "unzipper": "^0.12.5"
   },
   "devDependencies": {
     "@yao-pkg/pkg": "^6.20.0"
