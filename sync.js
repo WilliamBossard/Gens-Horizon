@@ -41,6 +41,14 @@ function extractZip(zipPath, targetPath, onProgress) {
     return new Promise((resolve, reject) => {
         const resolvedTarget = path.resolve(targetPath);
         let count = 0;
+        let activeWrites = 0;
+        let zipFinished = false;
+
+        const checkFinish = () => {
+            if (zipFinished && activeWrites === 0) {
+                resolve();
+            }
+        };
         
         fs.createReadStream(zipPath)
             .pipe(unzipper.Parse())
@@ -57,18 +65,27 @@ function extractZip(zipPath, targetPath, onProgress) {
                     entry.autodrain();
                 } else {
                     fs.mkdirSync(path.dirname(dest), { recursive: true });
-                    entry.pipe(fs.createWriteStream(dest));
+                    const ws = fs.createWriteStream(dest);
+                    activeWrites++;
+                    ws.on('finish', () => { activeWrites--; checkFinish(); });
+                    ws.on('error', () => { activeWrites--; checkFinish(); });
+                    entry.pipe(ws);
                 }
                 
                 count++;
                 if (onProgress && count % 50 === 0) {
-                    // Just emit a fake progress so UI doesn't freeze
                     const fakePct = Math.min(99, Math.floor(count / 50));
                     onProgress(fakePct);
                 }
             })
-            .on('close', () => resolve())
-            .on('error', (err) => resolve()); // Ignore corruption at end
+            .on('close', () => {
+                zipFinished = true;
+                checkFinish();
+            })
+            .on('error', (err) => {
+                zipFinished = true;
+                checkFinish();
+            });
     });
 }
 
@@ -76,6 +93,19 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
     const resolvedTarget = path.resolve(targetPath);
     return new Promise((resolve, reject) => {
         let deletedFiles = [];
+        let activeWrites = 0;
+        let zipFinished = false;
+
+        const checkFinish = () => {
+            if (zipFinished && activeWrites === 0) {
+                for (const relPath of deletedFiles) {
+                    const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
+                    if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
+                    try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
+                }
+                resolve();
+            }
+        };
         
         fs.createReadStream(deltaZipPath)
             .pipe(unzipper.Parse())
@@ -104,18 +134,21 @@ function applyDelta(deltaZipPath, targetPath, onProgress) {
                     entry.autodrain();
                 } else {
                     fs.mkdirSync(path.dirname(dest), { recursive: true });
-                    entry.pipe(fs.createWriteStream(dest));
+                    const ws = fs.createWriteStream(dest);
+                    activeWrites++;
+                    ws.on('finish', () => { activeWrites--; checkFinish(); });
+                    ws.on('error', () => { activeWrites--; checkFinish(); });
+                    entry.pipe(ws);
                 }
             })
             .on('close', () => {
-                for (const relPath of deletedFiles) {
-                    const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
-                    if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
-                    try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
-                }
-                resolve();
+                zipFinished = true;
+                checkFinish();
             })
-            .on('error', (err) => resolve());
+            .on('error', (err) => {
+                zipFinished = true;
+                checkFinish();
+            });
     });
 }
 async function createRollbackSnapshot(instancePath) {
