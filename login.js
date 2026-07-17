@@ -20,7 +20,8 @@ function openBrowser(targetUrl) {
     console.log(JSON.stringify({ type: 'AUTH_URL', message: targetUrl }));
     let cmd;
     if (process.platform === 'win32') {
-        execFile('cmd', ['/c', 'start', '', targetUrl], () => { });
+        const safeUrl = targetUrl.replace(/&/g, '^&');
+        execFile('cmd', ['/c', 'start', '', safeUrl], () => { });
     } else if (process.platform === 'darwin') {
         execFile('open', [targetUrl], () => { });
     } else {
