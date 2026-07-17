@@ -4,7 +4,12 @@ process.env.NODE_NO_WARNINGS = "1";
 const util = require('util');
 ['log', 'info', 'warn', 'error'].forEach(method => {
     console[method] = function (...args) {
-        process.stderr.write(util.format(...args) + '\n');
+        const msg = util.format(...args);
+        if (msg.trim().startsWith('{') && msg.trim().endsWith('}')) {
+            process.stdout.write(msg + '\n');
+        } else {
+            process.stderr.write(msg + '\n');
+        }
     };
 });
 const fs = require('fs');
