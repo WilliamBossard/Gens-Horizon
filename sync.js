@@ -123,9 +123,14 @@ async function syncAllInstances() {
                 const deltaFiles = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${instName}_`) && n.endsWith('.zip'));
                 const totalSizeBytes = deltaFiles.reduce((sum, n) => sum + (parseInt(cloudIndex[n].size, 10) || 0), 0) + (parseInt(baseFile?.size, 10) || 0);
                 let realName = instName;
+                let iconData = null;
+                let loader = null;
                 if (isList) {
-                    if (metaCache.has(instName) && metaCache.get(instName).realName) {
-                        realName = metaCache.get(instName).realName;
+                    if (metaCache.has(instName)) {
+                        const meta = metaCache.get(instName);
+                        if (meta.realName) realName = meta.realName;
+                        if (meta.iconData) iconData = meta.iconData;
+                        if (meta.loader) loader = meta.loader;
                     }
                 } else {
                     const localMetaPath = path.join(dataDir, `meta_${instName}.json`);
@@ -133,6 +138,8 @@ async function syncAllInstances() {
                         try {
                             const metaObj = JSON.parse(fs.readFileSync(localMetaPath, 'utf8'));
                             if (metaObj.realName) realName = metaObj.realName;
+                            if (metaObj.iconData) iconData = metaObj.iconData;
+                            if (metaObj.loader) loader = metaObj.loader;
                         } catch (_) { }
                     }
                 }
@@ -141,7 +148,9 @@ async function syncAllInstances() {
                     realName: realName,
                     deltaCount: deltaFiles.length,
                     sizeBytes: totalSizeBytes,
-                    lastBackup: baseFile?.modifiedTime || null
+                    lastBackup: baseFile?.modifiedTime || null,
+                    iconData: iconData,
+                    loader: loader
                 };
             });
             console.log(JSON.stringify({ type: 'CLOUD_LIST', data: list, richData: richList }));
