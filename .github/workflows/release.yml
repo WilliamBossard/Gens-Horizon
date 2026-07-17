@@ -21,13 +21,14 @@ jobs:
         with:
           node-version: '24'
 
+
       - name: Installation des dépendances
         run: npm install
 
       - name: Injection des identifiants API (config.js)
         run: |
           cat << 'EOF' > config.js
-          module.exports = {
+          const config = {
               credentials: {
                   google: {
                       client_id: "${{ secrets.G_CLIENT_ID }}",
@@ -52,6 +53,18 @@ jobs:
                       scope: "Files.ReadWrite offline_access User.Read"
                   }
               }
+          };
+
+          module.exports = {
+              getConfig: (provider) => {
+                  const provConfig = config.credentials[provider];
+                  if (!provConfig) throw new Error(`Unknown provider: ${provider}`);
+                  if (provConfig.client_id === "fake") {
+                      throw new Error(`Configuration OAuth2 manquante pour ${provider}. Veuillez éditer config.js.`);
+                  }
+                  return provConfig;
+              },
+              ...config
           };
           EOF
 
