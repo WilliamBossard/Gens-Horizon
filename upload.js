@@ -1,14 +1,16 @@
 'use strict';
 const fs       = require('fs');
-const { ZipArchive } = require('archiver');
+const archiver = require('archiver');
 const path     = require('path');
 const { getInstancesFolder, scanInstances, getHorizonDataDir } = require('./paths');
 const { generateManifest, compareManifests }   = require('./scanner');
+const { getCloudIndexAndCleanDuplicates } = require('./cloud-operations');
 const { getProvider }                          = require('./provider');
 const { acquireLock, releaseLock, LOCK_FILE } = require('./lock');
 const { withRetry }                            = require('./retry');
 const {
     checkConnectivity,
+    getCloudSettings,
     readJsonSafe,
     writeJsonAtomic,
     writeJsonAtomicAsync,
@@ -17,6 +19,7 @@ const {
     unregisterTemp,
     setupProcessHandlers,
 } = require('./utils');
+const { PREFIX_BACKUP, PREFIX_DELTA, PREFIX_MANIFEST, PREFIX_META } = require('./cloud-constants');
 setupProcessHandlers();
 async function getFolderSize(dir, currentDepth = 0) {
     if (currentDepth > 20) return 0; 
@@ -42,7 +45,7 @@ async function createFullZip(folder, tempZip, inst) {
     let lastPct = -1;
     return new Promise((resolve, reject) => {
         const output  = fs.createWriteStream(tempZip);
-        const archive = new ZipArchive({ zlib: { level: 1 } });
+        const archive = archiver('zip', { zlib: { level: 1 } });
         archive.on('progress', (p) => {
             if (realTotal === 0) return;
             const pct = Math.min(100, Math.round(p.fs.processedBytes / realTotal * 100));
@@ -73,7 +76,7 @@ async function createFullZip(folder, tempZip, inst) {
 function createDeltaZip(folder, changed, deleted, tempZip, inst) {
     return new Promise((resolve, reject) => {
         const output = fs.createWriteStream(tempZip);
-        const archive = new ZipArchive({ zlib: { level: 1 } });
+        const archive = archiver('zip', { zlib: { level: 1 } });
         output.on('close', resolve);
         archive.on('warning', (warn) => {
             if (warn.code === 'ENOENT') {
@@ -131,11 +134,7 @@ async function upload() {
         const force        = args.includes('--force');
         const COMMANDS     = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
         const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
-        let settings = { syncMode: 'SMART', autoSync: true, autoUpload: true, maxRetries: 3, retryBaseDelay: 1500 };
-        if (fs.existsSync(settingsPath)) {
-            try { settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsPath, 'utf8')) }; } catch (_) {}
-        }
-        const retryOpts = { maxRetries: settings.maxRetries || 3, baseDelay: settings.retryBaseDelay || 1500 };
+        const { sets: settings, retryOpts } = getCloudSettings(settingsPath);
         const provider = await getProvider(settings);
         if (!provider) {
             console.log(JSON.stringify({
@@ -157,17 +156,15 @@ async function upload() {
         } else {
             localInstances = scanInstances();
         }
-        const cloudFiles = await withRetry(() => provider.listFiles('GensHorizon_'), { ...retryOpts, label: 'listFiles' });
-        const cloudIndex = {};
-        for (const f of cloudFiles) cloudIndex[f.name] = f;
+        const cloudIndex = await getCloudIndexAndCleanDuplicates(provider, retryOpts, "[upload]");
         for (const name of Object.keys(cloudIndex)) {
-            if (!name.startsWith('GensHorizon_Delta_')) continue;
-            const body  = name.replace('GensHorizon_Delta_', '').replace('.zip', '');
+            if (!name.startsWith(PREFIX_DELTA)) continue;
+            const body  = name.replace(PREFIX_DELTA, '').replace('.zip', '');
             const parts = body.split('_');
             const ts    = parseInt(parts.pop(), 10);
             if (isNaN(ts)) continue;
             const instName  = parts.join('_');
-            const baseName  = `GensHorizon_Backup_${instName}.zip`;
+            const baseName  = `${PREFIX_BACKUP}${instName}.zip`;
             const baseEntry = cloudIndex[baseName];
             if (!baseEntry) continue;
             const baseTime = new Date(baseEntry.modifiedTime).getTime();
@@ -186,15 +183,15 @@ async function upload() {
             try {
                 const folder = path.join(getInstancesFolder(), getCanonicalName(inst));
                 const safeInst = getCanonicalName(inst); 
-                const baseName     = `GensHorizon_Backup_${safeInst}.zip`;
-                const manifestName = `GensHorizon_Manifest_${safeInst}.json`;
+                const baseName     = `${PREFIX_BACKUP}${safeInst}.zip`;
+                const manifestName = `${PREFIX_MANIFEST}${safeInst}.json`;
                 const manifestPath = path.join(dataDir, `manifest_${safeInst}.json`);
                 const oldManifest     = readJsonSafe(manifestPath);
                 const currentManifest = await generateManifest(folder, folder, oldManifest);
                 const diff            = compareManifests(oldManifest, currentManifest);
                 const hasBaseOnCloud = !!cloudIndex[baseName];
                 const useSmartMode   = settings.syncMode === 'SMART';
-                const metaName = `GensHorizon_Meta_${safeInst}.json`;
+                const metaName = `${PREFIX_META}${safeInst}.json`;
                 let metaData = { iconData: "", loader: "vanilla", realName: inst };
                 const instJsonPath = path.join(folder, 'instance.json');
                 if (fs.existsSync(instJsonPath)) {
@@ -246,7 +243,7 @@ async function upload() {
                             { ...retryOpts, label: `uploadMeta(${inst})` }
                         );
                         if (!useSmartMode || force) {
-                            const deltasToDelete = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${safeInst}_`));
+                            const deltasToDelete = Object.keys(cloudIndex).filter(n => n.startsWith(`${PREFIX_DELTA}${safeInst}_`));
                             for (const dName of deltasToDelete) {
                                 try {
                                     await withRetry(() => provider.deleteFile(cloudIndex[dName].id), { ...retryOpts, label: `deleteFile(${dName})` });
@@ -266,7 +263,7 @@ async function upload() {
                     continue;
                 }
                 const DELTA_THRESHOLD = settings.deltaCleanupThreshold || 10;
-                const existingDeltas  = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${safeInst}_`));
+                const existingDeltas  = Object.keys(cloudIndex).filter(n => n.startsWith(`${PREFIX_DELTA}${safeInst}_`));
                 if (existingDeltas.length >= DELTA_THRESHOLD) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${existingDeltas.length} delta(s) — repack complet (seuil: ${DELTA_THRESHOLD}).` }));
                     const tempZipRepack = path.join(dataDir, `temp_${safeInst}.zip`);
@@ -312,13 +309,13 @@ async function upload() {
                 let timestamp = Date.now();
                 let maxTs = 0;
                 for (const n of existingDeltas) {
-                    const ts = parseInt(n.replace(`GensHorizon_Delta_${safeInst}_`, '').replace('.zip', ''), 10);
+                    const ts = parseInt(n.replace(`${PREFIX_DELTA}${safeInst}_`, '').replace('.zip', ''), 10);
                     if (!isNaN(ts) && ts > maxTs) maxTs = ts;
                 }
                 if (timestamp <= maxTs) {
                     timestamp = maxTs + 1000;
                 }
-                const deltaName    = `GensHorizon_Delta_${safeInst}_${timestamp}.zip`;
+                const deltaName    = `${PREFIX_DELTA}${safeInst}_${timestamp}.zip`;
                 const tempDelta    = path.join(dataDir, `delta_${safeInst}_${timestamp}.zip`);
                 registerTemp(tempDelta);
                 try {
@@ -338,7 +335,7 @@ async function upload() {
                     await withRetry(
                         () => provider.uploadJSON(metaName, metaData, cloudIndex[metaName]?.id),
                         { ...retryOpts, label: `uploadMeta(${inst})` }
-                    );
+                    );
                     syncState[safeInst] = new Date(timestamp).toISOString();
                     await writeJsonAtomicAsync(syncInfoPath, syncState);
                     await writeJsonAtomicAsync(manifestPath, currentManifest);

@@ -55,6 +55,9 @@ jobs:
           };
           EOF
 
+      - name: ExǸcution des tests
+        run: npm test
+
       - name: Compilation avec pkg
         run: npm run dist
 

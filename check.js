@@ -3,6 +3,8 @@ const fs   = require('fs');
 const path = require('path');
 const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getProvider }                    = require('./provider');
+const { PREFIX_BACKUP, PREFIX_DELTA }    = require('./cloud-constants');
+const { getCloudIndexAndCleanDuplicates } = require('./cloud-operations');
 const { checkConnectivity, readJsonSafe, getCanonicalName, setupProcessHandlers } = require('./utils');
 const { withRetry } = require('./retry');
 setupProcessHandlers();
@@ -22,21 +24,19 @@ async function check() {
             return;
         }
         const syncInfo = readJsonSafe(SYNC_INFO_FILE);
-        const cloudFiles = await withRetry(() => provider.listFiles('GensHorizon_'), { maxRetries: 3, baseDelay: 1500, label: 'check_listFiles' });
-        const cloudIndex = {};
-        for (const f of cloudFiles) cloudIndex[f.name] = f;
+        const cloudIndex = await getCloudIndexAndCleanDuplicates(provider, { maxRetries: 3, baseDelay: 1500 }, "[check]");
         const cloudInstances = Object.keys(cloudIndex)
-            .filter(n => n.startsWith('GensHorizon_Backup_'))
-            .map(n => n.replace('GensHorizon_Backup_', '').replace('.zip', ''));
+            .filter(n => n.startsWith(PREFIX_BACKUP))
+            .map(n => n.replace(PREFIX_BACKUP, '').replace('.zip', ''));
         let report = { status: 'UP_TO_DATE', updates: [] };
         for (const instName of cloudInstances) {
-            const baseName  = `GensHorizon_Backup_${instName}.zip`;
+            const baseName  = `${PREFIX_BACKUP}${instName}.zip`;
             const baseFile  = cloudIndex[baseName];
             const cloudTime = new Date(baseFile.modifiedTime).getTime();
             const latestDeltaTime = Object.keys(cloudIndex)
-                .filter(n => n.startsWith(`GensHorizon_Delta_${instName}_`))
+                .filter(n => n.startsWith(`${PREFIX_DELTA}${instName}_`))
                 .map(n => {
-                    const ts = parseInt(n.replace(`GensHorizon_Delta_${instName}_`, '').replace('.zip', ''), 10);
+                    const ts = parseInt(n.replace(`${PREFIX_DELTA}${instName}_`, '').replace('.zip', ''), 10);
                     return isNaN(ts) ? 0 : ts;
                 })
                 .reduce((max, ts) => Math.max(max, ts), 0);
@@ -46,7 +46,7 @@ async function check() {
             const lastSyncTime = isNaN(rawSyncTime) ? 0 : rawSyncTime;
             const localPath  = path.join(getInstancesFolder(), safeKey);
             const localExists = fs.existsSync(localPath);
-            if (localExists && effectiveCloudTime > lastSyncTime) {
+            if (!localExists || effectiveCloudTime > lastSyncTime) {
                 report.status = 'UPDATE_AVAILABLE';
                 report.updates.push(instName);
             }

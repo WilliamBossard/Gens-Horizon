@@ -1,9 +1,10 @@
 'use strict';
 const fs   = require('fs');
+const { PREFIX_BACKUP, PREFIX_DELTA, PREFIX_MANIFEST, PREFIX_META } = require('./cloud-constants');
 const path = require('path');
 const { getProvider } = require('./provider');
 const { getHorizonDataDir } = require('./paths');
-const { checkConnectivity, setupProcessHandlers } = require('./utils');
+const { checkConnectivity, getCloudSettings, setupProcessHandlers } = require('./utils');
 const { withRetry } = require('./retry');
 setupProcessHandlers();
 async function quota() {
@@ -15,11 +16,7 @@ async function quota() {
         }
         const dataDir      = getHorizonDataDir();
         const settingsPath = path.join(dataDir, 'horizon_settings.json');
-        let settings = {};
-        if (fs.existsSync(settingsPath)) {
-            try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch (_) {}
-        }
-        const retryOpts = { maxRetries: settings.maxRetries || 3, baseDelay: settings.retryBaseDelay || 1500 };
+        const { sets: settings, retryOpts } = getCloudSettings(settingsPath);
         const provider = await getProvider(settings);
         if (!provider) {
             console.log(JSON.stringify({
@@ -37,18 +34,18 @@ async function quota() {
         for (const f of cloudFiles) {
             let instName = null;
             let isDelta  = false;
-            if (f.name.startsWith('GensHorizon_Backup_')) {
-                instName = f.name.replace('GensHorizon_Backup_', '').replace('.zip', '');
-            } else if (f.name.startsWith('GensHorizon_Delta_')) {
-                const body  = f.name.replace('GensHorizon_Delta_', '').replace('.zip', '');
+            if (f.name.startsWith(PREFIX_BACKUP)) {
+                instName = f.name.replace(PREFIX_BACKUP, '').replace('.zip', '');
+            } else if (f.name.startsWith(PREFIX_DELTA)) {
+                const body  = f.name.replace(PREFIX_DELTA, '').replace('.zip', '');
                 const parts = body.split('_');
                 parts.pop();
                 instName = parts.join('_');
                 isDelta  = true;
-            } else if (f.name.startsWith('GensHorizon_Manifest_')) {
-                instName = f.name.replace('GensHorizon_Manifest_', '').replace('.json', '');
-            } else if (f.name.startsWith('GensHorizon_Meta_')) {
-                instName = f.name.replace('GensHorizon_Meta_', '').replace('.json', '');
+            } else if (f.name.startsWith(PREFIX_MANIFEST)) {
+                instName = f.name.replace(PREFIX_MANIFEST, '').replace('.json', '');
+            } else if (f.name.startsWith(PREFIX_META)) {
+                instName = f.name.replace(PREFIX_META, '').replace('.json', '');
             }
             if (instName) {
                 instanceMap[instName]  = (instanceMap[instName]  || 0) + (parseInt(f.size, 10) || 0);

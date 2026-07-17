@@ -7,21 +7,23 @@
  * aligné avec horizon_settings.json et horizon.lock — pas le dossier de l'exe seul.
  * ==============================================================================
  */
-const fs     = require('fs');
+const fs = require('fs');
 const crypto = require('crypto');
-const os     = require('os');
-const path   = require('path');
-const { getHorizonDataDir }          = require('./paths');
+const os = require('os');
+const path = require('path');
+const { getHorizonDataDir } = require('./paths');
 const { registerTemp, unregisterTemp } = require('./utils');
-let username = 'default';
-try {
-    username = os.userInfo().username;
-} catch (e) {
-    username = process.env.USER || process.env.LOGNAME || 'unknown';
-}
-const machineID = os.hostname() + '_' + username;
 const BASE_DIR = getHorizonDataDir();
-const SALT_FILE       = path.join(BASE_DIR, 'salt.key');
+const MACHINE_ID_FILE = path.join(BASE_DIR, '.machine_id');
+let machineID;
+if (fs.existsSync(MACHINE_ID_FILE)) {
+    machineID = fs.readFileSync(MACHINE_ID_FILE, 'utf8').trim();
+} else {
+    machineID = os.hostname() + '_GensUser';
+    try { fs.writeFileSync(MACHINE_ID_FILE, machineID, { mode: 0o600 }); } catch (_) {}
+}
+
+const SALT_FILE = path.join(BASE_DIR, 'salt.key');
 const TOKEN_FILE_MODE = 0o600;
 let salt;
 if (fs.existsSync(SALT_FILE)) {
@@ -34,49 +36,85 @@ if (fs.existsSync(SALT_FILE)) {
         throw new Error(`[Auth] ERREUR CRITIQUE : Impossible d'écrire le fichier de sécurité (salt.key). Vérifiez les permissions. Détail : ${e.message}`);
     }
 }
-const SECRET_KEY = crypto.pbkdf2Sync(machineID, salt, 100000, 32, 'sha256');
-function _encrypt(text) {
-    const iv     = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-cbc', SECRET_KEY, iv);
-    let encrypted = cipher.update(text, 'utf8', 'hex');
-    encrypted    += cipher.final('hex');
-    return iv.toString('hex') + ':' + encrypted;
+let SECRET_KEY_PROMISE = null;
+function getSecretKey() {
+    if (SECRET_KEY_PROMISE) return SECRET_KEY_PROMISE;
+    SECRET_KEY_PROMISE = new Promise((resolve, reject) => {
+        crypto.pbkdf2(machineID, salt, 600000, 32, 'sha256', (err, derivedKey) => {
+            if (err) reject(err);
+            else resolve(derivedKey);
+        });
+    });
+    return SECRET_KEY_PROMISE;
 }
-function _decrypt(text) {
+async function _encrypt(text) {
+    const key = await getSecretKey();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    let encrypted = cipher.update(text, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    const authTag = cipher.getAuthTag().toString('hex');
+    return iv.toString('hex') + ':' + authTag + ':' + encrypted;
+}
+async function _decrypt(text) {
     try {
-        const parts    = text.split(':');
-        const iv       = Buffer.from(parts.shift(), 'hex');
-        const decipher = crypto.createDecipheriv('aes-256-cbc', SECRET_KEY, iv);
-        let decrypted  = decipher.update(parts.join(':'), 'hex', 'utf8');
-        decrypted     += decipher.final('utf8');
-        return decrypted;
+        const key = await getSecretKey();
+        const parts = text.split(':');
+
+        if (parts.length === 3) {
+            const iv = Buffer.from(parts[0], 'hex');
+            const authTag = Buffer.from(parts[1], 'hex');
+            const encrypted = parts[2];
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+            decipher.setAuthTag(authTag);
+            let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+            decrypted += decipher.final('utf8');
+            return { decrypted, needsMigration: false };
+        } else {
+            const iv = Buffer.from(parts[0], 'hex');
+            const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+            let decrypted = decipher.update(parts.slice(1).join(':'), 'hex', 'utf8');
+            decrypted += decipher.final('utf8');
+            return { decrypted, needsMigration: true };
+        }
     } catch (e) {
         throw new Error('Impossible de déchiffrer le token. (Machine différente ou fichier corrompu ?)');
     }
 }
-function getSecureToken(filePath) {
+async function getSecureToken(filePath) {
     if (!fs.existsSync(filePath)) return null;
     const raw = fs.readFileSync(filePath, 'utf8').trim();
     if (raw.startsWith('{')) {
         const parsed = JSON.parse(raw);
         process.stderr.write(JSON.stringify({ type: 'INFO', message: 'Sécurisation du token en cours...' }) + '\n');
-        encryptToken(filePath, parsed);
+        await encryptToken(filePath, parsed);
         return parsed;
     }
     try {
-        return JSON.parse(_decrypt(raw));
+        const { decrypted, needsMigration } = await _decrypt(raw);
+        const parsed = JSON.parse(decrypted);
+        if (needsMigration) {
+            process.stderr.write(JSON.stringify({ type: 'INFO', message: 'Migration du token vers AES-GCM en cours...' }) + '\n');
+            await encryptToken(filePath, parsed);
+        }
+        return parsed;
     } catch (e) {
         throw new Error('Impossible de déchiffrer le token. (Machine différente ?)');
     }
 }
-function encryptToken(filePath, tokenData) {
+async function encryptToken(filePath, tokenData) {
     const tmp = filePath + '.tmp';
     registerTemp(tmp);
-    fs.writeFileSync(tmp, _encrypt(JSON.stringify(tokenData)), {
+    const encrypted = await _encrypt(JSON.stringify(tokenData));
+    fs.writeFileSync(tmp, encrypted, {
         encoding: 'utf8',
         mode: TOKEN_FILE_MODE
     });
     fs.renameSync(tmp, filePath);
     unregisterTemp(tmp);
 }
-module.exports = { getSecureToken, encryptToken };
+module.exports = {
+    getSecureToken,
+    encryptToken,
+    ...(process.env.NODE_ENV === 'test' ? { _encrypt, _decrypt } : {})
+};

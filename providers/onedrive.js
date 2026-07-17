@@ -3,7 +3,6 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 const os = require('os');
-const { credentials } = require('../config');
 const Auth = require('../Auth');
 const GRAPH_HOST = 'graph.microsoft.com';
 const APP_ROOT = '/v1.0/me/drive/special/approot';

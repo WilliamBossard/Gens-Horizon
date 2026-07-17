@@ -1,12 +1,12 @@
 'use strict';
-const fs     = require('fs');
+const fs = require('fs');
 const unzipper = require('unzipper');
-const path   = require('path');
+const path = require('path');
 const { getInstancesFolder, getHorizonDataDir } = require('./paths');
-const { getProvider }                  = require('./provider');
+const { getProvider } = require('./provider');
 const { generateManifest, withConcurrency } = require('./scanner');
-const { acquireLock, releaseLock }     = require('./lock');
-const { withRetry }                    = require('./retry');
+const { acquireLock, releaseLock } = require('./lock');
+const { withRetry } = require('./retry');
 const {
     checkConnectivity,
     readJsonSafe,
@@ -17,239 +17,46 @@ const {
     unregisterTemp,
     setupProcessHandlers,
 } = require('./utils');
+const { verifyZipIntegrity, extractZip, applyDelta } = require('./zip-utils');
+const { getCloudIndexAndCleanDuplicates } = require('./cloud-operations');
 setupProcessHandlers();
-function verifyZipIntegrity(zipPath) {
-    return new Promise((resolve, reject) => {
-        try {
-            const fd = fs.openSync(zipPath, 'r');
-            const buf = Buffer.alloc(4);
-            fs.readSync(fd, buf, 0, 4, 0);
-            fs.closeSync(fd);
-            if (buf[0] !== 0x50 || buf[1] !== 0x4B || buf[2] !== 0x03 || buf[3] !== 0x04) {
-                const hex = buf.toString('hex').toUpperCase();
-                return reject(new Error(`Fichier téléchargé invalide (pas un ZIP). Signature reçue: 0x${hex}.`));
-            }
-            resolve();
-        } catch (e) {
-            reject(new Error(`Impossible de lire le fichier téléchargé : ${e.message}`));
-        }
-    });
-}
 
-async function extractZip(zipPath, targetPath, onProgress) {
-    let directory;
-    try {
-        directory = await unzipper.Open.file(zipPath);
-    } catch (err) {
-        // Fallback to Parse if Open fails (e.g., truncated central directory)
-        return new Promise((resolve, reject) => {
-            const resolvedTarget = path.resolve(targetPath);
-            let count = 0;
-            let activeWrites = 0;
-            let zipFinished = false;
-            const checkFinish = () => { if (zipFinished && activeWrites === 0) resolve(); };
-            fs.createReadStream(zipPath)
-                .pipe(unzipper.Parse())
-                .on('entry', function (entry) {
-                    const dest = path.join(targetPath, entry.path);
-                    const resDest = path.resolve(dest);
-                    if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                        entry.autodrain();
-                        return;
-                    }
-                    if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
-                        fs.mkdirSync(dest, { recursive: true });
-                        entry.autodrain();
-                    } else {
-                        fs.mkdirSync(path.dirname(dest), { recursive: true });
-                        const ws = fs.createWriteStream(dest);
-                        activeWrites++;
-                        ws.on('finish', () => { activeWrites--; checkFinish(); });
-                        ws.on('error', (err) => { activeWrites--; reject(err); });
-                        entry.pipe(ws);
-                    }
-                    count++;
-                    if (onProgress && count % 50 === 0) {
-                        const fakePct = Math.min(99, Math.floor(count / 50));
-                        onProgress(fakePct);
-                    }
-                })
-                .on('close', () => { zipFinished = true; checkFinish(); })
-                .on('error', (err) => { reject(err); });
-        });
-    }
-
-    const resolvedTarget = path.resolve(targetPath);
-    let count = 0;
-    const total = directory.files.length;
-    const limit = 20;
-    const active = new Set();
-    let errs = [];
-
-    for (const file of directory.files) {
-        if (errs.length > 0) break;
-        const dest = path.join(targetPath, file.path);
-        const resDest = path.resolve(dest);
-        if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-            continue;
-        }
-        if (file.type === 'Directory' || /[\/\\]$/.test(file.path)) {
-            fs.mkdirSync(dest, { recursive: true });
-        } else {
-            fs.mkdirSync(path.dirname(dest), { recursive: true });
-            const p = new Promise((resolve, reject) => {
-                file.stream()
-                    .pipe(fs.createWriteStream(dest))
-                    .on('finish', resolve)
-                    .on('error', reject);
-            }).catch(e => { errs.push(e); });
-            active.add(p);
-            p.then(() => active.delete(p));
-            if (active.size >= limit) await Promise.race(active);
-        }
-        count++;
-        if (onProgress && count % 50 === 0) {
-            const fakePct = Math.min(99, Math.floor((count / total) * 100));
-            onProgress(fakePct);
-        }
-    }
-    await Promise.all(active);
-    if (errs.length > 0) throw errs[0];
-}
-
-async function applyDelta(deltaZipPath, targetPath, onProgress) {
-    let directory;
-    const resolvedTarget = path.resolve(targetPath);
-    try {
-        directory = await unzipper.Open.file(deltaZipPath);
-    } catch (err) {
-        return new Promise((resolve, reject) => {
-            let deletedFiles = [];
-            let activeWrites = 0;
-            let zipFinished = false;
-            const checkFinish = () => {
-                if (zipFinished && activeWrites === 0) {
-                    for (const relPath of deletedFiles) {
-                        const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
-                        if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
-                        try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
-                    }
-                    resolve();
-                }
-            };
-            fs.createReadStream(deltaZipPath)
-                .pipe(unzipper.Parse())
-                .on('entry', function (entry) {
-                    if (entry.path === '__delta__.json') {
-                        let data = '';
-                        entry.on('data', chunk => data += chunk);
-                        entry.on('end', () => {
-                            try { deletedFiles = JSON.parse(data).deletedFiles || []; } catch (_) {}
-                        });
-                        return;
-                    }
-                    const dest = path.join(targetPath, entry.path);
-                    const resDest = path.resolve(dest);
-                    if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                        entry.autodrain();
-                        return;
-                    }
-                    if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
-                        fs.mkdirSync(dest, { recursive: true });
-                        entry.autodrain();
-                    } else {
-                        fs.mkdirSync(path.dirname(dest), { recursive: true });
-                        const ws = fs.createWriteStream(dest);
-                        activeWrites++;
-                        ws.on('finish', () => { activeWrites--; checkFinish(); });
-                        ws.on('error', (err) => { activeWrites--; reject(err); });
-                        entry.pipe(ws);
-                    }
-                })
-                .on('close', () => { zipFinished = true; checkFinish(); })
-                .on('error', (err) => { reject(err); });
-        });
-    }
-
-    let deletedFiles = [];
-    const deltaFile = directory.files.find(f => f.path === '__delta__.json');
-    if (deltaFile) {
-        const buf = await deltaFile.buffer();
-        try { deletedFiles = JSON.parse(buf.toString()).deletedFiles || []; } catch (_) {}
-    }
-
-    const limit = 20;
-    const active = new Set();
-    let errs = [];
-
-    for (const file of directory.files) {
-        if (file.path === '__delta__.json') continue;
-        if (errs.length > 0) break;
-        const dest = path.join(targetPath, file.path);
-        const resDest = path.resolve(dest);
-        if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-            continue;
-        }
-        if (file.type === 'Directory' || /[\/\\]$/.test(file.path)) {
-            fs.mkdirSync(dest, { recursive: true });
-        } else {
-            fs.mkdirSync(path.dirname(dest), { recursive: true });
-            const p = new Promise((resolve, reject) => {
-                file.stream()
-                    .pipe(fs.createWriteStream(dest))
-                    .on('finish', resolve)
-                    .on('error', reject);
-            }).catch(e => { errs.push(e); });
-            active.add(p);
-            p.then(() => active.delete(p));
-            if (active.size >= limit) await Promise.race(active);
-        }
-    }
-    await Promise.all(active);
-    if (errs.length > 0) throw errs[0];
-
-    for (const relPath of deletedFiles) {
-        const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
-        if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
-        try { if (fs.existsSync(absPath)) fs.rmSync(absPath, { recursive: true, force: true }); } catch (_) {}
-    }
-}
 async function createRollbackSnapshot(instancePath) {
-    const instDir    = path.dirname(instancePath);
-    const folderName = path.basename(instancePath); 
-    const timestamp  = Date.now();
+    const instDir = path.dirname(instancePath);
+    const folderName = path.basename(instancePath);
+    const timestamp = Date.now();
     const rollbackTo = path.join(instDir, `${folderName}_rollback_${timestamp}`);
-    try {
-        const entries = await fs.promises.readdir(instDir);
-        for (const entry of entries) {
-            if (entry.startsWith(`${folderName}_rollback_`)) {
-                try { await fs.promises.rm(path.join(instDir, entry), { recursive: true, force: true }); } catch (_) {}
-            }
-        }
-    } catch (_) {}
     try {
         await fs.promises.cp(instancePath, rollbackTo, { recursive: true });
         process.stderr.write(`[sync] Rollback créé : ${path.basename(rollbackTo)}\n`);
-        return rollbackTo;
     } catch (e) {
         process.stderr.write(`[sync] Impossible de créer le rollback : ${e.message}\n`);
         return null;
     }
+    try {
+        const entries = await fs.promises.readdir(instDir);
+        for (const entry of entries) {
+            if (entry.startsWith(`${folderName}_rollback_`) && entry !== path.basename(rollbackTo)) {
+                try { await fs.promises.rm(path.join(instDir, entry), { recursive: true, force: true }); } catch (_) { }
+            }
+        }
+    } catch (_) { }
+    return rollbackTo;
 }
 function cleanupRollback(rollbackPath) {
     if (!rollbackPath) return;
     try { fs.rmSync(rollbackPath, { recursive: true, force: true }); }
-    catch (_) {}
+    catch (_) { }
 }
 async function syncAllInstances() {
-    const args   = process.argv.slice(2);
+    const args = process.argv.slice(2);
     const isList = args.includes('--list');
     if (!isList) {
         if (!acquireLock()) {
             console.log(JSON.stringify({
-                type     : 'ERROR',
+                type: 'ERROR',
                 errorCode: 'ERR_ALREADY_RUNNING',
-                message  : 'ERR_ALREADY_RUNNING',
+                message: 'ERR_ALREADY_RUNNING',
             }));
             process.exit(1);
         }
@@ -260,36 +67,29 @@ async function syncAllInstances() {
             console.log(JSON.stringify({ type: 'OFFLINE', message: 'Internet indisponible.' }));
             return;
         }
-        const dataDir      = getHorizonDataDir();
+        const dataDir = getHorizonDataDir();
         const settingsPath = path.join(dataDir, 'horizon_settings.json');
         const syncInfoPath = path.join(dataDir, 'last_sync.json');
-        const force        = args.includes('--force');
-        const isDelete     = args.includes('--delete');
-        const COMMANDS     = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
+        const force = args.includes('--force');
+        const isDelete = args.includes('--delete');
+        const COMMANDS = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
         const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
         let settings = { syncMode: 'SMART', maxRetries: 3, retryBaseDelay: 1500 };
         if (fs.existsSync(settingsPath)) {
-            try { settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsPath, 'utf8')) }; } catch (_) {}
+            try { settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsPath, 'utf8')) }; } catch (_) { }
         }
         const retryOpts = { maxRetries: settings.maxRetries || 3, baseDelay: settings.retryBaseDelay || 1500 };
         const provider = await getProvider(settings);
         if (!provider) {
             console.log(JSON.stringify({
-                type     : 'ERROR',
+                type: 'ERROR',
                 errorCode: 'AUTH_EXPIRED',
-                message  : "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.",
+                message: "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.",
             }));
             return;
         }
-        const cloudFiles = await withRetry(() => provider.listFiles('GensHorizon_'), { ...retryOpts, label: 'listFiles' });
-        const cloudIndex = {};
-        for (const f of cloudFiles) {
-            if (!cloudIndex[f.name]) cloudIndex[f.name] = f;
-            else {
-                // Si on a un doublon, c'est l'ancien fichier (car listFiles trie par date decroissante).
-                // L'idéal serait de le supprimer, mais pour l'instant on l'ignore juste.
-            }
-        }
+        const cloudIndex = await getCloudIndexAndCleanDuplicates(provider, retryOpts, "[sync]");
+        const metaCache = new Map();
         if (isList) {
             const metaFiles = Object.keys(cloudIndex).filter(n => n.startsWith('GensHorizon_Meta_'));
             const metaTasks = metaFiles.map((mName) => async () => {
@@ -299,13 +99,16 @@ async function syncAllInstances() {
                 if (fs.existsSync(localMetaPath)) {
                     const localStat = fs.statSync(localMetaPath);
                     const cloudTime = new Date(cloudIndex[mName].modifiedTime).getTime();
-                    if (localStat.mtime.getTime() >= cloudTime) needsDownload = false;
+                    if (localStat.mtime.getTime() >= cloudTime) {
+                        needsDownload = false;
+                        try { metaCache.set(instName, JSON.parse(fs.readFileSync(localMetaPath, 'utf8'))); } catch (_) { }
+                    }
                 }
                 if (needsDownload) {
                     try {
                         const data = await provider.downloadJSON(cloudIndex[mName].id);
-                        await writeJsonAtomicAsync(localMetaPath, data);
-                    } catch (_) {}
+                        metaCache.set(instName, data);
+                    } catch (_) { }
                 }
             });
             await withConcurrency(6, metaTasks);
@@ -315,24 +118,30 @@ async function syncAllInstances() {
                     .map(n => n.replace('GensHorizon_Backup_', '').replace('.zip', ''))
             )];
             const richList = list.map(instName => {
-                const baseName   = `GensHorizon_Backup_${instName}.zip`;
-                const baseFile   = cloudIndex[baseName];
+                const baseName = `GensHorizon_Backup_${instName}.zip`;
+                const baseFile = cloudIndex[baseName];
                 const deltaFiles = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${instName}_`) && n.endsWith('.zip'));
                 const totalSizeBytes = deltaFiles.reduce((sum, n) => sum + (parseInt(cloudIndex[n].size, 10) || 0), 0) + (parseInt(baseFile?.size, 10) || 0);
                 let realName = instName;
-                const localMetaPath = path.join(dataDir, `meta_${instName}.json`);
-                if (fs.existsSync(localMetaPath)) {
-                    try {
-                        const metaObj = JSON.parse(fs.readFileSync(localMetaPath, 'utf8'));
-                        if (metaObj.realName) realName = metaObj.realName;
-                    } catch(_) {}
+                if (isList) {
+                    if (metaCache.has(instName) && metaCache.get(instName).realName) {
+                        realName = metaCache.get(instName).realName;
+                    }
+                } else {
+                    const localMetaPath = path.join(dataDir, `meta_${instName}.json`);
+                    if (fs.existsSync(localMetaPath)) {
+                        try {
+                            const metaObj = JSON.parse(fs.readFileSync(localMetaPath, 'utf8'));
+                            if (metaObj.realName) realName = metaObj.realName;
+                        } catch (_) { }
+                    }
                 }
-                return { 
-                    name: instName, 
-                    realName: realName, 
-                    deltaCount: deltaFiles.length, 
-                    sizeBytes: totalSizeBytes, 
-                    lastBackup: baseFile?.modifiedTime || null 
+                return {
+                    name: instName,
+                    realName: realName,
+                    deltaCount: deltaFiles.length,
+                    sizeBytes: totalSizeBytes,
+                    lastBackup: baseFile?.modifiedTime || null
                 };
             });
             console.log(JSON.stringify({ type: 'CLOUD_LIST', data: list, richData: richList }));
@@ -340,7 +149,7 @@ async function syncAllInstances() {
         }
         if (isDelete && targetInstance) {
             const safeTarget = getCanonicalName(targetInstance);
-            const toDelete   = Object.keys(cloudIndex).filter(n =>
+            const toDelete = Object.keys(cloudIndex).filter(n =>
                 n === `GensHorizon_Backup_${safeTarget}.zip` ||
                 n === `GensHorizon_Manifest_${safeTarget}.json` ||
                 n === `GensHorizon_Meta_${safeTarget}.json` ||
@@ -368,8 +177,8 @@ async function syncAllInstances() {
                 .filter(n => n.startsWith('GensHorizon_Backup_'))
                 .map(n => n.replace('GensHorizon_Backup_', '').replace('.zip', '')))];
         for (const inst of instancesToSync) {
-            let rollbackPath   = null;
-            let isNewInstance  = false;
+            let rollbackPath = null;
+            let isNewInstance = false;
             let tempBase = null;
             let tempDelta = null;
             try {
@@ -388,8 +197,8 @@ async function syncAllInstances() {
                     continue;
                 }
                 const targetPath = path.join(getInstancesFolder(), safeInst);
-                const lastSync   = syncState[safeInst] ? new Date(syncState[safeInst]).getTime() : 0;
-                const baseTime   = new Date(baseFile.modifiedTime).getTime();
+                const lastSync = syncState[safeInst] ? new Date(syncState[safeInst]).getTime() : 0;
+                const baseTime = new Date(baseFile.modifiedTime).getTime();
                 const deltaFiles = Object.keys(cloudIndex)
                     .filter(n => n.startsWith(`GensHorizon_Delta_${safeInst}_`) && n.endsWith('.zip'))
                     .map(n => {
@@ -399,7 +208,7 @@ async function syncAllInstances() {
                     .filter(d => !isNaN(d.ts))
                     .sort((a, b) => a.ts - b.ts);
                 const pendingDeltas = deltaFiles.filter(d => d.ts > lastSync || force);
-                const baseChanged   = baseTime > lastSync || force;
+                const baseChanged = baseTime > lastSync || force;
                 if (!baseChanged && pendingDeltas.length === 0) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${inst} est déjà à jour.` }));
                     continue;
@@ -428,13 +237,13 @@ async function syncAllInstances() {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 100, instance: inst }));
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: 0, instance: inst }));
                         for (const entry of fs.readdirSync(targetPath)) {
-                            try { fs.rmSync(path.join(targetPath, entry), { recursive: true, force: true }); } catch(_) {}
+                            try { fs.rmSync(path.join(targetPath, entry), { recursive: true, force: true }); } catch (_) { }
                         }
                         await extractZip(tempBase, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: pct, instance: inst }))
                         );
                     } finally {
-                        try { if (fs.existsSync(tempBase)) fs.unlinkSync(tempBase); } catch (_) {}
+                        try { if (fs.existsSync(tempBase)) fs.unlinkSync(tempBase); } catch (_) { }
                         unregisterTemp(tempBase);
                     }
                 }
@@ -452,7 +261,7 @@ async function syncAllInstances() {
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'APPLYING_DELTA', value: pct, instance: inst, delta: delta.name }))
                         );
                     } finally {
-                        try { if (fs.existsSync(tempDelta)) fs.unlinkSync(tempDelta); } catch (_) {}
+                        try { if (fs.existsSync(tempDelta)) fs.unlinkSync(tempDelta); } catch (_) { }
                         unregisterTemp(tempDelta);
                     }
                 }
@@ -464,33 +273,33 @@ async function syncAllInstances() {
                 try {
                     const newManifest = await generateManifest(targetPath);
                     await writeJsonAtomicAsync(path.join(dataDir, `manifest_${safeInst}.json`), newManifest);
-                } catch (_) {}
+                } catch (_) { }
                 const deltasApplied = pendingDeltas.length;
                 console.log(JSON.stringify({
-                    type    : 'SUCCESS',
+                    type: 'SUCCESS',
                     instance: inst,
-                    base    : baseChanged,
-                    deltas  : deltasApplied,
-                    message : baseChanged
+                    base: baseChanged,
+                    deltas: deltasApplied,
+                    message: baseChanged
                         ? `Base + ${deltasApplied} delta(s) appliqué(s).`
                         : `${deltasApplied} delta(s) appliqué(s).`,
                 }));
             } catch (instErr) {
                 if (isNewInstance) {
                     try {
-                        const safeInst  = getCanonicalName(inst);
+                        const safeInst = getCanonicalName(inst);
                         const targetPath = path.join(getInstancesFolder(), safeInst);
-                        if (fs.existsSync(targetPath)) try { fs.rmSync(targetPath, { recursive: true, force: true }); } catch (_) {}
-                    } catch (_) {}
+                        if (fs.existsSync(targetPath)) try { fs.rmSync(targetPath, { recursive: true, force: true }); } catch (_) { }
+                    } catch (_) { }
                 }
                 const rollbackMsg = rollbackPath
                     ? ` Un rollback est disponible (lance --rollback ${inst} pour restaurer).`
                     : '';
                 console.log(JSON.stringify({
-                    type       : 'ERROR',
-                    instance   : inst,
-                    message    : instErr.message + rollbackMsg,
-                    errorCode  : instErr.errorCode || undefined,
+                    type: 'ERROR',
+                    instance: inst,
+                    message: instErr.message + rollbackMsg,
+                    errorCode: instErr.errorCode || undefined,
                     hasRollback: !!rollbackPath,
                 }));
             }

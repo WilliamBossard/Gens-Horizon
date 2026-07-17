@@ -10,6 +10,7 @@ function isRetryable(err) {
     if (RETRYABLE_CODES.has(err.code))        return true;
     if (RETRYABLE_STATUS.has(err.statusCode)) return true;
     const msg = (err.message || '').toLowerCase();
+    if (err.statusCode === 401 || err.statusCode === 403) return false;
     return msg.includes('timeout')
         || msg.includes('socket hang up')
         || msg.includes('network error')

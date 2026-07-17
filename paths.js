@@ -12,6 +12,7 @@ const os   = require('os');
 const path = require('path');
 const fs   = require('fs');
 function getHorizonDataDir() {
+    if (process.env.HORIZON_DATA_DIR) return process.env.HORIZON_DATA_DIR;
     return process.pkg ? path.dirname(process.execPath) : process.cwd();
 }
 function getAppDataPath() {
@@ -59,7 +60,11 @@ function scanInstances() {
 }
 function getProviderName(settings) {
     const cliArg = process.argv.find(a => a.startsWith('--provider='));
-    if (cliArg) return cliArg.split('=')[1].trim();
+    if (cliArg) {
+        const raw = cliArg.split('=')[1].trim().toLowerCase();
+        const VALID = new Set(['google', 'dropbox', 'onedrive']);
+        if (VALID.has(raw)) return raw;
+    }
     return (settings && settings.provider) || 'google';
 }
 module.exports = { getHorizonDataDir, getInstancesFolder, scanInstances, getProviderName };

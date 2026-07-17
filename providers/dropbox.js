@@ -2,7 +2,6 @@
 const fs    = require('fs');
 const https = require('https');
 const path  = require('path');
-const { credentials } = require('../config');
 const Auth = require('../Auth');
 function httpsRequest(options, bodyBuffer = null) {
     return new Promise((resolve, reject) => {

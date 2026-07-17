@@ -6,3 +6,5 @@ token*.json
 *.zip
 node_modules/
 dist/
+salt.key
+salt.key

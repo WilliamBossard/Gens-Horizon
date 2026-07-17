@@ -1,5 +1,5 @@
 'use strict';
-const fs  = require('fs');
+const fs = require('fs');
 const dns = require('dns').promises;
 async function checkConnectivity() {
     const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
@@ -14,29 +14,26 @@ function readJsonSafe(filePath, fallback = {}) {
     try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
     catch (_) { return fallback; }
 }
-const _tempFiles    = new Set();
+const _tempFiles = new Set();
 const _shutdownHooks = [];
-function registerTemp(p)   { _tempFiles.add(p); }
+function registerTemp(p) { _tempFiles.add(p); }
 function unregisterTemp(p) { _tempFiles.delete(p); }
 function cleanupTemps() {
     for (const f of _tempFiles) {
-        try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (_) {}
+        try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (_) { }
     }
 }
-/**
- * Enregistre une fonction à appeler lors de tout shutdown (SIGINT, SIGTERM,
- * uncaughtException, unhandledRejection). Utilisé par lock.js pour releaseLock().
- */
+
 function onShutdown(fn) { _shutdownHooks.push(fn); }
 function _runShutdownHooks() {
-    for (const fn of _shutdownHooks) { try { fn(); } catch (_) {} }
+    for (const fn of _shutdownHooks) { try { fn(); } catch (_) { } }
 }
 function writeJsonAtomic(filePath, data) {
     const tmp = filePath + '.tmp';
     registerTemp(tmp);
     const fd = fs.openSync(tmp, 'w');
     fs.writeSync(fd, JSON.stringify(data, null, 2));
-    fs.fsyncSync(fd); 
+    fs.fsyncSync(fd);
     fs.closeSync(fd);
     fs.renameSync(tmp, filePath);
     unregisterTemp(tmp);
@@ -56,8 +53,20 @@ async function writeJsonAtomicAsync(filePath, data) {
     unregisterTemp(tmp);
 }
 function getCanonicalName(name) {
-    if (!name) return "";
-    return String(name).replace(/[^a-z0-9]/gi, "_");
+    if (!name || typeof name !== 'string') return 'UnknownInstance';
+    return name.replace(/[<>:"/\\|?*\r\n\0'"`;$]/g, "").trim().substring(0, 100);
+}
+
+function getCloudSettings(settingsPath) {
+    let sets = { syncMode: 'SMART', maxRetries: 3, baseDelay: 2000 };
+    if (fs.existsSync(settingsPath)) {
+        try {
+            const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+            sets = { ...sets, ...parsed };
+        } catch (_) { }
+    }
+    const retryOpts = { maxRetries: sets.maxRetries || 3, baseDelay: sets.baseDelay || 2000 };
+    return { sets, retryOpts };
 }
 let _handlersSetup = false;
 function setupProcessHandlers() {
@@ -78,7 +87,7 @@ function setupProcessHandlers() {
                 errorCode: 'UNCAUGHT_EXCEPTION',
                 message: err.message || String(err),
             }) + '\n');
-        } catch (_) {}
+        } catch (_) { }
         process.stderr.write(`[CRITIQUE] ${err.stack || err}\n`);
         _runShutdownHooks();
         cleanupTemps();
@@ -92,7 +101,7 @@ function setupProcessHandlers() {
                 errorCode: 'UNHANDLED_REJECTION',
                 message: msg,
             }) + '\n');
-        } catch (_) {}
+        } catch (_) { }
         process.stderr.write(`[CRITIQUE] Promesse rejetée : ${msg}\n`);
         _runShutdownHooks();
         cleanupTemps();
@@ -101,6 +110,7 @@ function setupProcessHandlers() {
 }
 module.exports = {
     getCanonicalName,
+    getCloudSettings,
     checkConnectivity,
     readJsonSafe,
     writeJsonAtomic,

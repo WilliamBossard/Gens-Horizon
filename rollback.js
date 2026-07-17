@@ -1,8 +1,9 @@
 'use strict';
-const fs   = require('fs');
-const path = require('path');
-const { getInstancesFolder }      = require('./paths');
-const { getCanonicalName, setupProcessHandlers } = require('./utils');
+const fs                          = require('fs');
+const path                        = require('path');
+const crypto                      = require('crypto');
+const { getInstancesFolder, getHorizonDataDir } = require('./paths');
+const { getCanonicalName, setupProcessHandlers, writeJsonAtomic } = require('./utils');
 const { acquireLock, releaseLock } = require('./lock');
 setupProcessHandlers();
 function rollback() {
@@ -58,6 +59,15 @@ function rollback() {
             fs.rmSync(targetPath, { recursive: true, force: true });
         }
         fs.renameSync(rollbackFolder, targetPath);
+
+        const syncInfoPath = path.join(getHorizonDataDir(), 'last_sync.json');
+        let syncState = {};
+        if (fs.existsSync(syncInfoPath)) {
+            try { syncState = JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')); } catch(e){}
+        }
+        syncState[safeInst] = new Date(rollbackTime).toISOString();
+        writeJsonAtomic(syncInfoPath, syncState);
+
         console.log(JSON.stringify({
             type    : 'SUCCESS',
             instance: targetInstance,

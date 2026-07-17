@@ -1,20 +1,28 @@
 'use strict';
 process.env.NODE_NO_WARNINGS = "1";
+
+const util = require('util');
+['log', 'info', 'warn', 'error'].forEach(method => {
+    console[method] = function (...args) {
+        process.stderr.write(util.format(...args) + '\n');
+    };
+});
 const fs = require('fs');
 const path = require('path');
 const dns = require('dns');
 if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv4first');
-const { getHorizonDataDir } = require('./paths');
+const { getHorizonDataDir } = require('./paths');
+
 const SETTINGS_PATH = path.join(getHorizonDataDir(), 'horizon_settings.json');
 if (!fs.existsSync(SETTINGS_PATH)) {
     const defaultSettings = {
-        systemEnabled    : true,
-        syncMode         : 'SMART',
-        autoSync         : true,
-        autoUpload       : true,
-        provider         : 'google',
-        maxRetries       : 3,
-        retryBaseDelay   : 1500,
+        systemEnabled: true,
+        syncMode: 'SMART',
+        autoSync: true,
+        autoUpload: true,
+        provider: 'google',
+        maxRetries: 3,
+        retryBaseDelay: 1500,
         deltaCleanupThreshold: 10,
     };
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify(defaultSettings, null, 2));
@@ -34,7 +42,7 @@ if (args.includes('--login')) {
     require('./rollback.js');
 } else {
     console.log(JSON.stringify({
-        type   : 'ERROR',
+        type: 'ERROR',
         message: 'Commande manquante. Utiliser : --login, --check, --sync, --upload, --quota, --rollback'
     }));
 }

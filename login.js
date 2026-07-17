@@ -6,7 +6,7 @@ const url = require('url');
 const path = require('path');
 const { execFile, execSync } = require('child_process');
 const crypto = require('crypto');
-const { credentials } = require('./config');
+const { getConfig } = require('./config');
 const { getProviderName, getTokenPath } = require('./provider');
 const { getHorizonDataDir } = require('./paths');
 const { setupProcessHandlers } = require('./utils');
@@ -32,11 +32,11 @@ function openBrowser(targetUrl) {
         }
     }
 }
-function httpsPost(hostname, path, body) {
+function httpsPost(hostname, reqPath, body) {
     return new Promise((resolve, reject) => {
         const buf = Buffer.from(body);
         const req = https.request({
-            hostname, path, method: 'POST',
+            hostname, path: reqPath, method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': buf.length }
         }, (res) => {
             const chunks = [];
@@ -93,7 +93,7 @@ function waitForCallback(exchangeCode, port, expectedState) {
     });
 }
 async function loginGoogle() {
-    const cred = credentials.google;
+    const cred = getConfig('google');
     const REDIRECT_URI = cred.redirect_uri;
     const port = parseInt(new URL(REDIRECT_URI).port) || 80;
     const oauthState = createOAuthState();
@@ -117,7 +117,7 @@ async function loginGoogle() {
     }, port, oauthState);
 }
 async function loginDropbox() {
-    const cred = credentials.dropbox;
+    const cred = getConfig('dropbox');
     const REDIRECT_URI = cred.redirect_uri;
     const port = parseInt(new URL(REDIRECT_URI).port) || 80;
     const DROPBOX_AUTH_URL = 'https://www.dropbox.com/oauth2/authorize';
@@ -133,13 +133,12 @@ async function loginDropbox() {
     }, port, oauthState);
 }
 async function loginOneDrive() {
-    const cred = credentials.onedrive;
+    const cred = getConfig('onedrive');
     const REDIRECT_URI = cred.redirect_uri;
     const port = parseInt(new URL(REDIRECT_URI).port) || 80;
     const usePKCE = !cred.client_secret;
     let verifier, challenge;
     if (usePKCE) {
-        const crypto = require('crypto');
         verifier = crypto.randomBytes(32).toString('base64url');
         challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
     }
@@ -177,7 +176,7 @@ async function loginPlayer() {
     }
     const { encryptToken } = require('./Auth');
     const tokenPath = getTokenPath(providerName);
-    encryptToken(tokenPath, tokens);
+    await encryptToken(tokenPath, tokens);
     if (fs.existsSync(settingsPath)) {
         try {
             const sets = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));

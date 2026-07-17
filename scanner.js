@@ -36,14 +36,18 @@ async function withConcurrency(limit, tasks) {
 }
 function hashFile(filePath) {
     return new Promise((resolve, reject) => {
-        const hash   = crypto.createHash('sha1');
+        const hash   = crypto.createHash('sha256');
         const stream = fs.createReadStream(filePath);
         stream.on('data',  chunk => hash.update(chunk));
         stream.on('end',   ()    => resolve(hash.digest('hex')));
         stream.on('error', (err) => { stream.destroy(); reject(err); });
     });
 }
-async function generateManifest(targetPath, basePath = targetPath, oldManifest = {}) {
+async function generateManifest(targetPath, basePath = targetPath, oldManifest = {}, depth = 0) {
+    if (depth > 40) {
+        process.stderr.write(`[scanner] Profondeur maximale atteinte ignorée : ${targetPath}\n`);
+        return {};
+    }
     const manifest = {};
     let items;
     try {
@@ -53,13 +57,13 @@ async function generateManifest(targetPath, basePath = targetPath, oldManifest =
         throw err;
     }
     const tasks = items
-        .filter(item => !IGNORED.has(item.name) && !item.name.startsWith('.'))
+        .filter(item => !IGNORED.has(item.name))
         .map(item => async () => {
             const fullPath     = path.join(targetPath, item.name);
             const relativePath = path.relative(basePath, fullPath).replace(/\\/g, '/');
             if (item.isDirectory()) {
                 try {
-                    const subManifest = await generateManifest(fullPath, basePath, oldManifest);
+                    const subManifest = await generateManifest(fullPath, basePath, oldManifest, depth + 1);
                     Object.assign(manifest, subManifest);
                 } catch (err) {
                     if (err.code !== 'ENOENT') {
@@ -67,20 +71,20 @@ async function generateManifest(targetPath, basePath = targetPath, oldManifest =
                     }
                 }
             } else {
-    const stats = await fsP.stat(fullPath);
-    const cached = oldManifest[relativePath];
-    if (cached && cached.mtime === stats.mtimeMs && cached.size === stats.size) {
-        manifest[relativePath] = cached; 
-    } else {
-        const hash = await hashFile(fullPath);
-        manifest[relativePath] = {
-            hash: hash,
-            mtime: stats.mtimeMs,
-            size: stats.size
-        };
-    }
-}
-});
+                const stats = await fsP.stat(fullPath);
+                const cached = oldManifest[relativePath];
+                if (cached && cached.mtime === stats.mtimeMs && cached.size === stats.size) {
+                    manifest[relativePath] = cached; 
+                } else {
+                    const hash = await hashFile(fullPath);
+                    manifest[relativePath] = {
+                        hash: hash,
+                        mtime: stats.mtimeMs,
+                        size: stats.size
+                    };
+                }
+            }
+        });
     await withConcurrency(16, tasks);
     return manifest;
 }
