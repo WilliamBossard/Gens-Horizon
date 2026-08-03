@@ -182,6 +182,11 @@ class GoogleProvider {
         if (!resInit.ok) throw new Error(`Erreur initiation upload: ${await resInit.text()}`);
         const uploadUrl = resInit.headers.get('location');
         if (!uploadUrl) throw new Error("Aucune URL d'upload retournée");
+        // SÉCURITÉ : valider que l'URL d'upload résumable appartient bien à googleapis.com
+        const _parsedUploadUrl = (() => { try { return new URL(uploadUrl); } catch (_) { return null; } })();
+        if (!_parsedUploadUrl || !(_parsedUploadUrl.hostname === 'www.googleapis.com' || _parsedUploadUrl.hostname.endsWith('.googleapis.com'))) {
+            throw new Error(`SÉCURITÉ : URL d'upload résumable suspecte rejetée (hostname=${_parsedUploadUrl?.hostname || 'invalide'})`);
+        }
         return new Promise((resolve, reject) => {
             const https = require('https');
             const { URL } = require('url');

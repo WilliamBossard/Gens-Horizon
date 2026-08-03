@@ -41,9 +41,10 @@ function acquireLock(attempt = 0) {
             try {
                 fs.unlinkSync(LOCK_FILE);
             } catch (_) {
-                const start = Date.now();
-                while (Date.now() - start < 100) { }
-                return acquireLock(attempt + 1);
+                // Si le système refuse la suppression (permissions OS), on abandonne proprement
+                // plutôt que de bloquer l'event loop avec un busy-wait synchrone.
+                process.stderr.write('[lock] Impossible de supprimer le verrou périmé (erreur OS).\n');
+                return false;
             }
         } else {
             return false;

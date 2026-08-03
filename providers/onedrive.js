@@ -95,7 +95,12 @@ class OneDriveProvider {
         let offset = 0, lastPct = -1, result = null;
         const sessionRes = await this._call('POST', `${APP_ROOT}:/${encodeURIComponent(name)}:/createUploadSession`, { item: { '@microsoft.graph.conflictBehavior': 'replace' } });
         if (sessionRes.statusCode >= 400 || !sessionRes.body.uploadUrl) throw new Error('OneDrive upload session failed');
+        // SÉCURITÉ : valider que l'URL de session appartient bien à Microsoft
+        const _MSFT_HOSTS = ['sharepoint.com', 'microsoft.com', 'microsoftonline.com', 'windows.net', 'live.com'];
         const uploadUrl = new URL(sessionRes.body.uploadUrl);
+        if (!_MSFT_HOSTS.some(h => uploadUrl.hostname === h || uploadUrl.hostname.endsWith('.' + h))) {
+            throw new Error(`SÉCURITÉ : URL upload session OneDrive suspecte rejetée (hostname=${uploadUrl.hostname})`);
+        }
         const fd = fs.openSync(srcPath, 'r');
         try {
             while (offset < total) {
@@ -221,6 +226,11 @@ class OneDriveProvider {
             else throw e;
         }
         const loc = new URL(redirectUrl);
+        // SÉCURITÉ : valider que le redirect de téléchargement appartient à un CDN Microsoft connu
+        const _DL_MSFT_HOSTS = ['sharepoint.com', 'microsoft.com', 'windows.net', '1drv.ms', 'live.com'];
+        if (!_DL_MSFT_HOSTS.some(h => loc.hostname === h || loc.hostname.endsWith('.' + h))) {
+            throw new Error(`SÉCURITÉ : URL de téléchargement OneDrive suspecte rejetée (hostname=${loc.hostname})`);
+        }
         await new Promise((resolve, reject) => {
             const dest = fs.createWriteStream(destPath);
             let downloaded = 0, lastPct = -1;

@@ -19,8 +19,13 @@ let machineID;
 if (fs.existsSync(MACHINE_ID_FILE)) {
     machineID = fs.readFileSync(MACHINE_ID_FILE, 'utf8').trim();
 } else {
-    machineID = os.hostname() + '_GensUser';
-    try { fs.writeFileSync(MACHINE_ID_FILE, machineID, { mode: 0o600 }); } catch (_) {}
+    // SÉCURITÉ : ID machine aléatoire fort (256 bits d'entropie) plutôt que le
+    // hostname devinable. Les installations existantes gardent leur .machine_id.
+    machineID = crypto.randomBytes(32).toString('hex');
+    try { fs.writeFileSync(MACHINE_ID_FILE, machineID, { mode: 0o600 }); } catch (_) {
+        // Fallback : hostname si écriture impossible (ex: dossier en lecture seule)
+        machineID = os.hostname() + '_GensUser';
+    }
 }
 
 const SALT_FILE = path.join(BASE_DIR, 'salt.key');

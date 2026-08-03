@@ -33,45 +33,54 @@ function verifyZipIntegrity(zipPath) {
 }
 
 
+
+/**
+ * Fallback d'extraction via streaming (pour les ZIPs dont la table centrale
+ * est illisible ou corrompue). Utilisé uniquement si unzipper.Open.file() échoue.
+ * Protection Path Traversal intégrée.
+ */
+async function _extractViaStream(zipPath, targetPath) {
+    return new Promise((resolve, reject) => {
+        const resolvedTarget = path.resolve(targetPath);
+        let activeWrites = 0;
+        let zipFinished = false;
+        const checkFinish = () => { if (zipFinished && activeWrites === 0) resolve(); };
+        const finishFn = () => { zipFinished = true; checkFinish(); };
+        fs.createReadStream(zipPath)
+            .pipe(unzipper.Parse())
+            .on('entry', function (entry) {
+                const dest = path.join(targetPath, entry.path);
+                const resDest = path.resolve(dest);
+                if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
+                    entry.autodrain();
+                    return;
+                }
+                if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
+                    fs.mkdirSync(dest, { recursive: true });
+                    entry.autodrain();
+                } else {
+                    fs.mkdirSync(path.dirname(dest), { recursive: true });
+                    const ws = fs.createWriteStream(dest);
+                    activeWrites++;
+                    ws.on('finish', () => { activeWrites--; checkFinish(); });
+                    ws.on('error', (err) => { activeWrites--; reject(err); });
+                    entry.pipe(ws);
+                }
+            })
+            .on('close', finishFn)
+            .on('end', finishFn)
+            .on('finish', finishFn)
+            .on('error', reject);
+    });
+}
+
 async function extractZip(zipPath, targetPath, onProgress) {
     let directory;
     try {
         directory = await unzipper.Open.file(zipPath);
-    } catch (err) {
-        return new Promise((resolve, reject) => {
-            const resolvedTarget = path.resolve(targetPath);
-            let count = 0;
-            let activeWrites = 0;
-            let zipFinished = false;
-            const checkFinish = () => { if (zipFinished && activeWrites === 0) resolve(); };
-                const finishFn = () => { zipFinished = true; checkFinish(); };
-                fs.createReadStream(zipPath)
-                    .pipe(unzipper.Parse())
-                    .on('entry', function (entry) {
-                        const dest = path.join(targetPath, entry.path);
-                        const resDest = path.resolve(dest);
-                        if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                            entry.autodrain();
-                            return;
-                        }
-                        if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
-                            fs.mkdirSync(dest, { recursive: true });
-                            entry.autodrain();
-                        } else {
-                            fs.mkdirSync(path.dirname(dest), { recursive: true });
-                            const ws = fs.createWriteStream(dest);
-                            activeWrites++;
-                            ws.on('finish', () => { activeWrites--; checkFinish(); });
-                            ws.on('error', (err) => { activeWrites--; reject(err); });
-                            entry.pipe(ws);
-                        }
-                        count++;
-                    })
-                    .on('close', finishFn)
-                    .on('end', finishFn)
-                    .on('finish', finishFn)
-                    .on('error', (err) => { reject(err); });
-        });
+    } catch (_) {
+        // Fallback : mode streaming si la table centrale du ZIP est illisible
+        return _extractViaStream(zipPath, targetPath);
     }
 
     const resolvedTarget = path.resolve(targetPath);
@@ -111,6 +120,7 @@ async function extractZip(zipPath, targetPath, onProgress) {
     await Promise.all(active);
     if (errs.length > 0) throw errs[0];
 }
+
 
 async function applyDelta(deltaZipPath, targetPath, onProgress) {
     let directory;
