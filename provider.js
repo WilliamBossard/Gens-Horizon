@@ -12,26 +12,26 @@ const path = require('path');
 const { getSecureToken }  = require('./Auth');
 const { getConfig }       = require('./config');
 const { getHorizonDataDir, getProviderName } = require('./paths');
-function getTokenPath(providerName) {
+async function getTokenPath(providerName) {
     const base = getHorizonDataDir();
     const specific = path.join(base, `token_${providerName}.json`);
-    if (fs.existsSync(specific)) return specific;
+    if (await fs.promises.access(specific).then(()=>true).catch(()=>false)) return specific;
     if (providerName === 'google') {
         const legacy = path.join(base, 'token.json');
-        if (fs.existsSync(legacy)) return legacy;
+        if (await fs.promises.access(legacy).then(()=>true).catch(()=>false)) return legacy;
     }
     return specific;
 }
 async function getProvider(settings) {
     const name      = getProviderName(settings);
-    const tokenPath = getTokenPath(name);
-    if (!fs.existsSync(tokenPath)) return null;
+    const tokenPath = await getTokenPath(name);
+    if (!(await fs.promises.access(tokenPath).then(()=>true).catch(()=>false))) return null;
     let tokenData;
     try {
         tokenData = await getSecureToken(tokenPath);
     } catch (e) {
         process.stderr.write(`[provider] Token illisible pour "${name}" : ${e.message}\n`);
-        try { fs.unlinkSync(tokenPath); } catch (_) {}
+        try { await fs.promises.unlink(tokenPath); } catch (_) {}
         return null;
     }
     if (!tokenData) return null;

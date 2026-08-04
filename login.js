@@ -4,7 +4,7 @@ const http = require('http');
 const https = require('https');
 const url = require('url');
 const path = require('path');
-const { execFile, execSync } = require('child_process');
+const { execFile } = require('child_process');
 const crypto = require('crypto');
 const { getConfig } = require('./config');
 const { getTokenPath } = require('./provider');
@@ -25,13 +25,13 @@ function openBrowser(targetUrl) {
     } else if (process.platform === 'darwin') {
         execFile('open', [targetUrl], () => { });
     } else {
-        try {
-            execSync('which xdg-open', { stdio: 'ignore' });
+        execFile('which', ['xdg-open'], (err) => {
+            if (err) {
+                console.log(JSON.stringify({ type: 'INFO', message: 'Environnement headless détecté. Ouvre l\'URL manuellement dans un navigateur.' }));
+                return;
+            }
             execFile('xdg-open', [targetUrl], () => { });
-        } catch (_) {
-            console.log(JSON.stringify({ type: 'INFO', message: 'Environnement headless détecté. Ouvre l\'URL manuellement dans un navigateur.' }));
-            return;
-        }
+        });
     }
 }
 function httpsPost(hostname, reqPath, body) {
@@ -164,8 +164,8 @@ async function loginOneDrive() {
 }
 async function loginPlayer() {
     const settingsPath = path.join(getHorizonDataDir(), 'horizon_settings.json');
-    const settings = (() => {
-        try { return fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, 'utf8')) : {}; } catch { return {}; }
+    const settings = await (async () => {
+        try { return await fs.promises.access(settingsPath).then(()=>true).catch(()=>false) ? JSON.parse(await fs.promises.readFile(settingsPath, 'utf8')) : {}; } catch { return {}; }
     })();
     const providerName = getProviderName(settings);
     console.log(JSON.stringify({ type: 'INFO', message: `Connexion via ${providerName}...` }));
@@ -177,14 +177,14 @@ async function loginPlayer() {
         default: throw new Error(`Fournisseur inconnu : ${providerName}`);
     }
     const { encryptToken } = require('./Auth');
-    const tokenPath = getTokenPath(providerName);
+    const tokenPath = await getTokenPath(providerName);
     await encryptToken(tokenPath, tokens);
-    if (fs.existsSync(settingsPath)) {
+    if (await fs.promises.access(settingsPath).then(()=>true).catch(()=>false)) {
         try {
-            const sets = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-            if (!sets.provider || sets.provider !== providerName) {
+            const sets = JSON.parse(await fs.promises.readFile(settingsPath, 'utf8'));
+            if (sets.provider !== providerName) {
                 sets.provider = providerName;
-                fs.writeFileSync(settingsPath, JSON.stringify(sets, null, 2));
+                await fs.promises.writeFile(settingsPath, JSON.stringify(sets, null, 2));
             }
         } catch (_) { }
     }

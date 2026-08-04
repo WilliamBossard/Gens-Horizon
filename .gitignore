@@ -7,4 +7,5 @@ token*.json
 node_modules/
 dist/
 salt.key
-salt.key
+.machine_id
+horizon.lock

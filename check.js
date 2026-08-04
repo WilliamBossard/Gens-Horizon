@@ -21,7 +21,7 @@ async function check() {
             return;
         }
 
-        const settings = readJsonSafe(SETTINGS_PATH);
+        const settings = await readJsonSafe(SETTINGS_PATH);
         const provider = await getProvider(settings);
 
         if (!provider) {
@@ -29,7 +29,7 @@ async function check() {
             return;
         }
 
-        const syncInfo = readJsonSafe(SYNC_INFO_FILE);
+        const syncInfo = await readJsonSafe(SYNC_INFO_FILE);
         const cloudIndex = await getCloudIndexAndCleanDuplicates(provider, { maxRetries: 3, baseDelay: 1500 }, "[check]");
 
         const cloudInstances = Object.keys(cloudIndex)
@@ -58,7 +58,7 @@ async function check() {
             const lastSyncTime = isNaN(rawSyncTime) ? 0 : rawSyncTime;
 
             const localPath  = path.join(getInstancesFolder(), safeKey);
-            const localExists = fs.existsSync(localPath);
+            const localExists = await fs.promises.access(localPath).then(()=>true).catch(()=>false);
 
             if (localExists && effectiveCloudTime > lastSyncTime) {
                 report.status = 'UPDATE_AVAILABLE';

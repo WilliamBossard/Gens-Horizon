@@ -9,11 +9,11 @@ const STALE_LOCK_MS = 2 * 60 * 60 * 1000;
 
 let heartbeatInterval = null;
 
-function isLockStale() {
+async function isLockStale() {
     try {
-        const content = fs.readFileSync(LOCK_FILE, 'utf8').trim();
+        const content = (await fs.promises.readFile(LOCK_FILE, 'utf8')).trim();
         const pid = parseInt(content, 10);
-        const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+        const age = Date.now() - (await fs.promises.stat(LOCK_FILE)).mtimeMs;
         if (!isNaN(pid)) {
             try { 
                 process.kill(pid, 0); 
@@ -29,17 +29,17 @@ function isLockStale() {
     }
 }
 
-function acquireLock(attempt = 0) {
+async function acquireLock(attempt = 0) {
     if (attempt >= MAX_LOCK_RETRIES) {
         process.stderr.write("[lock] Impossible d'acquérir le verrou après " + MAX_LOCK_RETRIES + " tentatives.\n");
         return false;
     }
 
-    if (fs.existsSync(LOCK_FILE)) {
-        if (isLockStale()) {
+    if (await fs.promises.access(LOCK_FILE).then(()=>true).catch(()=>false)) {
+        if (await isLockStale()) {
             process.stderr.write('[lock] Verrou périmé détecté — nettoyage.\n');
             try {
-                fs.unlinkSync(LOCK_FILE);
+                await fs.promises.unlink(LOCK_FILE);
             } catch (_) {
                 // Si le système refuse la suppression (permissions OS), on abandonne proprement
                 // plutôt que de bloquer l'event loop avec un busy-wait synchrone.
@@ -51,23 +51,22 @@ function acquireLock(attempt = 0) {
         }
     }
 
-    let fd;
     try {
-        fd = fs.openSync(
+        const fh = await fs.promises.open(
             LOCK_FILE,
             fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY
         );
-        fs.writeSync(fd, String(process.pid));
-        fs.closeSync(fd);
+        await fh.writeFile(String(process.pid));
+        await fh.close();
     } catch (err) {
         if (err.code !== 'EEXIST') throw err;
-        return acquireLock(attempt + 1);
+        return await acquireLock(attempt + 1);
     }
 
     heartbeatInterval = setInterval(() => {
         try {
             const now = new Date();
-            fs.utimesSync(LOCK_FILE, now, now);
+            fs.promises.utimes(LOCK_FILE, now, now).catch(() => {});
         } catch (_) { }
     }, 5000);
 

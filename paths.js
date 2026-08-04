@@ -34,26 +34,25 @@ function getInstancesFolder() {
     return path.join(appData, 'GensLauncher', 'instances');
 }
 /**
- * DÉCISION : la clé instance côté Horizon = nom du dossier sous instances/
- * (safeDir). instance.json peut contenir un nom affiché différent (espaces, etc.).
+ * scanInstances() retourne toujours le nom de DOSSIER (clé disque / Horizon), pas data.name.
  */
-function scanInstances() {
+async function scanInstances() {
     const instancesDir = getInstancesFolder();
-    if (!fs.existsSync(instancesDir)) {
-        fs.mkdirSync(instancesDir, { recursive: true });
+    try {
+        await fs.promises.mkdir(instancesDir, { recursive: true });
+    } catch (_) {}
+    let items;
+    try {
+        items = await fs.promises.readdir(instancesDir, { withFileTypes: true });
+    } catch (_) {
         return [];
     }
-    const items = fs.readdirSync(instancesDir);
     const instances = [];
     for (const item of items) {
+        if (!item.isDirectory()) continue;
         try {
-            const fullPath = path.join(instancesDir, item);
-            if (fs.statSync(fullPath).isDirectory()) {
-                const jsonPath = path.join(fullPath, 'instance.json');
-                if (fs.existsSync(jsonPath)) {
-                    instances.push(item);
-                }
-            }
+            await fs.promises.access(path.join(instancesDir, item.name, 'instance.json'));
+            instances.push(item.name);
         } catch (_) {}
     }
     return instances;

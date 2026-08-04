@@ -10,8 +10,8 @@ async function checkConnectivity() {
         return false;
     }
 }
-function readJsonSafe(filePath, fallback = {}) {
-    try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+async function readJsonSafe(filePath, fallback = {}) {
+    try { return JSON.parse(await fs.promises.readFile(filePath, 'utf8')); }
     catch (_) { return fallback; }
 }
 const _tempFiles = new Set();
@@ -29,14 +29,7 @@ function _runShutdownHooks() {
     for (const fn of _shutdownHooks) { try { fn(); } catch (_) { } }
 }
 function writeJsonAtomic(filePath, data) {
-    const tmp = filePath + '.tmp';
-    registerTemp(tmp);
-    const fd = fs.openSync(tmp, 'w');
-    fs.writeSync(fd, JSON.stringify(data, null, 2));
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fs.renameSync(tmp, filePath);
-    unregisterTemp(tmp);
+    return writeJsonAtomicAsync(filePath, data);
 }
 async function writeJsonAtomicAsync(filePath, data) {
     const tmp = filePath + '.tmp';
@@ -57,15 +50,15 @@ function getCanonicalName(name) {
     return name.replace(/[<>:"/\\|?*\r\n\0'"`;$]/g, "").trim().substring(0, 100);
 }
 
-function getCloudSettings(settingsPath) {
+async function getCloudSettings(settingsPath) {
     let sets = { syncMode: 'SMART', maxRetries: 3, baseDelay: 2000 };
-    if (fs.existsSync(settingsPath)) {
+    if (await fs.promises.access(settingsPath).then(()=>true).catch(()=>false)) {
         try {
-            const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+            const parsed = JSON.parse(await fs.promises.readFile(settingsPath, 'utf8'));
             sets = { ...sets, ...parsed };
         } catch (_) { }
     }
-    const retryOpts = { maxRetries: sets.maxRetries || 3, baseDelay: sets.baseDelay || 2000 };
+    const retryOpts = { maxRetries: sets.maxRetries || 3, baseDelay: sets.retryBaseDelay || sets.baseDelay || 1500 };
     return { sets, retryOpts };
 }
 let _handlersSetup = false;

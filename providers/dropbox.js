@@ -43,9 +43,9 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
             if (res.statusCode < 200 || res.statusCode >= 300) {
                 const errChunks = [];
                 res.on('data', c => errChunks.push(c));
-                res.on('end', () => {
+                res.on('end', async () => {
                     dest.destroy();
-                    try { fs.unlinkSync(destPath); } catch (_) {}
+                    try { await fs.promises.unlink(destPath); } catch (_) {}
                     reject(Object.assign(
                         new Error(`Dropbox download HTTP ${res.statusCode}: ${Buffer.concat(errChunks).toString('utf8').slice(0, 300)}`),
                         { statusCode: res.statusCode }
@@ -53,10 +53,10 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
                 });
                 return;
             }
-            const onError = (e) => {
+            const onError = async (e) => {
                 res.destroy();
                 dest.destroy();
-                try { fs.unlinkSync(destPath); } catch (_) {}
+                try { await fs.promises.unlink(destPath); } catch (_) {}
                 reject(e);
             };
             res.on('data', chunk => {
@@ -136,10 +136,10 @@ class DropboxProvider {
     }
     async _uploadSession(name, srcPath, onProgress) {
         const CHUNK = 8 * 1024 * 1024;
-        const total = fs.statSync(srcPath).size;
+        const total = (await fs.promises.stat(srcPath)).size;
         if (total === 0) throw new Error(`Dropbox _uploadSession : fichier vide non supporté (${name}).`);
         let offset = 0, lastPct = -1;
-        const fd = fs.openSync(srcPath, 'r');
+        const fh = await fs.promises.open(srcPath, 'r');
         const _report = (off) => {
             if (!onProgress || total === 0) return;
             const pct = Math.min(99, Math.round(off / total * 100));
@@ -148,7 +148,7 @@ class DropboxProvider {
         try {
             let bytesToRead = Math.min(CHUNK, total);
             let buffer = Buffer.alloc(bytesToRead);
-            fs.readSync(fd, buffer, 0, bytesToRead, offset);
+            await fh.read(buffer, 0, bytesToRead, offset);
             const startRes = await httpsRequest({
                 hostname: 'content.dropboxapi.com', path: '/2/files/upload_session/start', method: 'POST',
                 headers: { 'Authorization': this._authHeader(), 'Dropbox-API-Arg': JSON.stringify({ close: false }), 'Content-Type': 'application/octet-stream', 'Content-Length': bytesToRead },
@@ -159,7 +159,7 @@ class DropboxProvider {
             while (offset + CHUNK < total) {
                 bytesToRead = Math.min(CHUNK, total - offset);
                 buffer = Buffer.alloc(bytesToRead);
-                fs.readSync(fd, buffer, 0, bytesToRead, offset);
+                await fh.read(buffer, 0, bytesToRead, offset);
                 await httpsRequest({
                     hostname: 'content.dropboxapi.com', path: '/2/files/upload_session/append_v2', method: 'POST',
                     headers: { 'Authorization': this._authHeader(), 'Dropbox-API-Arg': JSON.stringify({ cursor: { session_id: sessionId, offset }, close: false }), 'Content-Type': 'application/octet-stream', 'Content-Length': bytesToRead },
@@ -169,7 +169,7 @@ class DropboxProvider {
             }
             const lastBytes = total - offset;
             buffer = Buffer.alloc(lastBytes);
-            if (lastBytes > 0) fs.readSync(fd, buffer, 0, lastBytes, offset);
+            if (lastBytes > 0) await fh.read(buffer, 0, lastBytes, offset);
             const finishRes = await httpsRequest({
                 hostname: 'content.dropboxapi.com', path: '/2/files/upload_session/finish', method: 'POST',
                 headers: {
@@ -181,7 +181,7 @@ class DropboxProvider {
             onProgress && onProgress(100);
             return { id: finishRes.body.id, modifiedTime: finishRes.body.server_modified };
         } finally {
-            fs.closeSync(fd);
+            await fh.close();
         }
     }
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {

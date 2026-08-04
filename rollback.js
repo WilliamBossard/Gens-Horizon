@@ -6,17 +6,17 @@ const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getCanonicalName, setupProcessHandlers, writeJsonAtomic } = require('./utils');
 const { acquireLock, releaseLock } = require('./lock');
 setupProcessHandlers();
-function rollback() {
+async function rollback() {
     const args           = process.argv.slice(2);
     const COMMANDS       = new Set(['rollback']);
     const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
     if (!targetInstance) {
         const instDir = getInstancesFolder();
-        if (!fs.existsSync(instDir)) {
+        if (!(await fs.promises.access(instDir).then(()=>true).catch(()=>false))) {
             console.log(JSON.stringify({ type: 'INFO', message: "Aucun dossier d'instances trouvé." }));
             return;
         }
-        const rollbacks = fs.readdirSync(instDir)
+        const rollbacks = (await fs.promises.readdir(instDir))
             .filter(n => n.includes('_rollback_'))
             .map(n => {
                 const tsStr = n.split('_rollback_').pop();
@@ -35,8 +35,8 @@ function rollback() {
     const targetPath = path.join(instDir, safeInst);
     let rollbackFolder = null;
     let rollbackTime   = 0;
-    if (fs.existsSync(instDir)) {
-        for (const entry of fs.readdirSync(instDir)) {
+    if (await fs.promises.access(instDir).then(()=>true).catch(()=>false)) {
+        for (const entry of await fs.promises.readdir(instDir)) {
             if (entry.startsWith(`${safeInst}_rollback_`)) {
                 const ts = parseInt(entry.split('_rollback_').pop(), 10);
                 if (!isNaN(ts) && ts > rollbackTime) {
@@ -50,23 +50,23 @@ function rollback() {
         console.log(JSON.stringify({ type: 'ERROR', instance: targetInstance, message: 'Aucune sauvegarde rollback disponible pour cette instance.' }));
         return;
     }
-    if (!acquireLock()) {
+    if (!(await acquireLock())) {
         console.log(JSON.stringify({ type: 'ERROR', instance: targetInstance, message: 'ERR_ALREADY_RUNNING' }));
         return;
     }
     try {
-        if (fs.existsSync(targetPath)) {
-            fs.rmSync(targetPath, { recursive: true, force: true });
+        if (await fs.promises.access(targetPath).then(()=>true).catch(()=>false)) {
+            await fs.promises.rm(targetPath, { recursive: true, force: true });
         }
-        fs.renameSync(rollbackFolder, targetPath);
+        await fs.promises.rename(rollbackFolder, targetPath);
 
         const syncInfoPath = path.join(getHorizonDataDir(), 'last_sync.json');
         let syncState = {};
-        if (fs.existsSync(syncInfoPath)) {
-            try { syncState = JSON.parse(fs.readFileSync(syncInfoPath, 'utf8')); } catch(e){}
+        if (await fs.promises.access(syncInfoPath).then(()=>true).catch(()=>false)) {
+            try { syncState = JSON.parse(await fs.promises.readFile(syncInfoPath, 'utf8')); } catch(e){}
         }
         syncState[safeInst] = new Date(rollbackTime).toISOString();
-        writeJsonAtomic(syncInfoPath, syncState);
+        await writeJsonAtomic(syncInfoPath, syncState);
 
         console.log(JSON.stringify({
             type    : 'SUCCESS',

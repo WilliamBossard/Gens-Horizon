@@ -88,26 +88,26 @@ class OneDriveProvider {
     }
     async _uploadSession(name, srcPath, onProgress) {
         const CHUNK = 10 * 1024 * 1024;
-        const total = fs.statSync(srcPath).size;
+        const total = (await fs.promises.stat(srcPath)).size;
         if (total === 0) {
             return this.uploadZip(name, srcPath, null, onProgress);
         }
         let offset = 0, lastPct = -1, result = null;
         const sessionRes = await this._call('POST', `${APP_ROOT}:/${encodeURIComponent(name)}:/createUploadSession`, { item: { '@microsoft.graph.conflictBehavior': 'replace' } });
         if (sessionRes.statusCode >= 400 || !sessionRes.body.uploadUrl) throw new Error('OneDrive upload session failed');
-        // SÉCURITÉ : valider que l'URL de session appartient bien à Microsoft
         const _MSFT_HOSTS = ['sharepoint.com', 'microsoft.com', 'microsoftonline.com', 'windows.net', 'live.com'];
         const uploadUrl = new URL(sessionRes.body.uploadUrl);
         if (!_MSFT_HOSTS.some(h => uploadUrl.hostname === h || uploadUrl.hostname.endsWith('.' + h))) {
             throw new Error(`SÉCURITÉ : URL upload session OneDrive suspecte rejetée (hostname=${uploadUrl.hostname})`);
         }
-        const fd = fs.openSync(srcPath, 'r');
+        const fd = await fs.promises.open(srcPath, 'r');
+        
         try {
             while (offset < total) {
-                const end = Math.min(offset + CHUNK, total);
+                const end = Math.min(offset + CHUNK_SIZE, total);
                 const bytesToRead = end - offset;
                 const buffer = Buffer.alloc(bytesToRead);
-                fs.readSync(fd, buffer, 0, bytesToRead, offset);
+                await fd.read(buffer, 0, bytesToRead, offset);
                 const isLast = end === total;
                 const res = await new Promise((resolve, reject) => {
                     const req = https.request({
@@ -155,15 +155,15 @@ class OneDriveProvider {
             } catch (_) { }
             throw error;
         } finally {
-            fs.closeSync(fd);
+            await fd.close();
         }
         return result;
     }
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {
-        const stats = fs.statSync(srcPath);
-        const SIMPLE_LIMIT = 4 * 1024 * 1024;
-        if (stats.size > SIMPLE_LIMIT) return this._uploadSession(name, srcPath, onProgress);
-        const content = fs.readFileSync(srcPath);
+        const stats = await fs.promises.stat(srcPath);
+        const CHUNK_SIZE = 4 * 1024 * 1024;
+        if (stats.size > CHUNK_SIZE) return this._uploadSession(name, srcPath, onProgress);
+        const content = await fs.promises.readFile(srcPath);
         const _doUpload = async () => new Promise((resolve, reject) => {
             const req = https.request({
                 hostname: GRAPH_HOST, path: `${APP_ROOT}:/${encodeURIComponent(name)}:/content`, method: 'PUT',
@@ -234,20 +234,20 @@ class OneDriveProvider {
         await new Promise((resolve, reject) => {
             const dest = fs.createWriteStream(destPath);
             let downloaded = 0, lastPct = -1;
-            const req = https.request({ hostname: loc.hostname, path: loc.pathname + loc.search, method: 'GET' }, (res) => {
+            const req = https.request({ hostname: loc.hostname, path: loc.pathname + loc.search, method: 'GET' }, async (res) => {
                 if (res.statusCode < 200 || res.statusCode >= 300) {
                     res.resume();
                     dest.destroy();
-                    try { fs.unlinkSync(destPath); } catch (_) { }
+                    try { await fs.promises.unlink(destPath); } catch (_) { }
                     return reject(Object.assign(
                         new Error(`OneDrive download HTTP ${res.statusCode}`),
                         { statusCode: res.statusCode }
                     ));
                 }
-                const onError = (e) => {
+                const onError = async (e) => {
                     res.destroy();
                     dest.destroy();
-                    try { fs.unlinkSync(destPath); } catch (_) { }
+                    try { await fs.promises.unlink(destPath); } catch (_) { }
                     reject(e);
                 };
                 res.on('data', chunk => {
@@ -275,9 +275,9 @@ class OneDriveProvider {
         registerTemp(tmp);
         try {
             await this.downloadFile(fileId, tmp, null, 0);
-            return JSON.parse(fs.readFileSync(tmp, 'utf8'));
+            return JSON.parse(await fs.promises.readFile(tmp, 'utf8'));
         } finally {
-            try { fs.unlinkSync(tmp); } catch (_) { }
+            try { await fs.promises.unlink(tmp); } catch (_) { }
             unregisterTemp(tmp);
         }
     }

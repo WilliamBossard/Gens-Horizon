@@ -133,14 +133,14 @@ class GoogleProvider {
                 }
             });
 
-            pipeline(nodeStream, dest, (err) => {
+            pipeline(nodeStream, dest, async (err) => {
                 clearTimeout(timeoutId);
                 if (err) {
-                    try { fs.unlinkSync(destPath); } catch (_) {}
+                    try { await fs.promises.unlink(destPath); } catch (_) {}
                     return reject(err);
                 }
                 if (totalSize > 0 && downloaded < totalSize) {
-                    try { fs.unlinkSync(destPath); } catch (_) {}
+                    try { await fs.promises.unlink(destPath); } catch (_) {}
                     return reject(new Error(`Téléchargement incomplet: ${downloaded} / ${totalSize} bytes reçus.`));
                 }
                 resolve();
@@ -148,7 +148,7 @@ class GoogleProvider {
         });
     }
     async uploadZip(name, srcPath, existingId = null, onProgress = null) {
-        const fileSize = fs.statSync(srcPath).size;
+        const fileSize = (await fs.promises.stat(srcPath)).size;
         const token = await this._getAccessToken();
         const metadata = { name, parents: existingId ? undefined : ['appDataFolder'] };
         const initMethod = existingId ? 'PATCH' : 'POST';

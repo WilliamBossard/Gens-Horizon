@@ -1,6 +1,6 @@
 'use strict';
 const fs       = require('fs');
-const { ZipArchive } = require('archiver');
+const archiver = require('archiver'); // AUDIT-21 : import standard d'archiver (ZipArchive n'est pas un export nommé public)
 const path     = require('path');
 const { getInstancesFolder, scanInstances, getHorizonDataDir } = require('./paths');
 const { generateManifest, compareManifests }   = require('./scanner');
@@ -45,7 +45,7 @@ async function createFullZip(folder, tempZip, inst) {
     let lastPct = -1;
     return new Promise((resolve, reject) => {
         const output  = fs.createWriteStream(tempZip);
-        const archive = new ZipArchive({ zlib: { level: 1 } });
+        const archive = archiver('zip', { zlib: { level: 1 } }); // AUDIT-21
         archive.on('progress', (p) => {
             if (realTotal === 0) return;
             const pct = Math.min(100, Math.round(p.fs.processedBytes / realTotal * 100));
@@ -54,18 +54,18 @@ async function createFullZip(folder, tempZip, inst) {
                 lastPct = pct;
             }
         });
-        archive.on('warning', (warn) => {
+        archive.on('warning', async (warn) => {
             if (warn.code === 'ENOENT') {
                 process.stderr.write(`[upload] Fichier absent ignoré lors de la compression : ${warn.message}\n`);
             } else {
                 output.destroy();
-                try { fs.unlinkSync(tempZip); } catch (_) {}
+                try { if (await fs.promises.access(tempZip).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempZip); } catch (_) {}
                 reject(warn);
             }
         });
-        archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+        archive.on('error', async err => { output.destroy(); try { if (await fs.promises.access(tempZip).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempZip); } catch (_) {} reject(err); });
         output.on('close', resolve);
-        output.on('error', err => { archive.abort(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+        output.on('error', async err => { archive.abort(); try { if (await fs.promises.access(tempZip).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempZip); } catch (_) {} reject(err); });
         archive.pipe(output);
         archive.directory(folder, false, (data) => {
             return data;
@@ -74,21 +74,21 @@ async function createFullZip(folder, tempZip, inst) {
     });
 }
 function createDeltaZip(folder, changed, deleted, tempZip, inst) {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
         const output = fs.createWriteStream(tempZip);
-        const archive = new ZipArchive({ zlib: { level: 1 } });
+        const archive = archiver('zip', { zlib: { level: 1 } }); // AUDIT-21
         output.on('close', resolve);
-        archive.on('warning', (warn) => {
+        archive.on('warning', async (warn) => {
             if (warn.code === 'ENOENT') {
                 process.stderr.write(`[upload] Fichier absent ignoré lors de la compression delta : ${warn.message}\n`);
             } else {
                 output.destroy();
-                try { fs.unlinkSync(tempZip); } catch (_) {}
+                try { if (await fs.promises.access(tempZip).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempZip); } catch (_) {}
                 reject(warn);
             }
         });
-        archive.on('error', err => { output.destroy(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
-        output.on('error', err => { archive.abort(); try { fs.unlinkSync(tempZip); } catch (_) {} reject(err); });
+        archive.on('error', async err => { output.destroy(); try { if (await fs.promises.access(tempZip).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempZip); } catch (_) {} reject(err); });
+        output.on('error', async err => { archive.abort(); try { if (await fs.promises.access(tempZip).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempZip); } catch (_) {} reject(err); });
         archive.pipe(output);
         const deltaInfo = { deletedFiles: deleted, createdAt: new Date().toISOString() };
         archive.append(JSON.stringify(deltaInfo, null, 2), { name: '__delta__.json' });
@@ -103,14 +103,14 @@ function createDeltaZip(folder, changed, deleted, tempZip, inst) {
         });
         for (const relPath of changed) {
             const absPath = path.join(folder, relPath.replace(/\//g, path.sep));
-            if (!fs.existsSync(absPath)) continue;
+            if (!(await fs.promises.access(absPath).then(()=>true).catch(()=>false))) continue; // skip silently — archiver gérerait ENOENT via 'warning'
             archive.file(absPath, { name: relPath });
         }
         archive.finalize();
     });
 }
 async function upload() {
-    if (!acquireLock()) {
+    if (!(await acquireLock())) {
         console.log(JSON.stringify({
             type     : 'ERROR',
             errorCode: 'ERR_ALREADY_RUNNING',
@@ -134,7 +134,7 @@ async function upload() {
         const force        = args.includes('--force');
         const COMMANDS     = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
         const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
-        const { sets: settings, retryOpts } = getCloudSettings(settingsPath);
+        const { sets: settings, retryOpts } = await getCloudSettings(settingsPath);
         const provider = await getProvider(settings);
         if (!provider) {
             console.log(JSON.stringify({
@@ -148,13 +148,13 @@ async function upload() {
         if (targetInstance) {
             console.log(JSON.stringify({ type: 'PROGRESS', step: 'CHECKING', value: 0, instance: targetInstance }));
             const targetFolder = path.join(getInstancesFolder(), getCanonicalName(targetInstance));
-            if (!fs.existsSync(targetFolder)) {
+            try { await fs.promises.access(targetFolder); } catch {
                 console.log(JSON.stringify({ type: 'ERROR', message: `Instance ${targetInstance} introuvable localement.` }));
                 return;
             }
             localInstances = [targetInstance];
         } else {
-            localInstances = scanInstances();
+            localInstances = await scanInstances();
         }
         const cloudIndex = await getCloudIndexAndCleanDuplicates(provider, retryOpts, "[upload]");
         for (const name of Object.keys(cloudIndex)) {
@@ -178,7 +178,7 @@ async function upload() {
                 }
             }
         }
-        let syncState = readJsonSafe(syncInfoPath);
+        let syncState = await readJsonSafe(syncInfoPath);
         for (const inst of localInstances) {
             try {
                 const folder = path.join(getInstancesFolder(), getCanonicalName(inst));
@@ -186,7 +186,7 @@ async function upload() {
                 const baseName     = `${PREFIX_BACKUP}${safeInst}.zip`;
                 const manifestName = `${PREFIX_MANIFEST}${safeInst}.json`;
                 const manifestPath = path.join(dataDir, `manifest_${safeInst}.json`);
-                const oldManifest     = readJsonSafe(manifestPath);
+                const oldManifest     = await readJsonSafe(manifestPath);
                 const currentManifest = await generateManifest(folder, folder, oldManifest);
                 const diff            = compareManifests(oldManifest, currentManifest);
                 const hasBaseOnCloud = !!cloudIndex[baseName];
@@ -194,28 +194,27 @@ async function upload() {
                 const metaName = `${PREFIX_META}${safeInst}.json`;
                 let metaData = { iconData: "", loader: "vanilla", realName: inst };
                 const instJsonPath = path.join(folder, 'instance.json');
-                if (fs.existsSync(instJsonPath)) {
-                    try {
-                        const instObj = JSON.parse(await fs.promises.readFile(instJsonPath, 'utf8'));
-                        metaData.loader = instObj.loader || "vanilla";
-                        if (instObj.name) metaData.realName = instObj.name; 
-                        if (instObj.icon && instObj.icon.startsWith('file://')) {
-                            try {
-                                const localIconPath = require('url').fileURLToPath(instObj.icon);
-                                const resolvedIcon = path.resolve(localIconPath);
-                                const resolvedFolder = path.resolve(folder);
-                                if (fs.existsSync(resolvedIcon) && resolvedIcon.startsWith(resolvedFolder + path.sep) && fs.statSync(resolvedIcon).size < 512 * 1024) {
-                                    const rawExt = path.extname(resolvedIcon).toLowerCase().replace('.', '');
-                                    const ext = (rawExt === 'jpg') ? 'jpeg' : (rawExt || 'png');
-                                    const b64 = await fs.promises.readFile(resolvedIcon, { encoding: 'base64' });
-                                    metaData.iconData = `data:image/${ext};base64,${b64}`;
-                                }
-                            } catch(_) { metaData.iconData = ""; }
-                        } else {
-                            metaData.iconData = instObj.icon || "";
-                        }
-                    } catch(_) {}
-                }
+                try {
+                    const instObj = JSON.parse(await fs.promises.readFile(instJsonPath, 'utf8'));
+                    metaData.loader = instObj.loader || 'vanilla';
+                    if (instObj.name) metaData.realName = instObj.name;
+                    if (instObj.icon && instObj.icon.startsWith('file://')) {
+                        try {
+                            const localIconPath = require('url').fileURLToPath(instObj.icon);
+                            const resolvedIcon = path.resolve(localIconPath);
+                            const resolvedFolder = path.resolve(folder);
+                            const iconStat = await fs.promises.stat(resolvedIcon).catch(() => null);
+                            if (iconStat && resolvedIcon.startsWith(resolvedFolder + path.sep) && iconStat.size < 512 * 1024) {
+                                const rawExt = path.extname(resolvedIcon).toLowerCase().replace('.', '');
+                                const ext = (rawExt === 'jpg') ? 'jpeg' : (rawExt || 'png');
+                                const b64 = await fs.promises.readFile(resolvedIcon, { encoding: 'base64' });
+                                metaData.iconData = `data:image/${ext};base64,${b64}`;
+                            }
+                        } catch(_) { metaData.iconData = ''; }
+                    } else {
+                        metaData.iconData = instObj.icon || '';
+                    }
+                } catch(_) { /* instance.json absent ou invalide — métadonnées par défaut */ }
                 if (!diff.hasChanges && !force && hasBaseOnCloud) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `Aucun changement pour ${inst}, upload ignoré.` }));
                     continue;
@@ -257,7 +256,7 @@ async function upload() {
                         await writeJsonAtomicAsync(manifestPath, currentManifest);
                         console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'FULL' }));
                     } finally {
-                        try { if (fs.existsSync(tempZip)) fs.unlinkSync(tempZip); } catch (_) {}
+                        try { if (await fs.promises.access(tempZip).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempZip); } catch (_) {}
                         unregisterTemp(tempZip);
                     }
                     continue;
@@ -299,7 +298,7 @@ async function upload() {
                         await writeJsonAtomicAsync(manifestPath, currentManifest);
                         console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'REPACK' }));
                     } finally {
-                        try { if (fs.existsSync(tempZipRepack)) fs.unlinkSync(tempZipRepack); } catch (_) {}
+                        try { if (await fs.promises.access(tempZipRepack).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempZipRepack); } catch (_) {}
                         unregisterTemp(tempZipRepack);
                     }
                     continue;
@@ -342,7 +341,7 @@ async function upload() {
                     const summary = `+${diff.added.length} ajouté(s), ~${diff.modified.length} modifié(s), -${diff.deleted.length} supprimé(s)`;
                     console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'SMART', summary }));
                 } finally {
-                    try { if (fs.existsSync(tempDelta)) fs.unlinkSync(tempDelta); } catch (_) {}
+                    try { if (await fs.promises.access(tempDelta).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempDelta); } catch (_) {}
                     unregisterTemp(tempDelta);
                 }
             } catch (instErr) {

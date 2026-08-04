@@ -87,8 +87,8 @@ async function _decrypt(text) {
     }
 }
 async function getSecureToken(filePath) {
-    if (!fs.existsSync(filePath)) return null;
-    const raw = fs.readFileSync(filePath, 'utf8').trim();
+    if (!(await fs.promises.access(filePath).then(()=>true).catch(()=>false))) return null;
+    const raw = (await fs.promises.readFile(filePath, 'utf8')).trim();
     if (raw.startsWith('{')) {
         const parsed = JSON.parse(raw);
         process.stderr.write(JSON.stringify({ type: 'INFO', message: 'Sécurisation du token en cours...' }) + '\n');
@@ -111,11 +111,11 @@ async function encryptToken(filePath, tokenData) {
     const tmp = filePath + '.tmp';
     registerTemp(tmp);
     const encrypted = await _encrypt(JSON.stringify(tokenData));
-    fs.writeFileSync(tmp, encrypted, {
+    await fs.promises.writeFile(tmp, encrypted, {
         encoding: 'utf8',
         mode: TOKEN_FILE_MODE
     });
-    fs.renameSync(tmp, filePath);
+    await fs.promises.rename(tmp, filePath);
     unregisterTemp(tmp);
 }
 module.exports = {

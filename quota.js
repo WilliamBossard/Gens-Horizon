@@ -16,7 +16,7 @@ async function quota() {
         }
         const dataDir      = getHorizonDataDir();
         const settingsPath = path.join(dataDir, 'horizon_settings.json');
-        const { sets: settings, retryOpts } = getCloudSettings(settingsPath);
+        const { sets: settings, retryOpts } = await getCloudSettings(settingsPath);
         const provider = await getProvider(settings);
         if (!provider) {
             console.log(JSON.stringify({

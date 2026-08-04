@@ -1,4 +1,4 @@
-﻿# Gens-Horizon — Guide de Développement Complet
+# Gens-Horizon — Guide de Développement Complet
 
 Ce document décrit en profondeur l'architecture, le modèle de synchronisation, les primitives cryptographiques et les protocoles de communication de **Gens-Horizon**, le moteur Cloud "headless" (sans interface graphique) de l'écosystème Gens.
 
@@ -17,6 +17,7 @@ Il gère le versionnement des fichiers via une approche de **"Delta Sync"** (syn
   - `sync.js` interroge le Cloud, télécharge les Deltas manquants, et les applique dans l'ordre chronologique localement.
 - **`scanner.js`** : Le scanner de fichiers local. Il utilise le hachage **SHA-256** couplé à des vérifications rapides (mtime/size) et un limiteur de concurrence (`withConcurrency`) pour générer instantanément un Manifeste d'instance sans saturer le disque (EMFILE).
 - **`rollback.js`** : Permet de restaurer une instance locale à l'état exact d'un Delta passé, reconstituant l'historique de manière déterministe.
+- **`cloud-operations.js`** : Encapsule les opérations de haut niveau sur le Cloud Index (liste des fichiers distants). Fournit notamment `getCloudIndexAndCleanDuplicates()` qui récupère l'index cloud et purge automatiquement les doublons de sauvegardes obsolètes pour éviter une consommation excessive du quota. Utilisé par `sync.js` et `upload.js`. <!-- AUDIT-24 -->
 - **`zip-utils.js`** : Utilitaires pour l'extraction sécurisée de fichiers ZIP.
   - Protection stricte contre les attaques par **Path Traversal** (`resDest.startsWith(resolvedTarget)`).
   - Vérification de la signature magique ZIP (`0x504B0304`) ET de la table centrale avant extraction.
@@ -61,10 +62,11 @@ L'application suit les recommandations NIST et applique la "Défense en Profonde
    Un système de verrous (lock file) empêche le lancement de multiples opérations de synchronisation simultanées (qui corrompraient l'instance).
    - Mécanisme : Le fichier `horizon.lock` contient le PID du processus maître. La création est atomique (`O_CREAT | O_EXCL`).
    - **Heartbeat** : Le timestamp du lock est mis à jour toutes les 5 secondes (`utimesSync`) pour distinguer les processus actifs des processus zombies.
+   - **Couplage avec le Launcher** : Le Launcher (`ipc-horizon.js`) lit le `mtimeMs` du lockfile via `fs.promises.stat()` pour vérifier l'activité d'un éventuel processus Horizon en cours. Ce couplage implicite signifie que l'intervalle heartbeat (5s) et le seuil de stale lock (2h) doivent rester cohérents entre les deux projets.
    - "Stale Lock" : Un lock est considéré comme périmé si le processus PID n'est plus en cours d'exécution (`ESRCH`) ou s'il date de plus de 2 heures (`STALE_LOCK_MS = 7200000`). Il est alors purgé automatiquement. Si la suppression échoue (erreur OS), Horizon abandonne proprement sans busy-wait.
 
 3. **Protection CI/CD (`config.js`)** :
-   Les identifiants OAuth (Client ID / Secret) ne sont pas hardcodés. Si les identifiants injectés à la compilation sont manquants (évalués à "fake"), le moteur refuse de démarrer pour éviter toute fuite.
+   Les identifiants OAuth (Client ID / Secret) ne sont pas hardcodés. Le fichier `config.js` est généré dynamiquement au moment de la compilation (via les GitHub Secrets). S'il est absent ou contient de fausses clés, le moteur refusera de démarrer pour éviter de fuiter des identifiants invalides.
 
 ---
 

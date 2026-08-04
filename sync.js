@@ -43,16 +43,16 @@ async function createRollbackSnapshot(instancePath) {
     } catch (_) { }
     return rollbackTo;
 }
-function cleanupRollback(rollbackPath) {
+async function cleanupRollback(rollbackPath) {
     if (!rollbackPath) return;
-    try { fs.rmSync(rollbackPath, { recursive: true, force: true }); }
+    try { await fs.promises.rm(rollbackPath, { recursive: true, force: true }); }
     catch (_) { }
 }
 async function syncAllInstances() {
     const args = process.argv.slice(2);
     const isList = args.includes('--list');
     if (!isList) {
-        if (!acquireLock()) {
+        if (!(await acquireLock())) {
             console.log(JSON.stringify({
                 type: 'ERROR',
                 errorCode: 'ERR_ALREADY_RUNNING',
@@ -75,8 +75,8 @@ async function syncAllInstances() {
         const COMMANDS = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
         const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
         let settings = { syncMode: 'SMART', maxRetries: 3, retryBaseDelay: 1500 };
-        if (fs.existsSync(settingsPath)) {
-            try { settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsPath, 'utf8')) }; } catch (_) { }
+        if (await fs.promises.access(settingsPath).then(()=>true).catch(()=>false)) {
+            try { settings = { ...settings, ...JSON.parse(await fs.promises.readFile(settingsPath, 'utf8')) }; } catch (_) { }
         }
         const retryOpts = { maxRetries: settings.maxRetries || 3, baseDelay: settings.retryBaseDelay || 1500 };
         const provider = await getProvider(settings);
@@ -96,12 +96,12 @@ async function syncAllInstances() {
                 const instName = mName.replace('GensHorizon_Meta_', '').replace('.json', '');
                 const localMetaPath = path.join(dataDir, `meta_${instName}.json`);
                 let needsDownload = true;
-                if (fs.existsSync(localMetaPath)) {
-                    const localStat = fs.statSync(localMetaPath);
+                if (await fs.promises.access(localMetaPath).then(()=>true).catch(()=>false)) {
+                    const localStat = await fs.promises.stat(localMetaPath);
                     const cloudTime = new Date(cloudIndex[mName].modifiedTime).getTime();
                     if (localStat.mtime.getTime() >= cloudTime) {
                         needsDownload = false;
-                        try { metaCache.set(instName, JSON.parse(fs.readFileSync(localMetaPath, 'utf8'))); } catch (_) { }
+                        try { metaCache.set(instName, JSON.parse(await fs.promises.readFile(localMetaPath, 'utf8'))); } catch (_) { }
                     }
                 }
                 if (needsDownload) {
@@ -117,7 +117,8 @@ async function syncAllInstances() {
                     .filter(n => n.startsWith('GensHorizon_Backup_'))
                     .map(n => n.replace('GensHorizon_Backup_', '').replace('.zip', ''))
             )];
-            const richList = list.map(instName => {
+            const richList = [];
+            await withConcurrency(6, list.map(instName => async () => {
                 const baseName = `GensHorizon_Backup_${instName}.zip`;
                 const baseFile = cloudIndex[baseName];
                 const deltaFiles = Object.keys(cloudIndex).filter(n => n.startsWith(`GensHorizon_Delta_${instName}_`) && n.endsWith('.zip'));
@@ -134,16 +135,16 @@ async function syncAllInstances() {
                     }
                 } else {
                     const localMetaPath = path.join(dataDir, `meta_${instName}.json`);
-                    if (fs.existsSync(localMetaPath)) {
+                    if (await fs.promises.access(localMetaPath).then(()=>true).catch(()=>false)) {
                         try {
-                            const metaObj = JSON.parse(fs.readFileSync(localMetaPath, 'utf8'));
+                            const metaObj = JSON.parse(await fs.promises.readFile(localMetaPath, 'utf8'));
                             if (metaObj.realName) realName = metaObj.realName;
                             if (metaObj.iconData) iconData = metaObj.iconData;
                             if (metaObj.loader) loader = metaObj.loader;
                         } catch (_) { }
                     }
                 }
-                return {
+                richList.push({
                     name: instName,
                     realName: realName,
                     deltaCount: deltaFiles.length,
@@ -151,8 +152,8 @@ async function syncAllInstances() {
                     lastBackup: baseFile?.modifiedTime || null,
                     iconData: iconData,
                     loader: loader
-                };
-            });
+                });
+            }));
             console.log(JSON.stringify({ type: 'CLOUD_LIST', data: list, richData: richList }));
             return;
         }
@@ -168,18 +169,18 @@ async function syncAllInstances() {
                 await withRetry(() => provider.deleteFile(cloudIndex[n].id), { ...retryOpts, label: `deleteFile(${n})` });
             }
             const manifestPath = path.join(dataDir, `manifest_${safeTarget}.json`);
-            if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
-            if (fs.existsSync(syncInfoPath)) {
-                const syncState = readJsonSafe(syncInfoPath);
+            if (await fs.promises.access(manifestPath).then(()=>true).catch(()=>false)) await fs.promises.unlink(manifestPath);
+            if (await fs.promises.access(syncInfoPath).then(()=>true).catch(()=>false)) {
+                const syncState = await readJsonSafe(syncInfoPath);
                 delete syncState[safeTarget];
                 await writeJsonAtomicAsync(syncInfoPath, syncState);
             }
             const metaPath = path.join(dataDir, `meta_${safeTarget}.json`);
-            if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+            if (await fs.promises.access(metaPath).then(()=>true).catch(()=>false)) await fs.promises.unlink(metaPath);
             console.log(JSON.stringify({ type: 'SUCCESS', instance: targetInstance, message: 'Supprimé du cloud.' }));
             return;
         }
-        let syncState = readJsonSafe(syncInfoPath);
+        let syncState = await readJsonSafe(syncInfoPath);
         const instancesToSync = targetInstance
             ? [targetInstance]
             : [...new Set(Object.keys(cloudIndex)
@@ -222,8 +223,8 @@ async function syncAllInstances() {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${inst} est déjà à jour.` }));
                     continue;
                 }
-                if (!fs.existsSync(targetPath)) {
-                    fs.mkdirSync(targetPath, { recursive: true });
+                if (!(await fs.promises.access(targetPath).then(()=>true).catch(()=>false))) {
+                    await fs.promises.mkdir(targetPath, { recursive: true });
                     isNewInstance = true;
                 } else if (baseChanged || pendingDeltas.length > 0) {
                     rollbackPath = await createRollbackSnapshot(targetPath);
@@ -245,14 +246,14 @@ async function syncAllInstances() {
                         await verifyZipIntegrity(tempBase);
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 100, instance: inst }));
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: 0, instance: inst }));
-                        for (const entry of fs.readdirSync(targetPath)) {
-                            try { fs.rmSync(path.join(targetPath, entry), { recursive: true, force: true }); } catch (_) { }
+                        for (const entry of await fs.promises.readdir(targetPath)) {
+                            try { await fs.promises.rm(path.join(targetPath, entry), { recursive: true, force: true }); } catch (_) { }
                         }
                         await extractZip(tempBase, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: pct, instance: inst }))
                         );
                     } finally {
-                        try { if (fs.existsSync(tempBase)) fs.unlinkSync(tempBase); } catch (_) { }
+                        try { if (await fs.promises.access(tempBase).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempBase); } catch (_) { }
                         unregisterTemp(tempBase);
                     }
                 }
@@ -270,14 +271,14 @@ async function syncAllInstances() {
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'APPLYING_DELTA', value: pct, instance: inst, delta: delta.name }))
                         );
                     } finally {
-                        try { if (fs.existsSync(tempDelta)) fs.unlinkSync(tempDelta); } catch (_) { }
+                        try { if (await fs.promises.access(tempDelta).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempDelta); } catch (_) { }
                         unregisterTemp(tempDelta);
                     }
                 }
                 const lastDelta = pendingDeltas.length > 0 ? pendingDeltas[pendingDeltas.length - 1] : null;
                 syncState[safeInst] = lastDelta ? new Date(lastDelta.ts).toISOString() : baseFile.modifiedTime;
                 await writeJsonAtomicAsync(syncInfoPath, syncState);
-                cleanupRollback(rollbackPath);
+                await cleanupRollback(rollbackPath);
                 rollbackPath = null;
                 try {
                     const newManifest = await generateManifest(targetPath);
@@ -298,7 +299,7 @@ async function syncAllInstances() {
                     try {
                         const safeInst = getCanonicalName(inst);
                         const targetPath = path.join(getInstancesFolder(), safeInst);
-                        if (fs.existsSync(targetPath)) try { fs.rmSync(targetPath, { recursive: true, force: true }); } catch (_) { }
+                        if (await fs.promises.access(targetPath).then(()=>true).catch(()=>false)) try { await fs.promises.rm(targetPath, { recursive: true, force: true }); } catch (_) { }
                     } catch (_) { }
                 }
                 const rollbackMsg = rollbackPath
