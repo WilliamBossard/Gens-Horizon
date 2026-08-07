@@ -215,6 +215,20 @@ async function upload() {
                         metaData.iconData = instObj.icon || '';
                     }
                 } catch(_) { /* instance.json absent ou invalide — métadonnées par défaut */ }
+
+                if (!metaData.iconData) {
+                    const exts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
+                    for (const ext of exts) {
+                        const iconPath = path.join(folder, 'icon' + ext);
+                        const stat = await fs.promises.stat(iconPath).catch(() => null);
+                        if (stat && stat.size < 512 * 1024) {
+                            const b64 = await fs.promises.readFile(iconPath, { encoding: 'base64' });
+                            const mimeExt = (ext === '.jpg') ? 'jpeg' : ext.replace('.', '');
+                            metaData.iconData = `data:image/${mimeExt};base64,${b64}`;
+                            break;
+                        }
+                    }
+                }
                 if (!diff.hasChanges && !force && hasBaseOnCloud) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `Aucun changement pour ${inst}, upload ignoré.` }));
                     continue;
