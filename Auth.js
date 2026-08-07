@@ -15,41 +15,51 @@ const { getHorizonDataDir } = require('./paths');
 const { registerTemp, unregisterTemp } = require('./utils');
 const BASE_DIR = getHorizonDataDir();
 const MACHINE_ID_FILE = path.join(BASE_DIR, '.machine_id');
-let machineID;
-if (fs.existsSync(MACHINE_ID_FILE)) {
-    machineID = fs.readFileSync(MACHINE_ID_FILE, 'utf8').trim();
-} else {
-    // SÉCURITÉ : ID machine aléatoire fort (256 bits d'entropie) plutôt que le
-    // hostname devinable. Les installations existantes gardent leur .machine_id.
-    machineID = crypto.randomBytes(32).toString('hex');
-    try { fs.writeFileSync(MACHINE_ID_FILE, machineID, { mode: 0o600 }); } catch (_) {
-        // Fallback : hostname si écriture impossible (ex: dossier en lecture seule)
-        machineID = os.hostname() + '_GensUser';
+const SALT_FILE = path.join(BASE_DIR, 'salt.key');
+const TOKEN_FILE_MODE = 0o600;
+
+let machineID = null;
+let salt = null;
+
+async function initAuthData() {
+    if (machineID && salt) return;
+    
+    if (await fs.promises.access(MACHINE_ID_FILE).then(()=>true).catch(()=>false)) {
+        machineID = (await fs.promises.readFile(MACHINE_ID_FILE, 'utf8')).trim();
+    } else {
+        machineID = crypto.randomBytes(32).toString('hex');
+        try {
+            await fs.promises.writeFile(MACHINE_ID_FILE, machineID, { mode: 0o600 });
+        } catch (e) {
+            process.stderr.write(`[Auth] AVERTISSEMENT : Création de .machine_id échouée (${e.message}). Utilisation du fallback (hostname).\n`);
+            machineID = os.hostname() + '_GensUser';
+        }
+    }
+
+    if (await fs.promises.access(SALT_FILE).then(()=>true).catch(()=>false)) {
+        salt = await fs.promises.readFile(SALT_FILE);
+    } else {
+        salt = crypto.randomBytes(16);
+        try {
+            await fs.promises.writeFile(SALT_FILE, salt, { mode: TOKEN_FILE_MODE });
+        } catch (e) {
+            throw new Error(`[Auth] ERREUR CRITIQUE : Impossible d'écrire le fichier de sécurité (salt.key). Vérifiez les permissions. Détail : ${e.message}`);
+        }
     }
 }
 
-const SALT_FILE = path.join(BASE_DIR, 'salt.key');
-const TOKEN_FILE_MODE = 0o600;
-let salt;
-if (fs.existsSync(SALT_FILE)) {
-    salt = fs.readFileSync(SALT_FILE);
-} else {
-    salt = crypto.randomBytes(16);
-    try {
-        fs.writeFileSync(SALT_FILE, salt, { mode: TOKEN_FILE_MODE });
-    } catch (e) {
-        throw new Error(`[Auth] ERREUR CRITIQUE : Impossible d'écrire le fichier de sécurité (salt.key). Vérifiez les permissions. Détail : ${e.message}`);
-    }
-}
 let SECRET_KEY_PROMISE = null;
 function getSecretKey() {
     if (SECRET_KEY_PROMISE) return SECRET_KEY_PROMISE;
-    SECRET_KEY_PROMISE = new Promise((resolve, reject) => {
-        crypto.pbkdf2(machineID, salt, 600000, 32, 'sha256', (err, derivedKey) => {
-            if (err) reject(err);
-            else resolve(derivedKey);
+    SECRET_KEY_PROMISE = (async () => {
+        await initAuthData();
+        return new Promise((resolve, reject) => {
+            crypto.pbkdf2(machineID, salt, 600000, 32, 'sha256', (err, derivedKey) => {
+                if (err) reject(err);
+                else resolve(derivedKey);
+            });
         });
-    });
+    })();
     return SECRET_KEY_PROMISE;
 }
 async function _encrypt(text) {

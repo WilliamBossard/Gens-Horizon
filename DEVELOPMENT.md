@@ -61,7 +61,7 @@ The application follows NIST recommendations and applies "Defense in Depth":
 2. **Synchronization Integrity (`lock.js`)**:
    A lockfile system prevents launching multiple simultaneous synchronization operations (which would corrupt the instance).
    - Mechanism: The `horizon.lock` file contains the PID of the master process. Creation is atomic (`O_CREAT | O_EXCL`).
-   - **Heartbeat**: The lock timestamp is updated every 5 seconds (`utimesSync`) to distinguish active processes from zombie processes.
+   - **Heartbeat**: The lock timestamp is updated every 5 seconds (`fs.promises.utimes`) to distinguish active processes from zombie processes.
    - **Coupling with the Launcher**: The Launcher (`ipc-horizon.js`) reads the lockfile's `mtimeMs` via `fs.promises.stat()` to check for an active Horizon process. This implicit coupling means the heartbeat interval (5s) and the stale lock threshold (2h) must remain consistent between both projects.
    - "Stale Lock": A lock is considered stale if the PID process is no longer running (`ESRCH`) or if it is older than 2 hours (`STALE_LOCK_MS = 7200000`). It is then purged automatically. If deletion fails (OS error), Horizon gracefully aborts without busy-waiting.
 

@@ -66,7 +66,11 @@ async function acquireLock(attempt = 0) {
     heartbeatInterval = setInterval(() => {
         try {
             const now = new Date();
-            fs.promises.utimes(LOCK_FILE, now, now).catch(() => {});
+            fs.promises.utimes(LOCK_FILE, now, now).catch((err) => {
+                if (err && ['EPERM', 'EACCES'].includes(err.code)) {
+                    process.stderr.write(`[lock] Erreur de permission sur le heartbeat du verrou.\n`);
+                }
+            });
         } catch (_) { }
     }, 5000);
 
@@ -84,7 +88,11 @@ function releaseLock() {
         if (!fs.existsSync(LOCK_FILE)) return;
         const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim(), 10);
         if (pid === process.pid) fs.unlinkSync(LOCK_FILE);
-    } catch (_) { }
+    } catch (err) { 
+        if (err && ['EPERM', 'EACCES'].includes(err.code)) {
+            process.stderr.write(`[lock] Erreur OS critique (Permissions) lors de la libération du verrou: ${err.message}\n`);
+        }
+    }
 }
 
 module.exports = { acquireLock, releaseLock, LOCK_FILE };

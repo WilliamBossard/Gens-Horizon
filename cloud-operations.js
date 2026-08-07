@@ -13,18 +13,28 @@ const { withRetry } = require('./retry');
 async function getCloudIndexAndCleanDuplicates(provider, retryOpts, logPrefix) {
     const cloudFiles = await withRetry(() => provider.listFiles('GensHorizon_'), { ...retryOpts, label: 'listFiles' });
     const cloudIndex = {};
+    const deletePromises = [];
+
     for (const f of cloudFiles) {
         if (!cloudIndex[f.name]) {
             cloudIndex[f.name] = f;
         } else {
-            try {
-                await withRetry(() => provider.deleteFile(f.id), { ...retryOpts, label: `deleteDuplicate(${f.name})` });
-                process.stderr.write(`${logPrefix} Doublon supprimé du Cloud : ${f.name}\n`);
-            } catch (e) {
-                process.stderr.write(`${logPrefix} Échec suppression doublon ${f.name} : ${e.message}\n`);
-            }
+            deletePromises.push(
+                withRetry(() => provider.deleteFile(f.id), { ...retryOpts, label: `deleteDuplicate(${f.name})` })
+                    .then(() => {
+                        process.stderr.write(`${logPrefix} Doublon supprimé du Cloud : ${f.name}\n`);
+                    })
+                    .catch((e) => {
+                        process.stderr.write(`${logPrefix} Échec suppression doublon ${f.name} : ${e.message}\n`);
+                    })
+            );
         }
     }
+
+    if (deletePromises.length > 0) {
+        await Promise.all(deletePromises);
+    }
+    
     return cloudIndex;
 }
 
