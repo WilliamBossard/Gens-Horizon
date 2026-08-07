@@ -1,6 +1,6 @@
 'use strict';
 const fs       = require('fs');
-const archiver = require('archiver'); // AUDIT-21 : import standard d'archiver (ZipArchive n'est pas un export nommé public)
+const { ZipArchive } = require('archiver'); // AUDIT-21 : import standard d'archiver (ZipArchive n'est pas un export nommé public)
 const path     = require('path');
 const { getInstancesFolder, scanInstances, getHorizonDataDir } = require('./paths');
 const { generateManifest, compareManifests }   = require('./scanner');
@@ -45,7 +45,7 @@ async function createFullZip(folder, tempZip, inst) {
     let lastPct = -1;
     return new Promise((resolve, reject) => {
         const output  = fs.createWriteStream(tempZip);
-        const archive = archiver('zip', { zlib: { level: 1 } }); // AUDIT-21
+        const archive = new ZipArchive({ zlib: { level: 1 } }); // AUDIT-21
         archive.on('progress', (p) => {
             if (realTotal === 0) return;
             const pct = Math.min(100, Math.round(p.fs.processedBytes / realTotal * 100));
@@ -76,7 +76,7 @@ async function createFullZip(folder, tempZip, inst) {
 function createDeltaZip(folder, changed, deleted, tempZip, inst) {
     return new Promise(async (resolve, reject) => {
         const output = fs.createWriteStream(tempZip);
-        const archive = archiver('zip', { zlib: { level: 1 } }); // AUDIT-21
+        const archive = new ZipArchive({ zlib: { level: 1 } }); // AUDIT-21
         output.on('close', resolve);
         archive.on('warning', async (warn) => {
             if (warn.code === 'ENOENT') {
