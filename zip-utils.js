@@ -1,7 +1,26 @@
 'use strict';
 const fs = require('fs');
-const unzipper = require('unzipper');
+const yauzl = require('yauzl');
 const path = require('path');
+
+// Wrapper Promise pour yauzl.open
+function openZip(zipPath, options = {}) {
+    return new Promise((resolve, reject) => {
+        yauzl.open(zipPath, options, (err, zipfile) => {
+            if (err) reject(err);
+            else resolve(zipfile);
+        });
+    });
+}
+
+function openZipStream(zipfile, entry) {
+    return new Promise((resolve, reject) => {
+        zipfile.openReadStream(entry, (err, readStream) => {
+            if (err) reject(err);
+            else resolve(readStream);
+        });
+    });
+}
 
 // AUDIT-22 : new Promise(async ...) antipattern remplace par async function pure
 async function verifyZipIntegrity(zipPath) {
@@ -16,12 +35,10 @@ async function verifyZipIntegrity(zipPath) {
             const hex = buf.toString('hex').toUpperCase();
             throw new Error(`Fichier telecharge invalide (pas un ZIP). Signature recue: 0x${hex}.`);
         }
-        // Validation avancee de la table centrale (detecte si le fichier est tronque)
+        // Validation avec yauzl (verifie le Central Directory)
         try {
-            const directory = await unzipper.Open.file(zipPath);
-            if (!directory || !directory.files) {
-                throw new Error(`Le fichier ZIP est corrompu ou incomplet.`);
-            }
+            const zipfile = await openZip(zipPath, { lazyEntries: true });
+            zipfile.close(); // si ça s'ouvre sans erreur, le central directory est valide
         } catch (openErr) {
             throw new Error(`Le fichier ZIP est tronque ou invalide : ${openErr.message}`);
         }
@@ -31,195 +48,170 @@ async function verifyZipIntegrity(zipPath) {
     }
 }
 
-
-
-/**
- * Fallback d'extraction via streaming (pour les ZIPs dont la table centrale
- * est illisible ou corrompue). Utilisé uniquement si unzipper.Open.file() échoue.
- * Protection Path Traversal intégrée.
- */
-async function _extractViaStream(zipPath, targetPath) {
-    return new Promise((resolve, reject) => {
-        const resolvedTarget = path.resolve(targetPath);
-        let activeWrites = 0;
-        let zipFinished = false;
-        const checkFinish = () => { if (zipFinished && activeWrites === 0) resolve(); };
-        const finishFn = () => { zipFinished = true; checkFinish(); };
-        fs.createReadStream(zipPath)
-            .pipe(unzipper.Parse())
-            .on('entry', async function (entry) {
-                const dest = path.join(targetPath, entry.path);
-                const resDest = path.resolve(dest);
-                if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                    entry.autodrain();
-                    return;
-                }
-                if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
-                    await fs.promises.mkdir(dest, { recursive: true });
-                    entry.autodrain();
-                } else {
-                    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-                    const ws = fs.createWriteStream(dest);
-                    activeWrites++;
-                    ws.on('finish', () => { activeWrites--; checkFinish(); });
-                    ws.on('error', (err) => { activeWrites--; reject(err); });
-                    entry.pipe(ws);
-                }
-            })
-            .on('close', finishFn)
-            .on('end', finishFn)
-            .on('finish', finishFn)
-            .on('error', reject);
-    });
-}
-
 async function extractZip(zipPath, targetPath, onProgress) {
-    let directory;
+    let zipfile;
     try {
-        directory = await unzipper.Open.file(zipPath);
-    } catch (_) {
-        // Fallback : mode streaming si la table centrale du ZIP est illisible
-        return _extractViaStream(zipPath, targetPath);
+        zipfile = await openZip(zipPath, { lazyEntries: true });
+    } catch (err) {
+        throw new Error(`Extraction impossible (Archive corrompue) : ${err.message}`);
     }
 
     const resolvedTarget = path.resolve(targetPath);
+    const total = zipfile.entryCount;
     let count = 0;
-    const total = directory.files.length;
     const limit = 20;
     const active = new Set();
     let errs = [];
 
-    for (const file of directory.files) {
-        if (errs.length > 0) break;
-        const dest = path.join(targetPath, file.path);
-        const resDest = path.resolve(dest);
-        if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-            continue;
-        }
-        if (file.type === 'Directory' || /[\/\\]$/.test(file.path)) {
-            await fs.promises.mkdir(dest, { recursive: true });
-        } else {
-            await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-            const p = new Promise((resolve, reject) => {
-                file.stream()
-                    .pipe(fs.createWriteStream(dest))
-                    .on('finish', resolve)
-                    .on('error', reject);
-            }).catch(e => { errs.push(e); });
-            active.add(p);
-            p.then(() => active.delete(p));
-            if (active.size >= limit) await Promise.race(active);
-        }
-        count++;
-        if (onProgress && count % 50 === 0) {
-            const fakePct = Math.min(99, Math.floor((count / total) * 100));
-            onProgress(fakePct);
-        }
-    }
-    await Promise.all(active);
-    if (errs.length > 0) throw errs[0];
+    return new Promise((resolve, reject) => {
+        zipfile.on('error', err => {
+            errs.push(err);
+            reject(err);
+        });
+
+        zipfile.on('end', async () => {
+            await Promise.all(active);
+            if (errs.length > 0) reject(errs[0]);
+            else resolve();
+        });
+
+        zipfile.on('entry', async (entry) => {
+            if (errs.length > 0) return; // Arret
+            
+            const dest = path.join(targetPath, entry.fileName);
+            const resDest = path.resolve(dest);
+            if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
+                zipfile.readEntry(); // Skip
+                return;
+            }
+
+            try {
+                if (/\/$/.test(entry.fileName)) { // Dossier
+                    await fs.promises.mkdir(dest, { recursive: true });
+                    zipfile.readEntry();
+                } else {
+                    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+                    const readStream = await openZipStream(zipfile, entry);
+                    
+                    const p = new Promise((res, rej) => {
+                        readStream.pipe(fs.createWriteStream(dest))
+                            .on('finish', res)
+                            .on('error', rej);
+                    }).catch(e => { errs.push(e); });
+                    
+                    active.add(p);
+                    p.then(() => active.delete(p));
+                    
+                    count++;
+                    if (onProgress && count % 50 === 0) {
+                        const fakePct = Math.min(99, Math.floor((count / total) * 100));
+                        onProgress(fakePct);
+                    }
+
+                    if (active.size >= limit) {
+                        await Promise.race(active);
+                    }
+                    zipfile.readEntry(); // Passe a la suivante
+                }
+            } catch (e) {
+                errs.push(e);
+                reject(e);
+            }
+        });
+
+        zipfile.readEntry();
+    });
 }
 
 
 async function applyDelta(deltaZipPath, targetPath, onProgress) {
-    let directory;
-    const resolvedTarget = path.resolve(targetPath);
+    let zipfile;
     try {
-        directory = await unzipper.Open.file(deltaZipPath);
+        zipfile = await openZip(deltaZipPath, { lazyEntries: true });
     } catch (err) {
-        return new Promise((resolve, reject) => {
-            let deletedFiles = [];
-            let activeWrites = 0;
-            let zipFinished = false;
-            const checkFinish = async () => {
-                if (zipFinished && activeWrites === 0) {
-                    for (const relPath of deletedFiles) {
-                        const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
-                        if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
-                        try { if (await fs.promises.access(absPath).then(()=>true).catch(()=>false)) await fs.promises.rm(absPath, { recursive: true, force: true }); } catch (_) { }
-                    }
-                    resolve();
-                }
-            };
-                const finishFn = () => { zipFinished = true; checkFinish(); };
-                fs.createReadStream(deltaZipPath)
-                    .pipe(unzipper.Parse())
-                    .on('entry', async function (entry) {
-                        if (entry.path === '__delta__.json') {
-                            let data = '';
-                            entry.on('data', chunk => data += chunk);
-                            entry.on('end', () => {
-                                try { deletedFiles = JSON.parse(data).deletedFiles || []; } catch (_) { }
-                            });
-                            return;
-                        }
-                        const dest = path.join(targetPath, entry.path);
-                        const resDest = path.resolve(dest);
-                        if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                            entry.autodrain();
-                            return;
-                        }
-                        if (entry.type === 'Directory' || /[\/\\]$/.test(entry.path)) {
-                            await fs.promises.mkdir(dest, { recursive: true });
-                            entry.autodrain();
-                        } else {
-                            await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-                            const ws = fs.createWriteStream(dest);
-                            activeWrites++;
-                            ws.on('finish', () => { activeWrites--; checkFinish(); });
-                            ws.on('error', (err) => { activeWrites--; reject(err); });
-                            entry.pipe(ws);
-                        }
-                    })
-                    .on('close', finishFn)
-                    .on('end', finishFn)
-                    .on('finish', finishFn)
-                    .on('error', (err) => { reject(err); });
-        });
+        throw new Error(`Application delta impossible (Archive corrompue) : ${err.message}`);
     }
 
+    const resolvedTarget = path.resolve(targetPath);
     let deletedFiles = [];
-    const deltaFile = directory.files.find(f => f.path === '__delta__.json');
-    if (deltaFile) {
-        const buf = await deltaFile.buffer();
-        try { deletedFiles = JSON.parse(buf.toString()).deletedFiles || []; } catch (_) { }
-    }
-
     const limit = 20;
     const active = new Set();
     let errs = [];
 
-    for (const file of directory.files) {
-        if (file.path === '__delta__.json') continue;
-        if (errs.length > 0) break;
-        const dest = path.join(targetPath, file.path);
-        const resDest = path.resolve(dest);
-        if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-            continue;
-        }
-        if (file.type === 'Directory' || /[\/\\]$/.test(file.path)) {
-            await fs.promises.mkdir(dest, { recursive: true });
-        } else {
-            await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-            const p = new Promise((resolve, reject) => {
-                file.stream()
-                    .pipe(fs.createWriteStream(dest))
-                    .on('finish', resolve)
-                    .on('error', reject);
-            }).catch(e => { errs.push(e); });
-            active.add(p);
-            p.then(() => active.delete(p));
-            if (active.size >= limit) await Promise.race(active);
-        }
-    }
-    await Promise.all(active);
-    if (errs.length > 0) throw errs[0];
+    return new Promise((resolve, reject) => {
+        zipfile.on('error', err => {
+            errs.push(err);
+            reject(err);
+        });
 
-    for (const relPath of deletedFiles) {
-        const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
-        if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
-        try { if (await fs.promises.access(absPath).then(()=>true).catch(()=>false)) await fs.promises.rm(absPath, { recursive: true, force: true }); } catch (_) { }
-    }
+        zipfile.on('end', async () => {
+            await Promise.all(active);
+            if (errs.length > 0) return reject(errs[0]);
+            
+            // Suppression differee
+            for (const relPath of deletedFiles) {
+                const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
+                if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
+                try { if (await fs.promises.access(absPath).then(()=>true).catch(()=>false)) await fs.promises.rm(absPath, { recursive: true, force: true }); } catch (_) { }
+            }
+            resolve();
+        });
+
+        zipfile.on('entry', async (entry) => {
+            if (errs.length > 0) return;
+            
+            if (entry.fileName === '__delta__.json') {
+                try {
+                    const readStream = await openZipStream(zipfile, entry);
+                    let data = '';
+                    readStream.on('data', chunk => data += chunk);
+                    readStream.on('end', () => {
+                        try { deletedFiles = JSON.parse(data).deletedFiles || []; } catch (_) { }
+                        zipfile.readEntry();
+                    });
+                } catch (e) {
+                    errs.push(e); reject(e);
+                }
+                return;
+            }
+
+            const dest = path.join(targetPath, entry.fileName);
+            const resDest = path.resolve(dest);
+            if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
+                zipfile.readEntry();
+                return;
+            }
+
+            try {
+                if (/\/$/.test(entry.fileName)) {
+                    await fs.promises.mkdir(dest, { recursive: true });
+                    zipfile.readEntry();
+                } else {
+                    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+                    const readStream = await openZipStream(zipfile, entry);
+                    
+                    const p = new Promise((res, rej) => {
+                        readStream.pipe(fs.createWriteStream(dest))
+                            .on('finish', res)
+                            .on('error', rej);
+                    }).catch(e => { errs.push(e); });
+                    
+                    active.add(p);
+                    p.then(() => active.delete(p));
+                    
+                    if (active.size >= limit) {
+                        await Promise.race(active);
+                    }
+                    zipfile.readEntry();
+                }
+            } catch (e) {
+                errs.push(e);
+                reject(e);
+            }
+        });
+
+        zipfile.readEntry();
+    });
 }
 
 module.exports = {

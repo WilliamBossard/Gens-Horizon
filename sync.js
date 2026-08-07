@@ -1,6 +1,5 @@
 'use strict';
 const fs = require('fs');
-const unzipper = require('unzipper');
 const path = require('path');
 const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getProvider } = require('./provider');

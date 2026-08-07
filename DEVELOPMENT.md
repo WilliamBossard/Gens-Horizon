@@ -21,7 +21,7 @@ Il gère le versionnement des fichiers via une approche de **"Delta Sync"** (syn
 - **`zip-utils.js`** : Utilitaires pour l'extraction sécurisée de fichiers ZIP.
   - Protection stricte contre les attaques par **Path Traversal** (`resDest.startsWith(resolvedTarget)`).
   - Vérification de la signature magique ZIP (`0x504B0304`) ET de la table centrale avant extraction.
-  - Chemin d'extraction principal (`unzipper.Open.file`) avec fallback streaming unifié (`_extractViaStream`) pour les ZIPs dont la table centrale est illisible.
+  - Utilise **yauzl** pour une décompression hautement optimisée en mémoire. (Note : Le moteur refuse strictement les zips dont la table centrale est illisible, sans tentative de fallback séquentiel).
 
 ---
 
