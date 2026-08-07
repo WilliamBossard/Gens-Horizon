@@ -1,78 +1,81 @@
-# Gens-Horizon — Guide de Développement Complet
+# Gens-Horizon — Comprehensive Development Guide
 
-Ce document décrit en profondeur l'architecture, le modèle de synchronisation, les primitives cryptographiques et les protocoles de communication de **Gens-Horizon**, le moteur Cloud "headless" (sans interface graphique) de l'écosystème Gens.
-
----
-
-## 1. Vue d'Ensemble & Architecture Globale
-Gens-Horizon est un moteur CLI autonome écrit en Node.js, pensé pour s'exécuter en arrière-plan. Il est chargé de la synchronisation bidirectionnelle des instances de jeu avec des fournisseurs Cloud (Google Drive, Dropbox, OneDrive).
-
-Il gère le versionnement des fichiers via une approche de **"Delta Sync"** (synchronisation différentielle) et d'**"Incremental Backups"**, garantissant une vitesse fulgurante et une économie drastique de la bande passante et du stockage.
-
-### Composants Principaux
-- **`index.js`** : Routeur CLI principal. Gère les commandes passées au binaire (ex: `--sync`, `--login`, `--rollback`). Il redirige les flux `console.log` vers `stderr` pour protéger le flux JSON IPC.
-- **`provider.js` & `/providers`** : Implémente le pattern Factory (`getProvider()`). Ce design rend le moteur agnostique au Cloud utilisé. Chaque fournisseur hérite d'une interface commune gérant l'authentification OAuth2, les quotas, et le téléchargement/envoi de fichiers.
-- **`sync.js` / `upload.js`** : Les cœurs du moteur de synchronisation.
-  - `upload.js` identifie les fichiers modifiés, crée une archive partielle (Delta), et l'envoie sur le Cloud.
-  - `sync.js` interroge le Cloud, télécharge les Deltas manquants, et les applique dans l'ordre chronologique localement.
-- **`scanner.js`** : Le scanner de fichiers local. Il utilise le hachage **SHA-256** couplé à des vérifications rapides (mtime/size) et un limiteur de concurrence (`withConcurrency`) pour générer instantanément un Manifeste d'instance sans saturer le disque (EMFILE).
-- **`rollback.js`** : Permet de restaurer une instance locale à l'état exact d'un Delta passé, reconstituant l'historique de manière déterministe.
-- **`cloud-operations.js`** : Encapsule les opérations de haut niveau sur le Cloud Index (liste des fichiers distants). Fournit notamment `getCloudIndexAndCleanDuplicates()` qui récupère l'index cloud et purge automatiquement les doublons de sauvegardes obsolètes pour éviter une consommation excessive du quota. Utilisé par `sync.js` et `upload.js`. <!-- AUDIT-24 -->
-- **`zip-utils.js`** : Utilitaires pour l'extraction sécurisée de fichiers ZIP.
-  - Protection stricte contre les attaques par **Path Traversal** (`resDest.startsWith(resolvedTarget)`).
-  - Vérification de la signature magique ZIP (`0x504B0304`) ET de la table centrale avant extraction.
-  - Utilise **yauzl** pour une décompression hautement optimisée en mémoire. (Note : Le moteur refuse strictement les zips dont la table centrale est illisible, sans tentative de fallback séquentiel).
+This document thoroughly describes the architecture, synchronization model, cryptographic primitives, and communication protocols of **Gens-Horizon**, the "headless" (GUI-less) Cloud engine of the Gens ecosystem.
 
 ---
 
-## 2. Protocole de Communication (IPC JSON)
-Le moteur Horizon s'exécute comme un processus enfant du Launcher. Il communique de manière asynchrone via les flux d'entrées/sorties standards (`stdout` et `stdin`).
+## 1. Overview & Global Architecture
+Gens-Horizon is a standalone CLI engine written in Node.js, designed to run in the background. It is responsible for the bidirectional synchronization of game instances with Cloud providers (Google Drive, Dropbox, OneDrive).
 
-Toutes les données émises sur `stdout` sont rigoureusement formatées en JSON pur. Exemple :
-`json
+It manages file versioning via a **"Delta Sync"** (differential synchronization) approach and **"Incremental Backups"**, guaranteeing blazing speed and drastic savings in bandwidth and storage.
+
+### Core Components
+- **`index.js`**: Main CLI router. Handles commands passed to the binary (e.g., `--sync`, `--login`, `--rollback`). It redirects `console.log` streams to `stderr` to protect the IPC JSON stream.
+- **`provider.js` & `/providers`**: Implements the Factory pattern (`getProvider()`). This design makes the engine agnostic to the Cloud used. Each provider inherits a common interface handling OAuth2 authentication, quotas, and file upload/download.
+- **`sync.js` / `upload.js`**: The core synchronization engines.
+  - `upload.js` identifies modified files, creates a partial archive (Delta), and uploads it to the Cloud.
+  - `sync.js` queries the Cloud, downloads missing Deltas, and applies them chronologically locally.
+- **`scanner.js`**: The local file scanner. It uses **SHA-256** hashing coupled with fast checks (mtime/size) and a concurrency limiter (`withConcurrency`) to instantly generate an instance Manifest without saturating the disk (EMFILE).
+- **`rollback.js`**: Allows restoring a local instance to the exact state of a past Delta, reconstructing the history deterministically.
+- **`cloud-operations.js`**: Encapsulates high-level operations on the Cloud Index (remote file list). Notably provides `getCloudIndexAndCleanDuplicates()` which fetches the cloud index and automatically purges obsolete backup duplicates to prevent excessive quota consumption. Used by `sync.js` and `upload.js`. <!-- AUDIT-24 -->
+- **`zip-utils.js`**: Utilities for secure ZIP file extraction.
+  - Strict protection against **Path Traversal** attacks (`resDest.startsWith(resolvedTarget)`).
+  - Verification of the ZIP magic signature (`0x504B0304`) AND the central directory before extraction.
+  - Uses **yauzl** for highly memory-optimized decompression. (Note: The engine strictly refuses zips whose central directory is unreadable, without attempting sequential fallback).
+
+---
+
+## 2. Communication Protocol (IPC JSON)
+The Horizon engine runs as a child process of the Launcher. It communicates asynchronously via standard input/output streams (`stdout` and `stdin`).
+
+All data emitted on `stdout` is strictly formatted in pure JSON. Example:
+```json
 {
   "type": "PROGRESS",
   "step": "COMPRESSING",
   "value": 45,
   "instance": "Aventure"
 }
-`
-*Note : Tous les `console.log/warn` émis par les librairies internes sont interceptés et envoyés vers `process.stderr` pour éviter la corruption du parsing JSON côté Launcher.*
+```
+*Note: All `console.log/warn` emitted by internal libraries are intercepted and sent to `process.stderr` to prevent JSON parsing corruption on the Launcher side.*
 
-Les types de messages courants incluent : `PROGRESS`, `INFO`, `SUCCESS`, `ERROR`, `ROLLBACK_LIST`, `CHECK_RESULT`, `CLOUD_LIST`.
-
----
-
-## 3. Sécurité Cryptographique & Verrous (Security Design)
-
-L'application suit les recommandations NIST et applique la "Défense en Profondeur" :
-
-1. **Authentification Hardware-Bound (`Auth.js`)** :
-   Les jetons OAuth2 ne sont jamais stockés en clair. Ils sont chiffrés sur le disque en `AES-256-GCM` (le mode authentifié GCM remplace l'ancien CBC pour une sécurité maximale).
-   La clé de chiffrement (32 octets) est dérivée de la manière suivante :
-   - Fonction : `PBKDF2`
-   - Itérations : **600 000** (Standard NIST/OWASP actuel pour bloquer le brute-forcing hors-ligne).
-   - Sel : Fichier `salt.key` aléatoire (16 bytes) généré au premier lancement, stocké avec `mode: 0o600`.
-   - Mot de passe : Contenu de `.machine_id` — un identifiant aléatoire de **256 bits** (32 bytes) généré une seule fois au premier lancement avec `crypto.randomBytes(32)`. Contrairement au hostname, cet ID ne peut pas être deviné ou reproduit sur une autre machine.
-   *Le vol du dossier Horizon sans la machine physique (et son `.machine_id`) rend le déchiffrement virtuellement impossible.*
-
-   Migration transparente : Si un token est chiffré avec l'ancien format (AES-CBC), il est automatiquement migré vers AES-GCM au premier déchiffrement réussi.
-
-2. **Intégrité de Synchronisation (`lock.js`)** :
-   Un système de verrous (lock file) empêche le lancement de multiples opérations de synchronisation simultanées (qui corrompraient l'instance).
-   - Mécanisme : Le fichier `horizon.lock` contient le PID du processus maître. La création est atomique (`O_CREAT | O_EXCL`).
-   - **Heartbeat** : Le timestamp du lock est mis à jour toutes les 5 secondes (`utimesSync`) pour distinguer les processus actifs des processus zombies.
-   - **Couplage avec le Launcher** : Le Launcher (`ipc-horizon.js`) lit le `mtimeMs` du lockfile via `fs.promises.stat()` pour vérifier l'activité d'un éventuel processus Horizon en cours. Ce couplage implicite signifie que l'intervalle heartbeat (5s) et le seuil de stale lock (2h) doivent rester cohérents entre les deux projets.
-   - "Stale Lock" : Un lock est considéré comme périmé si le processus PID n'est plus en cours d'exécution (`ESRCH`) ou s'il date de plus de 2 heures (`STALE_LOCK_MS = 7200000`). Il est alors purgé automatiquement. Si la suppression échoue (erreur OS), Horizon abandonne proprement sans busy-wait.
-
-3. **Protection CI/CD (`config.js`)** :
-   Les identifiants OAuth (Client ID / Secret) ne sont pas hardcodés. Le fichier `config.js` est généré dynamiquement au moment de la compilation (via les GitHub Secrets). S'il est absent ou contient de fausses clés, le moteur refusera de démarrer pour éviter de fuiter des identifiants invalides.
+Common message types include: `PROGRESS`, `INFO`, `SUCCESS`, `ERROR`, `ROLLBACK_LIST`, `CHECK_RESULT`, `CLOUD_LIST`.
 
 ---
 
-## 4. Tests et Qualité
+## 3. Cryptographic Security & Locks (Security Design)
 
-Le projet inclut une couverture de test via le module natif `node:test`.
-- Pour exécuter les tests localement : `npm test`
-- Les tests vérifient l'intégrité de la cryptographie symétrique, le système de retry adaptatif, les verrous, et le hachage avec limiteur de concurrence.
-- L'Intégration Continue (GitHub Actions) exécute les tests sur les environnements Linux et Windows avant toute compilation native via `pkg`.
+The application follows NIST recommendations and applies "Defense in Depth":
+
+1. **Hardware-Bound Authentication (`Auth.js`)**:
+   OAuth2 tokens are never stored in plaintext. They are encrypted on disk in `AES-256-GCM` (the authenticated GCM mode replaces the old CBC for maximum security).
+   The encryption key (32 bytes) is derived as follows:
+   - Function: `PBKDF2`
+   - Iterations: **600,000** (Current NIST/OWASP standard to block offline brute-forcing).
+   - Salt: Random `salt.key` file (16 bytes) generated on first launch, stored with `mode: 0o600`.
+   - Password: Content of `.machine_id` — a random **256-bit** (32 bytes) identifier generated once on first launch with `crypto.randomBytes(32)`. Unlike the hostname, this ID cannot be guessed or reproduced on another machine.
+   *Stealing the Horizon folder without the physical machine (and its `.machine_id`) makes decryption virtually impossible.*
+
+   Seamless migration: If a token is encrypted with the old format (AES-CBC), it is automatically migrated to AES-GCM upon the first successful decryption.
+
+2. **Synchronization Integrity (`lock.js`)**:
+   A lockfile system prevents launching multiple simultaneous synchronization operations (which would corrupt the instance).
+   - Mechanism: The `horizon.lock` file contains the PID of the master process. Creation is atomic (`O_CREAT | O_EXCL`).
+   - **Heartbeat**: The lock timestamp is updated every 5 seconds (`utimesSync`) to distinguish active processes from zombie processes.
+   - **Coupling with the Launcher**: The Launcher (`ipc-horizon.js`) reads the lockfile's `mtimeMs` via `fs.promises.stat()` to check for an active Horizon process. This implicit coupling means the heartbeat interval (5s) and the stale lock threshold (2h) must remain consistent between both projects.
+   - "Stale Lock": A lock is considered stale if the PID process is no longer running (`ESRCH`) or if it is older than 2 hours (`STALE_LOCK_MS = 7200000`). It is then purged automatically. If deletion fails (OS error), Horizon gracefully aborts without busy-waiting.
+
+3. **Offline Tolerance**:
+   Gens-Horizon is protected against "vacuum" executions. Although the engine autonomously handles transient network errors (adaptive Retry-Strategy), it is the **parent Launcher** that acts as the primary failsafe via `CloudUI.js` by disabling the Horizon execution chain when the machine is declared offline. This prevents the generation of unnecessary error logs and ensures resource conservation.
+
+4. **CI/CD Protection (`config.js`)**:
+   OAuth credentials (Client ID / Secret) are not hardcoded. The `config.js` file is generated dynamically at compile time (via GitHub Secrets). If missing or containing dummy keys, the engine will refuse to start to avoid leaking invalid credentials.
+
+---
+
+## 4. Tests and Quality
+
+The project includes test coverage via the native `node:test` module.
+- To run tests locally: `npm test`
+- Tests verify symmetric cryptography integrity, the adaptive retry system, locks, and hashing with concurrency limiting.
+- Continuous Integration (GitHub Actions) runs tests on Linux and Windows environments before any native compilation via `pkg`.
