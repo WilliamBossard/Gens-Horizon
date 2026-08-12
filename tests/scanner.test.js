@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { generateManifest, compareManifests, withConcurrency } = require('../scanner');
+const { generateManifest, compareManifests } = require('../scanner');
+const { withConcurrency } = require('../utils');
 
 test('compareManifests detects changes', () => {
     const oldM = {
