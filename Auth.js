@@ -31,8 +31,19 @@ async function initAuthData() {
         try {
             await fs.promises.writeFile(MACHINE_ID_FILE, machineID, { mode: 0o600 });
         } catch (e) {
-            process.stderr.write(`[Auth] AVERTISSEMENT : Création de .machine_id échouée (${e.message}). Utilisation du fallback (hostname).\n`);
-            machineID = os.hostname() + '_GensUser';
+            process.stderr.write(`[Auth] AVERTISSEMENT : Création de .machine_id échouée (${e.message}). Utilisation du fallback matériel.\n`);
+            const nets = os.networkInterfaces();
+            let mac = '00:00:00:00:00:00';
+            for (const name of Object.keys(nets)) {
+                for (const net of nets[name]) {
+                    if (!net.internal && net.mac !== '00:00:00:00:00:00') {
+                        mac = net.mac;
+                        break;
+                    }
+                }
+                if (mac !== '00:00:00:00:00:00') break;
+            }
+            machineID = crypto.createHash('sha256').update(os.hostname() + mac + (os.userInfo().username || '')).digest('hex');
         }
     }
 
