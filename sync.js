@@ -18,6 +18,7 @@ const {
 } = require('./utils');
 const { verifyZipIntegrity, extractZip, applyDelta } = require('./zip-utils');
 const { getCloudIndexAndCleanDuplicates } = require('./cloud-operations');
+const { deleteInstance } = require('./delete');
 setupProcessHandlers();
 
 async function createRollbackSnapshot(instancePath) {
@@ -36,16 +37,18 @@ async function createRollbackSnapshot(instancePath) {
         const entries = await fs.promises.readdir(instDir);
         for (const entry of entries) {
             if (entry.startsWith(`${folderName}_rollback_`) && entry !== path.basename(rollbackTo)) {
-                try { await fs.promises.rm(path.join(instDir, entry), { recursive: true, force: true }); } catch (_) { }
+                try { await fs.promises.rm(path.join(instDir, entry), { recursive: true, force: true }); } catch (err) { if (err.code !== 'ENOENT') process.stderr.write(`[sync] Erreur suppression rollback partiel: ${err.message}\n`); }
             }
         }
-    } catch (_) { }
+    } catch (err) { 
+        if (err.code !== 'ENOENT') process.stderr.write(`[sync] Erreur lecture dossier rollback: ${err.message}\n`);
+    }
     return rollbackTo;
 }
 async function cleanupRollback(rollbackPath) {
     if (!rollbackPath) return;
     try { await fs.promises.rm(rollbackPath, { recursive: true, force: true }); }
-    catch (_) { }
+    catch (err) { if (err.code !== 'ENOENT') process.stderr.write(`[sync] Erreur nettoyage rollback: ${err.message}\n`); }
 }
 async function syncAllInstances() {
     const args = process.argv.slice(2);
@@ -75,7 +78,7 @@ async function syncAllInstances() {
         const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
         let settings = { syncMode: 'SMART', maxRetries: 3, retryBaseDelay: 1500 };
         if (await fs.promises.access(settingsPath).then(()=>true).catch(()=>false)) {
-            try { settings = { ...settings, ...JSON.parse(await fs.promises.readFile(settingsPath, 'utf8')) }; } catch (_) { }
+            try { settings = { ...settings, ...JSON.parse(await fs.promises.readFile(settingsPath, 'utf8')) }; } catch (err) { process.stderr.write(`[sync] Erreur lecture settings: ${err.message}\n`); }
         }
         const retryOpts = { maxRetries: settings.maxRetries || 3, baseDelay: settings.retryBaseDelay || 1500 };
         const provider = await getProvider(settings);
@@ -100,14 +103,14 @@ async function syncAllInstances() {
                     const cloudTime = new Date(cloudIndex[mName].modifiedTime).getTime();
                     if (localStat.mtime.getTime() >= cloudTime) {
                         needsDownload = false;
-                        try { metaCache.set(instName, JSON.parse(await fs.promises.readFile(localMetaPath, 'utf8'))); } catch (_) { }
+                        try { metaCache.set(instName, JSON.parse(await fs.promises.readFile(localMetaPath, 'utf8'))); } catch (err) { process.stderr.write(`[sync] Erreur lecture meta local: ${err.message}\n`); }
                     }
                 }
                 if (needsDownload) {
                     try {
                         const data = await provider.downloadJSON(cloudIndex[mName].id);
                         metaCache.set(instName, data);
-                    } catch (_) { }
+                    } catch (err) { process.stderr.write(`[sync] Erreur téléchargement meta cloud: ${err.message}\n`); }
                 }
             });
             await withConcurrency(6, metaTasks);
@@ -140,7 +143,7 @@ async function syncAllInstances() {
                             if (metaObj.realName) realName = metaObj.realName;
                             if (metaObj.iconData) iconData = metaObj.iconData;
                             if (metaObj.loader) loader = metaObj.loader;
-                        } catch (_) { }
+                        } catch (err) { process.stderr.write(`[sync] Erreur lecture meta (list): ${err.message}\n`); }
                     }
                 }
                 richList.push({
@@ -157,26 +160,7 @@ async function syncAllInstances() {
             return;
         }
         if (isDelete && targetInstance) {
-            const safeTarget = getCanonicalName(targetInstance);
-            const toDelete = Object.keys(cloudIndex).filter(n =>
-                n === `GensHorizon_Backup_${safeTarget}.zip` ||
-                n === `GensHorizon_Manifest_${safeTarget}.json` ||
-                n === `GensHorizon_Meta_${safeTarget}.json` ||
-                n.startsWith(`GensHorizon_Delta_${safeTarget}_`)
-            );
-            for (const n of toDelete) {
-                await withRetry(() => provider.deleteFile(cloudIndex[n].id), { ...retryOpts, label: `deleteFile(${n})` });
-            }
-            const manifestPath = path.join(dataDir, `manifest_${safeTarget}.json`);
-            if (await fs.promises.access(manifestPath).then(()=>true).catch(()=>false)) await fs.promises.unlink(manifestPath);
-            if (await fs.promises.access(syncInfoPath).then(()=>true).catch(()=>false)) {
-                const syncState = await readJsonSafe(syncInfoPath);
-                delete syncState[safeTarget];
-                await writeJsonAtomicAsync(syncInfoPath, syncState);
-            }
-            const metaPath = path.join(dataDir, `meta_${safeTarget}.json`);
-            if (await fs.promises.access(metaPath).then(()=>true).catch(()=>false)) await fs.promises.unlink(metaPath);
-            console.log(JSON.stringify({ type: 'SUCCESS', instance: targetInstance, message: 'Supprimé du cloud.' }));
+            await deleteInstance(targetInstance, cloudIndex, provider, retryOpts);
             return;
         }
         let syncState = await readJsonSafe(syncInfoPath);
@@ -246,13 +230,13 @@ async function syncAllInstances() {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 100, instance: inst }));
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: 0, instance: inst }));
                         for (const entry of await fs.promises.readdir(targetPath)) {
-                            try { await fs.promises.rm(path.join(targetPath, entry), { recursive: true, force: true }); } catch (_) { }
+                            try { await fs.promises.rm(path.join(targetPath, entry), { recursive: true, force: true }); } catch (err) { if (err.code !== 'ENOENT') process.stderr.write(`[sync] Erreur suppression avant extraction: ${err.message}\n`); }
                         }
                         await extractZip(tempBase, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: pct, instance: inst }))
                         );
                     } finally {
-                        try { if (await fs.promises.access(tempBase).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempBase); } catch (_) { }
+                        await fs.promises.rm(tempBase, { force: true });
                         unregisterTemp(tempBase);
                     }
                 }
@@ -270,7 +254,7 @@ async function syncAllInstances() {
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'APPLYING_DELTA', value: pct, instance: inst, delta: delta.name }))
                         );
                     } finally {
-                        try { if (await fs.promises.access(tempDelta).then(()=>true).catch(()=>false)) await fs.promises.unlink(tempDelta); } catch (_) { }
+                        await fs.promises.rm(tempDelta, { force: true });
                         unregisterTemp(tempDelta);
                     }
                 }
@@ -282,7 +266,7 @@ async function syncAllInstances() {
                 try {
                     const newManifest = await generateManifest(targetPath);
                     await writeJsonAtomicAsync(path.join(dataDir, `manifest_${safeInst}.json`), newManifest);
-                } catch (_) { }
+                } catch (err) { process.stderr.write(`[sync] Erreur génération manifest après sync: ${err.message}\n`); }
                 const deltasApplied = pendingDeltas.length;
                 console.log(JSON.stringify({
                     type: 'SUCCESS',
@@ -298,8 +282,8 @@ async function syncAllInstances() {
                     try {
                         const safeInst = getCanonicalName(inst);
                         const targetPath = path.join(getInstancesFolder(), safeInst);
-                        if (await fs.promises.access(targetPath).then(()=>true).catch(()=>false)) try { await fs.promises.rm(targetPath, { recursive: true, force: true }); } catch (_) { }
-                    } catch (_) { }
+                        if (await fs.promises.access(targetPath).then(()=>true).catch(()=>false)) try { await fs.promises.rm(targetPath, { recursive: true, force: true }); } catch (err) { if (err.code !== 'ENOENT') process.stderr.write(`[sync] Erreur suppression nouvelle instance sur échec: ${err.message}\n`); }
+                    } catch (err) { process.stderr.write(`[sync] Erreur suppression nouvelle instance: ${err.message}\n`); }
                 }
                 const rollbackMsg = rollbackPath
                     ? ` Un rollback est disponible (lance --rollback ${inst} pour restaurer).`

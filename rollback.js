@@ -63,7 +63,7 @@ async function rollback() {
         const syncInfoPath = path.join(getHorizonDataDir(), 'last_sync.json');
         let syncState = {};
         if (await existsSafe(syncInfoPath)) {
-            try { syncState = JSON.parse(await fs.promises.readFile(syncInfoPath, 'utf8')); } catch(e){}
+            try { syncState = JSON.parse(await fs.promises.readFile(syncInfoPath, 'utf8')); } catch(err){ if (err.code !== 'ENOENT') process.stderr.write(`[rollback] Erreur lecture sync state: ${err.message}\n`); }
         }
         syncState[safeInst] = new Date(rollbackTime).toISOString();
         await writeJsonAtomic(syncInfoPath, syncState);
@@ -80,15 +80,3 @@ async function rollback() {
     }
 }
 rollback();
-
-
-async function existsSafe(p) {
-    try {
-        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
-        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
-        await fs.promises.access(p);
-        return true;
-    } catch {
-        return false;
-    }
-}

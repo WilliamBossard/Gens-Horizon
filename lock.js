@@ -42,9 +42,9 @@ async function acquireLock(attempt = 0) {
         if (await isLockStale()) {
             process.stderr.write('[lock] Verrou périmé détecté — nettoyage.\n');
             try {
-                await fs.promises.unlink(LOCK_FILE);
+                await fs.promises.rm(LOCK_FILE, { force: true });
             } catch (err) {
-                if (err.code !== 'ENOENT') process.stderr.write(`[lock] Erreur suppression verrou périmé: ${err.message}\n`);
+                process.stderr.write(`[lock] Erreur suppression verrou périmé: ${err.message}\n`);
                 // Si le système refuse la suppression (permissions OS), on abandonne proprement
                 // plutôt que de bloquer l'event loop avec un busy-wait synchrone.
                 process.stderr.write('[lock] Impossible de supprimer le verrou périmé (erreur OS).\n');
@@ -97,7 +97,7 @@ function releaseLock() {
         }
         if (!fs.existsSync(LOCK_FILE)) return;
         const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim(), 10);
-        if (pid === process.pid) fs.unlinkSync(LOCK_FILE);
+        if (pid === process.pid) fs.rmSync(LOCK_FILE, { force: true });
     } catch (err) { 
         if (err && ['EPERM', 'EACCES'].includes(err.code)) {
             process.stderr.write(`[lock] Erreur OS critique (Permissions) lors de la libération du verrou: ${err.message}\n`);
@@ -106,14 +106,3 @@ function releaseLock() {
 }
 
 module.exports = { acquireLock, releaseLock, LOCK_FILE };
-
-async function existsSafe(p) {
-    try {
-        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
-        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
-        await fs.promises.access(p);
-        return true;
-    } catch {
-        return false;
-    }
-}

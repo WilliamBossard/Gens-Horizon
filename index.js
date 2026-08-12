@@ -1,3 +1,4 @@
+const { existsSafe } = require('./utils');
 'use strict';
 process.env.NODE_NO_WARNINGS = "1";
 
@@ -53,15 +54,3 @@ const SETTINGS_PATH = path.join(getHorizonDataDir(), 'horizon_settings.json');
         }));
     }
 })();
-
-
-async function existsSafe(p) {
-    try {
-        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
-        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
-        await fs.promises.access(p);
-        return true;
-    } catch {
-        return false;
-    }
-}
