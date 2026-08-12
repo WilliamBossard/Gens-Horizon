@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getHorizonDataDir } = require('./paths');
-const { onShutdown } = require('./utils');
+const { onShutdown, existsSafe } = require('./utils');
 const LOCK_FILE = path.join(getHorizonDataDir(), 'horizon.lock');
 const MAX_LOCK_RETRIES = 5;
 const STALE_LOCK_MS = 2 * 60 * 60 * 1000;

@@ -5,7 +5,7 @@ const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getProvider }                    = require('./provider');
 const { PREFIX_BACKUP, PREFIX_DELTA }    = require('./cloud-constants');
 const { getCloudIndexAndCleanDuplicates } = require('./cloud-operations');
-const { checkConnectivity, readJsonSafe, getCanonicalName, setupProcessHandlers } = require('./utils');
+const { checkConnectivity, readJsonSafe, getCanonicalName, setupProcessHandlers, existsSafe } = require('./utils');
 const { withRetry } = require('./retry');
 
 setupProcessHandlers();

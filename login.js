@@ -10,7 +10,7 @@ const { getConfig } = require('./config');
 const { getTokenPath } = require('./provider');
 const { getProviderName } = require('./paths');
 const { getHorizonDataDir } = require('./paths');
-const { setupProcessHandlers } = require('./utils');
+const { setupProcessHandlers, existsSafe } = require('./utils');
 setupProcessHandlers();
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 function createOAuthState() {

@@ -3,7 +3,7 @@ const fs                          = require('fs');
 const path                        = require('path');
 const crypto                      = require('crypto');
 const { getInstancesFolder, getHorizonDataDir } = require('./paths');
-const { getCanonicalName, setupProcessHandlers, writeJsonAtomic } = require('./utils');
+const { getCanonicalName, setupProcessHandlers, writeJsonAtomic, existsSafe } = require('./utils');
 const { acquireLock, releaseLock } = require('./lock');
 setupProcessHandlers();
 async function rollback() {

@@ -2,7 +2,7 @@
 const fs = require('fs');
 const yauzl = require('yauzl');
 const path = require('path');
-const { withConcurrency, safeRm } = require('./utils');
+const { withConcurrency, safeRm, existsSafe } = require('./utils');
 
 // Wrapper Promise pour yauzl.open
 function openZip(zipPath, options = {}) {
