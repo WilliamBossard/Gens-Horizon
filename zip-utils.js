@@ -92,6 +92,7 @@ async function extractZip(zipPath, targetPath, onProgress) {
                 }
                 zipfile.readEntry();
             } catch (err) {
+                try { zipfile.close(); } catch (e) {}
                 reject(err);
             }
         });
@@ -146,6 +147,7 @@ async function applyDelta(deltaZipPath, targetPath, onProgress) {
                 }
                 zipfile.readEntry();
             } catch (err) {
+                try { zipfile.close(); } catch (e) {}
                 reject(err);
             }
         });

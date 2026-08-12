@@ -15,6 +15,9 @@ const {
     registerTemp,
     unregisterTemp,
     setupProcessHandlers,
+    safeUnlink,
+    safeRm,
+    existsSafe,
 } = require('./utils');
 const { verifyZipIntegrity, extractZip, applyDelta } = require('./zip-utils');
 const { getCloudIndexAndCleanDuplicates } = require('./cloud-operations');
@@ -37,7 +40,7 @@ async function createRollbackSnapshot(instancePath) {
         const entries = await fs.promises.readdir(instDir);
         for (const entry of entries) {
             if (entry.startsWith(`${folderName}_rollback_`) && entry !== path.basename(rollbackTo)) {
-                try { await fs.promises.rm(path.join(instDir, entry), { recursive: true, force: true }); } catch (err) { if (err.code !== 'ENOENT') process.stderr.write(`[sync] Erreur suppression rollback partiel: ${err.message}\n`); }
+                await safeRm(path.join(instDir, entry));
             }
         }
     } catch (err) { 
@@ -47,8 +50,7 @@ async function createRollbackSnapshot(instancePath) {
 }
 async function cleanupRollback(rollbackPath) {
     if (!rollbackPath) return;
-    try { await fs.promises.rm(rollbackPath, { recursive: true, force: true }); }
-    catch (err) { if (err.code !== 'ENOENT') process.stderr.write(`[sync] Erreur nettoyage rollback: ${err.message}\n`); }
+    await safeRm(rollbackPath);
 }
 async function syncAllInstances() {
     const args = process.argv.slice(2);
@@ -230,13 +232,13 @@ async function syncAllInstances() {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 100, instance: inst }));
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: 0, instance: inst }));
                         for (const entry of await fs.promises.readdir(targetPath)) {
-                            try { await fs.promises.rm(path.join(targetPath, entry), { recursive: true, force: true }); } catch (err) { if (err.code !== 'ENOENT') process.stderr.write(`[sync] Erreur suppression avant extraction: ${err.message}\n`); }
+                            await safeRm(path.join(targetPath, entry));
                         }
                         await extractZip(tempBase, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: pct, instance: inst }))
                         );
                     } finally {
-                        await fs.promises.rm(tempBase, { force: true });
+                        await safeUnlink(tempBase);
                         unregisterTemp(tempBase);
                     }
                 }
@@ -254,7 +256,7 @@ async function syncAllInstances() {
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'APPLYING_DELTA', value: pct, instance: inst, delta: delta.name }))
                         );
                     } finally {
-                        await fs.promises.rm(tempDelta, { force: true });
+                        await safeUnlink(tempDelta);
                         unregisterTemp(tempDelta);
                     }
                 }
@@ -282,7 +284,7 @@ async function syncAllInstances() {
                     try {
                         const safeInst = getCanonicalName(inst);
                         const targetPath = path.join(getInstancesFolder(), safeInst);
-                        if (await fs.promises.access(targetPath).then(()=>true).catch(()=>false)) try { await fs.promises.rm(targetPath, { recursive: true, force: true }); } catch (err) { if (err.code !== 'ENOENT') process.stderr.write(`[sync] Erreur suppression nouvelle instance sur échec: ${err.message}\n`); }
+                        if (await existsSafe(targetPath)) await safeRm(targetPath);
                     } catch (err) { process.stderr.write(`[sync] Erreur suppression nouvelle instance: ${err.message}\n`); }
                 }
                 const rollbackMsg = rollbackPath

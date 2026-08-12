@@ -1,6 +1,6 @@
 'use strict';
 const fs       = require('fs');
-const { ZipArchive } = require('archiver'); // AUDIT-21 : import standard d'archiver (ZipArchive n'est pas un export nommé public)
+const archiver       = require('archiver');
 const path     = require('path');
 const { getInstancesFolder, scanInstances, getHorizonDataDir } = require('./paths');
 const { generateManifest, compareManifests }   = require('./scanner');
@@ -18,6 +18,8 @@ const {
     registerTemp,
     unregisterTemp,
     setupProcessHandlers,
+    safeUnlink,
+    existsSafe,
 } = require('./utils');
 const { PREFIX_BACKUP, PREFIX_DELTA, PREFIX_MANIFEST, PREFIX_META } = require('./cloud-constants');
 setupProcessHandlers();
@@ -34,10 +36,10 @@ async function getFolderSize(dir, currentDepth = 0) {
                 try {
                     const stat = await fs.promises.stat(fullPath);
                     total += stat.size;
-                } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); }
+                } catch (_) { if (_ && _.code !== 'ENOENT') process.stderr.write('[upload.js] Erreur silencieuse interceptée: ' + (_.message || _) + '\n'); }
             }
         }
-    } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); }
+    } catch (_) { if (_ && _.code !== 'ENOENT') process.stderr.write('[upload.js] Erreur silencieuse interceptée: ' + (_.message || _) + '\n'); }
     return total;
 }
 async function createFullZip(folder, tempZip, inst) {
@@ -45,7 +47,7 @@ async function createFullZip(folder, tempZip, inst) {
     let lastPct = -1;
     return new Promise((resolve, reject) => {
         const output  = fs.createWriteStream(tempZip);
-        const archive = new ZipArchive({ zlib: { level: 1 } }); // AUDIT-21
+        const archive = archiver('zip', { zlib: { level: 1 } });
         archive.on('progress', (p) => {
             if (realTotal === 0) return;
             const pct = Math.min(100, Math.round(p.fs.processedBytes / realTotal * 100));
@@ -59,13 +61,13 @@ async function createFullZip(folder, tempZip, inst) {
                 process.stderr.write(`[upload] Fichier absent ignoré lors de la compression : ${warn.message}\n`);
             } else {
                 output.destroy();
-                try { if (await existsSafe(tempZip)) await fs.promises.unlink(tempZip); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); }
+                await safeUnlink(tempZip);
                 reject(warn);
             }
         });
-        archive.on('error', async err => { output.destroy(); try { if (await existsSafe(tempZip)) await fs.promises.unlink(tempZip); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); } reject(err); });
+        archive.on('error', async err => { output.destroy(); await safeUnlink(tempZip); reject(err); });
         output.on('close', resolve);
-        output.on('error', async err => { archive.abort(); try { if (await existsSafe(tempZip)) await fs.promises.unlink(tempZip); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); } reject(err); });
+        output.on('error', async err => { archive.abort(); await safeUnlink(tempZip); reject(err); });
         archive.pipe(output);
         archive.directory(folder, false, (data) => {
             return data;
@@ -73,22 +75,27 @@ async function createFullZip(folder, tempZip, inst) {
         archive.finalize();
     });
 }
-function createDeltaZip(folder, changed, deleted, tempZip, inst) {
-    return new Promise(async (resolve, reject) => {
+async function createDeltaZip(folder, changed, deleted, tempZip, inst) {
+    const validPaths = [];
+    for (const relPath of changed) {
+        const absPath = path.join(folder, relPath.replace(/\//g, path.sep));
+        if (await existsSafe(absPath)) validPaths.push({ absPath, relPath });
+    }
+    return new Promise((resolve, reject) => {
         const output = fs.createWriteStream(tempZip);
-        const archive = new ZipArchive({ zlib: { level: 1 } }); // AUDIT-21
+        const archive = archiver('zip', { zlib: { level: 1 } });
         output.on('close', resolve);
         archive.on('warning', async (warn) => {
             if (warn.code === 'ENOENT') {
                 process.stderr.write(`[upload] Fichier absent ignoré lors de la compression delta : ${warn.message}\n`);
             } else {
                 output.destroy();
-                try { if (await existsSafe(tempZip)) await fs.promises.unlink(tempZip); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); }
+                await safeUnlink(tempZip);
                 reject(warn);
             }
         });
-        archive.on('error', async err => { output.destroy(); try { if (await existsSafe(tempZip)) await fs.promises.unlink(tempZip); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); } reject(err); });
-        output.on('error', async err => { archive.abort(); try { if (await existsSafe(tempZip)) await fs.promises.unlink(tempZip); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); } reject(err); });
+        archive.on('error', async err => { output.destroy(); await safeUnlink(tempZip); reject(err); });
+        output.on('error', async err => { archive.abort(); await safeUnlink(tempZip); reject(err); });
         archive.pipe(output);
         const deltaInfo = { deletedFiles: deleted, createdAt: new Date().toISOString() };
         archive.append(JSON.stringify(deltaInfo, null, 2), { name: '__delta__.json' });
@@ -101,10 +108,8 @@ function createDeltaZip(folder, changed, deleted, tempZip, inst) {
                 lastPct = pct;
             }
         });
-        for (const relPath of changed) {
-            const absPath = path.join(folder, relPath.replace(/\//g, path.sep));
-            if (!(await existsSafe(absPath))) continue; // skip silently — archiver gérerait ENOENT via 'warning'
-            archive.file(absPath, { name: relPath });
+        for (const file of validPaths) {
+            archive.file(file.absPath, { name: file.relPath });
         }
         archive.finalize();
     });
@@ -119,7 +124,7 @@ async function upload() {
         process.exit(1);
     }
     const lockHeartbeat = setInterval(async () => {
-        try { await fs.promises.utimes(LOCK_FILE, new Date(), new Date()); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); }
+        try { await fs.promises.utimes(LOCK_FILE, new Date(), new Date()); } catch (_) { if (_ && _.code !== 'ENOENT') process.stderr.write('[upload.js] Erreur silencieuse interceptée: ' + (_.message || _) + '\n'); }
     }, 5 * 60_000);
     try {
         const online = await checkConnectivity();
@@ -270,7 +275,7 @@ async function upload() {
                         await writeJsonAtomicAsync(manifestPath, currentManifest);
                         console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'FULL' }));
                     } finally {
-                        try { if (await existsSafe(tempZip)) await fs.promises.unlink(tempZip); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); }
+                        await safeUnlink(tempZip);
                         unregisterTemp(tempZip);
                     }
                     continue;
@@ -312,7 +317,7 @@ async function upload() {
                         await writeJsonAtomicAsync(manifestPath, currentManifest);
                         console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'REPACK' }));
                     } finally {
-                        try { if (await existsSafe(tempZipRepack)) await fs.promises.unlink(tempZipRepack); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); }
+                        await safeUnlink(tempZipRepack);
                         unregisterTemp(tempZipRepack);
                     }
                     continue;
@@ -355,7 +360,7 @@ async function upload() {
                     const summary = `+${diff.added.length} ajouté(s), ~${diff.modified.length} modifié(s), -${diff.deleted.length} supprimé(s)`;
                     console.log(JSON.stringify({ type: 'SUCCESS', instance: inst, mode: 'SMART', summary }));
                 } finally {
-                    try { if (await existsSafe(tempDelta)) await fs.promises.unlink(tempDelta); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[upload.js] Erreur silencieuse interceptée:', _.message || _); }
+                    await safeUnlink(tempDelta);
                     unregisterTemp(tempDelta);
                 }
             } catch (instErr) {
