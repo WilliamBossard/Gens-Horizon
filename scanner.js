@@ -9,31 +9,8 @@ const IGNORED = new Set([
     'screenshots', 'backups', '.git', 'node_modules',
     '.mixin.out'
 ]);
-async function withConcurrency(limit, tasks) {
-    const executing = new Set();
-    const errors = [];
-    for (let i = 0; i < tasks.length; i++) {
-        const p = tasks[i]()
-            .catch(e => {
-                errors.push(e);
-            })
-            .finally(() => executing.delete(p));
-        executing.add(p);
-        if (executing.size >= limit) {
-            await Promise.race(executing);
-        }
-    }
-    await Promise.all(executing);
-    if (errors.length > 0) {
-        if (errors.length > 1) {
-            process.stderr.write(
-                `[scanner] ${errors.length - 1} erreur(s) secondaire(s) ignorée(s) :\n` +
-                errors.slice(1).map(e => `  - ${e.message}`).join('\n') + '\n'
-            );
-        }
-        throw errors[0];
-    }
-}
+const { withConcurrency } = require('./utils');
+
 function hashFile(filePath) {
     return new Promise((resolve, reject) => {
         const hash   = crypto.createHash('sha256');
@@ -99,4 +76,4 @@ function compareManifests(oldM, newM) {
         added, modified, deleted,
     };
 }
-module.exports = { generateManifest, compareManifests, withConcurrency };
+module.exports = { generateManifest, compareManifests };

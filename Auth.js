@@ -24,7 +24,7 @@ let salt = null;
 async function initAuthData() {
     if (machineID && salt) return;
     
-    if (await fs.promises.access(MACHINE_ID_FILE).then(()=>true).catch(()=>false)) {
+    if (await existsSafe(MACHINE_ID_FILE)) {
         machineID = (await fs.promises.readFile(MACHINE_ID_FILE, 'utf8')).trim();
     } else {
         machineID = crypto.randomBytes(32).toString('hex');
@@ -47,7 +47,7 @@ async function initAuthData() {
         }
     }
 
-    if (await fs.promises.access(SALT_FILE).then(()=>true).catch(()=>false)) {
+    if (await existsSafe(SALT_FILE)) {
         salt = await fs.promises.readFile(SALT_FILE);
     } else {
         salt = crypto.randomBytes(16);
@@ -108,7 +108,7 @@ async function _decrypt(text) {
     }
 }
 async function getSecureToken(filePath) {
-    if (!(await fs.promises.access(filePath).then(()=>true).catch(()=>false))) return null;
+    if (!(await existsSafe(filePath))) return null;
     const raw = (await fs.promises.readFile(filePath, 'utf8')).trim();
     if (raw.startsWith('{')) {
         const parsed = JSON.parse(raw);
@@ -144,3 +144,14 @@ module.exports = {
     encryptToken,
     ...(process.env.NODE_ENV === 'test' ? { _encrypt, _decrypt } : {})
 };
+
+async function existsSafe(p) {
+    try {
+        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
+        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
+        await fs.promises.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}

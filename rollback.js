@@ -12,7 +12,7 @@ async function rollback() {
     const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
     if (!targetInstance) {
         const instDir = getInstancesFolder();
-        if (!(await fs.promises.access(instDir).then(()=>true).catch(()=>false))) {
+        if (!(await existsSafe(instDir))) {
             console.log(JSON.stringify({ type: 'INFO', message: "Aucun dossier d'instances trouvé." }));
             return;
         }
@@ -35,7 +35,7 @@ async function rollback() {
     const targetPath = path.join(instDir, safeInst);
     let rollbackFolder = null;
     let rollbackTime   = 0;
-    if (await fs.promises.access(instDir).then(()=>true).catch(()=>false)) {
+    if (await existsSafe(instDir)) {
         for (const entry of await fs.promises.readdir(instDir)) {
             if (entry.startsWith(`${safeInst}_rollback_`)) {
                 const ts = parseInt(entry.split('_rollback_').pop(), 10);
@@ -55,14 +55,14 @@ async function rollback() {
         return;
     }
     try {
-        if (await fs.promises.access(targetPath).then(()=>true).catch(()=>false)) {
+        if (await existsSafe(targetPath)) {
             await fs.promises.rm(targetPath, { recursive: true, force: true });
         }
         await fs.promises.rename(rollbackFolder, targetPath);
 
         const syncInfoPath = path.join(getHorizonDataDir(), 'last_sync.json');
         let syncState = {};
-        if (await fs.promises.access(syncInfoPath).then(()=>true).catch(()=>false)) {
+        if (await existsSafe(syncInfoPath)) {
             try { syncState = JSON.parse(await fs.promises.readFile(syncInfoPath, 'utf8')); } catch(e){}
         }
         syncState[safeInst] = new Date(rollbackTime).toISOString();
@@ -80,3 +80,15 @@ async function rollback() {
     }
 }
 rollback();
+
+
+async function existsSafe(p) {
+    try {
+        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
+        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
+        await fs.promises.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}

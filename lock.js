@@ -11,9 +11,12 @@ let heartbeatInterval = null;
 
 async function isLockStale() {
     try {
+        const stat = await fs.promises.stat(LOCK_FILE);
+        const age = Date.now() - stat.mtimeMs;
+        if (age > 30000) return true;
+        
         const content = (await fs.promises.readFile(LOCK_FILE, 'utf8')).trim();
         const pid = parseInt(content, 10);
-        const age = Date.now() - (await fs.promises.stat(LOCK_FILE)).mtimeMs;
         if (!isNaN(pid)) {
             try { 
                 process.kill(pid, 0); 
@@ -24,23 +27,24 @@ async function isLockStale() {
             }
         }
         return age > STALE_LOCK_MS;
-    } catch (_) {
+    } catch (err) {
+        if (err.code !== 'ENOENT') process.stderr.write(`[lock] Erreur lecture verrou: ${err.message}\n`);
         return true;
     }
 }
-
 async function acquireLock(attempt = 0) {
     if (attempt >= MAX_LOCK_RETRIES) {
         process.stderr.write("[lock] Impossible d'acquérir le verrou après " + MAX_LOCK_RETRIES + " tentatives.\n");
         return false;
     }
 
-    if (await fs.promises.access(LOCK_FILE).then(()=>true).catch(()=>false)) {
+    if (await existsSafe(LOCK_FILE)) {
         if (await isLockStale()) {
             process.stderr.write('[lock] Verrou périmé détecté — nettoyage.\n');
             try {
                 await fs.promises.unlink(LOCK_FILE);
-            } catch (_) {
+            } catch (err) {
+                if (err.code !== 'ENOENT') process.stderr.write(`[lock] Erreur suppression verrou périmé: ${err.message}\n`);
                 // Si le système refuse la suppression (permissions OS), on abandonne proprement
                 // plutôt que de bloquer l'event loop avec un busy-wait synchrone.
                 process.stderr.write('[lock] Impossible de supprimer le verrou périmé (erreur OS).\n');
@@ -71,8 +75,14 @@ async function acquireLock(attempt = 0) {
                     process.stderr.write(`[lock] Erreur de permission sur le heartbeat du verrou.\n`);
                 }
             });
-        } catch (_) { }
+        } catch (err) { 
+            process.stderr.write(`[lock] Erreur inattendue dans le heartbeat: ${err.message}\n`);
+        }
     }, 5000);
+    
+    if (heartbeatInterval && heartbeatInterval.unref) {
+        heartbeatInterval.unref();
+    }
 
     onShutdown(() => releaseLock());
     process.once('exit', () => releaseLock());
@@ -96,3 +106,14 @@ function releaseLock() {
 }
 
 module.exports = { acquireLock, releaseLock, LOCK_FILE };
+
+async function existsSafe(p) {
+    try {
+        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
+        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
+        await fs.promises.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}

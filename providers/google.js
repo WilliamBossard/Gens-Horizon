@@ -136,11 +136,11 @@ class GoogleProvider {
             pipeline(nodeStream, dest, async (err) => {
                 clearTimeout(timeoutId);
                 if (err) {
-                    try { await fs.promises.unlink(destPath); } catch (_) {}
+                    try { await fs.promises.unlink(destPath); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[google.js] Erreur silencieuse interceptée:', _.message || _); }
                     return reject(err);
                 }
                 if (totalSize > 0 && downloaded < totalSize) {
-                    try { await fs.promises.unlink(destPath); } catch (_) {}
+                    try { await fs.promises.unlink(destPath); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[google.js] Erreur silencieuse interceptée:', _.message || _); }
                     return reject(new Error(`Téléchargement incomplet: ${downloaded} / ${totalSize} bytes reçus.`));
                 }
                 resolve();

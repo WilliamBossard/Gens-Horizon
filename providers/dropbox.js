@@ -45,7 +45,7 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
                 res.on('data', c => errChunks.push(c));
                 res.on('end', async () => {
                     dest.destroy();
-                    try { await fs.promises.unlink(destPath); } catch (_) {}
+                    try { await fs.promises.unlink(destPath); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[dropbox.js] Erreur silencieuse interceptée:', _.message || _); }
                     reject(Object.assign(
                         new Error(`Dropbox download HTTP ${res.statusCode}: ${Buffer.concat(errChunks).toString('utf8').slice(0, 300)}`),
                         { statusCode: res.statusCode }
@@ -56,7 +56,7 @@ function httpsDownload(options, destPath, onProgress, totalSize, redirectCount =
             const onError = async (e) => {
                 res.destroy();
                 dest.destroy();
-                try { await fs.promises.unlink(destPath); } catch (_) {}
+                try { await fs.promises.unlink(destPath); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[dropbox.js] Erreur silencieuse interceptée:', _.message || _); }
                 reject(e);
             };
             res.on('data', chunk => {

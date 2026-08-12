@@ -2,6 +2,7 @@
 const fs = require('fs');
 const yauzl = require('yauzl');
 const path = require('path');
+const { withConcurrency, safeRm } = require('./utils');
 
 // Wrapper Promise pour yauzl.open
 function openZip(zipPath, options = {}) {
@@ -43,7 +44,7 @@ async function verifyZipIntegrity(zipPath) {
             throw new Error(`Le fichier ZIP est tronque ou invalide : ${openErr.message}`);
         }
     } catch (e) {
-        if (fd) { try { await fd.close(); } catch (_) {} }
+        if (fd) { try { await fd.close(); } catch (err) { if (err.code !== 'EBADF') console.error("Close fd failed", err); } }
         throw new Error(`Impossible de lire le fichier telecharge : ${e.message}`);
     }
 }
@@ -60,67 +61,49 @@ async function extractZip(zipPath, targetPath, onProgress) {
     const total = zipfile.entryCount;
     let count = 0;
     const limit = 20;
-    const active = new Set();
-    let errs = [];
+    const entries = [];
 
-    return new Promise((resolve, reject) => {
-        zipfile.on('error', err => {
-            errs.push(err);
-            reject(err);
+    await new Promise((resolve, reject) => {
+        zipfile.on('error', reject);
+        zipfile.on('end', resolve);
+        zipfile.on('entry', entry => {
+            entries.push(entry);
+            zipfile.readEntry();
         });
+        zipfile.readEntry();
+    }).catch(e => {
+        try { zipfile.close(); } catch (_) {}
+        throw e;
+    });
 
-        zipfile.on('end', async () => {
-            await Promise.all(active);
-            if (errs.length > 0) reject(errs[0]);
-            else resolve();
-        });
-
-        zipfile.on('entry', async (entry) => {
-            if (errs.length > 0) return; // Arret
-            
+    try {
+        const tasks = entries.map(entry => async () => {
             const dest = path.join(targetPath, entry.fileName);
             const resDest = path.resolve(dest);
             if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                zipfile.readEntry(); // Skip
                 return;
             }
 
-            try {
-                if (/\/$/.test(entry.fileName)) { // Dossier
-                    await fs.promises.mkdir(dest, { recursive: true });
-                    zipfile.readEntry();
-                } else {
-                    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-                    const readStream = await openZipStream(zipfile, entry);
-                    
-                    const p = new Promise((res, rej) => {
-                        readStream.pipe(fs.createWriteStream(dest))
-                            .on('finish', res)
-                            .on('error', rej);
-                    }).catch(e => { errs.push(e); });
-                    
-                    active.add(p);
-                    p.then(() => active.delete(p));
-                    
-                    count++;
-                    if (onProgress && count % 50 === 0) {
-                        const fakePct = Math.min(99, Math.floor((count / total) * 100));
-                        onProgress(fakePct);
-                    }
-
-                    if (active.size >= limit) {
-                        await Promise.race(active);
-                    }
-                    zipfile.readEntry(); // Passe a la suivante
+            if (/\/$/.test(entry.fileName)) {
+                await fs.promises.mkdir(dest, { recursive: true });
+            } else {
+                await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+                const readStream = await openZipStream(zipfile, entry);
+                const { pipeline } = require('stream/promises');
+                await pipeline(readStream, fs.createWriteStream(dest));
+                count++;
+                if (onProgress && count % 50 === 0) {
+                    const fakePct = Math.min(99, Math.floor((count / total) * 100));
+                    onProgress(fakePct);
                 }
-            } catch (e) {
-                errs.push(e);
-                reject(e);
             }
         });
-
-        zipfile.readEntry();
-    });
+        await withConcurrency(limit, tasks);
+    } catch (e) {
+        throw e;
+    } finally {
+        try { zipfile.close(); } catch (_) {}
+    }
 }
 
 
@@ -135,85 +118,84 @@ async function applyDelta(deltaZipPath, targetPath, onProgress) {
     const resolvedTarget = path.resolve(targetPath);
     let deletedFiles = [];
     const limit = 20;
-    const active = new Set();
-    let errs = [];
+    const entries = [];
 
-    return new Promise((resolve, reject) => {
-        zipfile.on('error', err => {
-            errs.push(err);
-            reject(err);
+    await new Promise((resolve, reject) => {
+        zipfile.on('error', reject);
+        zipfile.on('end', resolve);
+        zipfile.on('entry', entry => {
+            entries.push(entry);
+            zipfile.readEntry();
         });
+        zipfile.readEntry();
+    }).catch(e => {
+        try { zipfile.close(); } catch (_) {}
+        throw e;
+    });
 
-        zipfile.on('end', async () => {
-            await Promise.all(active);
-            if (errs.length > 0) return reject(errs[0]);
-            
-            // Suppression differee
-            for (const relPath of deletedFiles) {
-                const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
-                if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) continue;
-                try { if (await fs.promises.access(absPath).then(()=>true).catch(()=>false)) await fs.promises.rm(absPath, { recursive: true, force: true }); } catch (_) { }
-            }
-            resolve();
-        });
-
-        zipfile.on('entry', async (entry) => {
-            if (errs.length > 0) return;
-            
+    try {
+        const tasks = [];
+        
+        // Phase 1 : Extraction (en isolant d'abord __delta__.json)
+        for (const entry of entries) {
             if (entry.fileName === '__delta__.json') {
-                try {
-                    const readStream = await openZipStream(zipfile, entry);
-                    let data = '';
-                    readStream.on('data', chunk => data += chunk);
-                    readStream.on('end', () => {
-                        try { deletedFiles = JSON.parse(data).deletedFiles || []; } catch (_) { }
-                        zipfile.readEntry();
-                    });
-                } catch (e) {
-                    errs.push(e); reject(e);
+                const readStream = await openZipStream(zipfile, entry);
+                let data = '';
+                for await (const chunk of readStream) {
+                    data += chunk;
                 }
-                return;
+                try { deletedFiles = JSON.parse(data).deletedFiles || []; } catch (_) {}
+                continue;
             }
 
-            const dest = path.join(targetPath, entry.fileName);
-            const resDest = path.resolve(dest);
-            if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) {
-                zipfile.readEntry();
-                return;
-            }
+            tasks.push(async () => {
+                const dest = path.join(targetPath, entry.fileName);
+                const resDest = path.resolve(dest);
+                if (!resDest.startsWith(resolvedTarget + path.sep) && resDest !== resolvedTarget) return;
 
-            try {
                 if (/\/$/.test(entry.fileName)) {
                     await fs.promises.mkdir(dest, { recursive: true });
-                    zipfile.readEntry();
                 } else {
                     await fs.promises.mkdir(path.dirname(dest), { recursive: true });
                     const readStream = await openZipStream(zipfile, entry);
-                    
-                    const p = new Promise((res, rej) => {
-                        readStream.pipe(fs.createWriteStream(dest))
-                            .on('finish', res)
-                            .on('error', rej);
-                    }).catch(e => { errs.push(e); });
-                    
-                    active.add(p);
-                    p.then(() => active.delete(p));
-                    
-                    if (active.size >= limit) {
-                        await Promise.race(active);
-                    }
-                    zipfile.readEntry();
+                    const { pipeline } = require('stream/promises');
+                    await pipeline(readStream, fs.createWriteStream(dest));
                 }
-            } catch (e) {
-                errs.push(e);
-                reject(e);
+            });
+        }
+        
+        await withConcurrency(limit, tasks);
+
+        // Phase 2 : Suppression différée (Optimisation concurrente par lots via withConcurrency)
+        const deleteTasks = deletedFiles.map(relPath => async () => {
+            const absPath = path.join(targetPath, relPath.replace(/\//g, path.sep));
+            if (!path.resolve(absPath).startsWith(resolvedTarget + path.sep)) return;
+            
+            if (await existsSafe(absPath)) {
+                await safeRm(absPath);
             }
         });
+        await withConcurrency(limit, deleteTasks);
 
-        zipfile.readEntry();
-    });
+    } catch (e) {
+        throw e;
+    } finally {
+        try { zipfile.close(); } catch (_) {}
+    }
 }
 
 module.exports = {
     verifyZipIntegrity, extractZip, applyDelta
 };
+
+
+async function existsSafe(p) {
+    try {
+        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
+        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
+        await fs.promises.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}

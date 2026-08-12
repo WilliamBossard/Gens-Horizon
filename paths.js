@@ -40,7 +40,7 @@ async function scanInstances() {
     const instancesDir = getInstancesFolder();
     try {
         await fs.promises.mkdir(instancesDir, { recursive: true });
-    } catch (_) {}
+    } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[paths.js] Erreur silencieuse interceptée:', _.message || _); }
     let items;
     try {
         items = await fs.promises.readdir(instancesDir, { withFileTypes: true });
@@ -53,7 +53,7 @@ async function scanInstances() {
         try {
             await fs.promises.access(path.join(instancesDir, item.name, 'instance.json'));
             instances.push(item.name);
-        } catch (_) {}
+        } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[paths.js] Erreur silencieuse interceptée:', _.message || _); }
     }
     return instances;
 }

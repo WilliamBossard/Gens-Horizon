@@ -165,7 +165,7 @@ async function loginOneDrive() {
 async function loginPlayer() {
     const settingsPath = path.join(getHorizonDataDir(), 'horizon_settings.json');
     const settings = await (async () => {
-        try { return await fs.promises.access(settingsPath).then(()=>true).catch(()=>false) ? JSON.parse(await fs.promises.readFile(settingsPath, 'utf8')) : {}; } catch { return {}; }
+        try { return await existsSafe(settingsPath) ? JSON.parse(await fs.promises.readFile(settingsPath, 'utf8')) : {}; } catch { return {}; }
     })();
     const providerName = getProviderName(settings);
     console.log(JSON.stringify({ type: 'INFO', message: `Connexion via ${providerName}...` }));
@@ -179,16 +179,27 @@ async function loginPlayer() {
     const { encryptToken } = require('./Auth');
     const tokenPath = await getTokenPath(providerName);
     await encryptToken(tokenPath, tokens);
-    if (await fs.promises.access(settingsPath).then(()=>true).catch(()=>false)) {
+    if (await existsSafe(settingsPath)) {
         try {
             const sets = JSON.parse(await fs.promises.readFile(settingsPath, 'utf8'));
             if (sets.provider !== providerName) {
                 sets.provider = providerName;
                 await fs.promises.writeFile(settingsPath, JSON.stringify(sets, null, 2));
             }
-        } catch (_) { }
+        } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[login.js] Erreur silencieuse interceptée:', _.message || _); }
     }
 }
 loginPlayer()
     .then(() => { console.log(JSON.stringify({ type: 'SUCCESS', message: 'Jeton sauvegardé avec succès.' })); process.exit(0); })
     .catch(err => { console.log(JSON.stringify({ type: 'ERROR', message: err.message })); process.exit(1); });
+
+async function existsSafe(p) {
+    try {
+        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
+        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
+        await fs.promises.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}

@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getProvider } = require('./provider');
-const { generateManifest, withConcurrency } = require('./scanner');
+const { generateManifest } = require('./scanner');
 const { acquireLock, releaseLock } = require('./lock');
 const { withRetry } = require('./retry');
 const {

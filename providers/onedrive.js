@@ -152,7 +152,7 @@ class OneDriveProvider {
                     req.on('error', resolve);
                     req.end();
                 });
-            } catch (_) { }
+            } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[onedrive.js] Erreur silencieuse interceptée:', _.message || _); }
             throw error;
         } finally {
             await fd.close();
@@ -238,7 +238,7 @@ class OneDriveProvider {
                 if (res.statusCode < 200 || res.statusCode >= 300) {
                     res.resume();
                     dest.destroy();
-                    try { await fs.promises.unlink(destPath); } catch (_) { }
+                    try { await fs.promises.unlink(destPath); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[onedrive.js] Erreur silencieuse interceptée:', _.message || _); }
                     return reject(Object.assign(
                         new Error(`OneDrive download HTTP ${res.statusCode}`),
                         { statusCode: res.statusCode }
@@ -247,7 +247,7 @@ class OneDriveProvider {
                 const onError = async (e) => {
                     res.destroy();
                     dest.destroy();
-                    try { await fs.promises.unlink(destPath); } catch (_) { }
+                    try { await fs.promises.unlink(destPath); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[onedrive.js] Erreur silencieuse interceptée:', _.message || _); }
                     reject(e);
                 };
                 res.on('data', chunk => {
@@ -277,7 +277,7 @@ class OneDriveProvider {
             await this.downloadFile(fileId, tmp, null, 0);
             return JSON.parse(await fs.promises.readFile(tmp, 'utf8'));
         } finally {
-            try { await fs.promises.unlink(tmp); } catch (_) { }
+            try { await fs.promises.unlink(tmp); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[onedrive.js] Erreur silencieuse interceptée:', _.message || _); }
             unregisterTemp(tmp);
         }
     }

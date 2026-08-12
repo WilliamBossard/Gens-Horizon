@@ -20,7 +20,7 @@ const { getHorizonDataDir } = require('./paths');
 
 const SETTINGS_PATH = path.join(getHorizonDataDir(), 'horizon_settings.json');
 (async () => {
-    if (!(await fs.promises.access(SETTINGS_PATH).then(()=>true).catch(()=>false))) {
+    if (!(await existsSafe(SETTINGS_PATH))) {
         const defaultSettings = {
             systemEnabled: true,
             syncMode: 'SMART',
@@ -53,3 +53,15 @@ const SETTINGS_PATH = path.join(getHorizonDataDir(), 'horizon_settings.json');
         }));
     }
 })();
+
+
+async function existsSafe(p) {
+    try {
+        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
+        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
+        await fs.promises.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}

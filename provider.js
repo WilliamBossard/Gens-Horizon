@@ -15,23 +15,23 @@ const { getHorizonDataDir, getProviderName } = require('./paths');
 async function getTokenPath(providerName) {
     const base = getHorizonDataDir();
     const specific = path.join(base, `token_${providerName}.json`);
-    if (await fs.promises.access(specific).then(()=>true).catch(()=>false)) return specific;
+    if (await existsSafe(specific)) return specific;
     if (providerName === 'google') {
         const legacy = path.join(base, 'token.json');
-        if (await fs.promises.access(legacy).then(()=>true).catch(()=>false)) return legacy;
+        if (await existsSafe(legacy)) return legacy;
     }
     return specific;
 }
 async function getProvider(settings) {
     const name      = getProviderName(settings);
     const tokenPath = await getTokenPath(name);
-    if (!(await fs.promises.access(tokenPath).then(()=>true).catch(()=>false))) return null;
+    if (!(await existsSafe(tokenPath))) return null;
     let tokenData;
     try {
         tokenData = await getSecureToken(tokenPath);
     } catch (e) {
         process.stderr.write(`[provider] Token illisible pour "${name}" : ${e.message}\n`);
-        try { await fs.promises.unlink(tokenPath); } catch (_) {}
+        try { await fs.promises.unlink(tokenPath); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[provider.js] Erreur silencieuse interceptée:', _.message || _); }
         return null;
     }
     if (!tokenData) return null;
@@ -53,3 +53,15 @@ async function getProvider(settings) {
     }
 }
 module.exports = { getProvider, getTokenPath };
+
+
+async function existsSafe(p) {
+    try {
+        // Enforce preload sandbox check if it's in renderer context and enforceReadSandbox exists
+        if (typeof enforceReadSandbox !== 'undefined') p = enforceReadSandbox(p, true);
+        await fs.promises.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}
