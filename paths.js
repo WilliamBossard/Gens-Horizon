@@ -79,4 +79,4 @@ function getProviderName(settings) {
     return (settings && settings.provider) || 'google';
 }
 
-module.exports = { getHorizonDataDir, getInstancesFolder, scanInstances, getProviderName };
+module.exports = { getHorizonDataDir, getInstancesFolder, scanInstances, getProviderName, getAppDataPath };
