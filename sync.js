@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getProvider } = require('./provider');
-const { generateManifest } = require('./scanner');
+const { generateManifest, IGNORED } = require('./scanner');
 const { acquireLock, releaseLock } = require('./lock');
 const { withRetry } = require('./retry');
 const {
@@ -78,7 +78,18 @@ async function syncAllInstances() {
         const force = args.includes('--force');
         const isDelete = args.includes('--delete');
         const COMMANDS = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
-        const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
+        let targetInstance = null;
+        const instIdx = args.indexOf('--instance');
+        if (instIdx !== -1 && args[instIdx + 1] && !args[instIdx + 1].startsWith('--')) {
+            targetInstance = args[instIdx + 1];
+        } else {
+            const eqArg = args.find(a => a.startsWith('--instance='));
+            if (eqArg) {
+                targetInstance = eqArg.split('=')[1];
+            } else {
+                targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
+            }
+        }
         let settings = { syncMode: 'SMART', maxRetries: 3, retryBaseDelay: 1500 };
         if (await fs.promises.access(settingsPath).then(()=>true).catch(()=>false)) {
             try { settings = { ...settings, ...JSON.parse(await fs.promises.readFile(settingsPath, 'utf8')) }; } catch (err) { process.stderr.write(`[sync] Erreur lecture settings: ${err.message}\n`); }
@@ -113,6 +124,7 @@ async function syncAllInstances() {
                     try {
                         const data = await provider.downloadJSON(cloudIndex[mName].id);
                         metaCache.set(instName, data);
+                        await writeJsonAtomicAsync(localMetaPath, data);
                     } catch (err) { process.stderr.write(`[sync] Erreur téléchargement meta cloud: ${err.message}\n`); }
                 }
             });
@@ -131,23 +143,11 @@ async function syncAllInstances() {
                 let realName = instName;
                 let iconData = null;
                 let loader = null;
-                if (isList) {
-                    if (metaCache.has(instName)) {
-                        const meta = metaCache.get(instName);
-                        if (meta.realName) realName = meta.realName;
-                        if (meta.iconData) iconData = meta.iconData;
-                        if (meta.loader) loader = meta.loader;
-                    }
-                } else {
-                    const localMetaPath = path.join(dataDir, `meta_${instName}.json`);
-                    if (await fs.promises.access(localMetaPath).then(()=>true).catch(()=>false)) {
-                        try {
-                            const metaObj = JSON.parse(await fs.promises.readFile(localMetaPath, 'utf8'));
-                            if (metaObj.realName) realName = metaObj.realName;
-                            if (metaObj.iconData) iconData = metaObj.iconData;
-                            if (metaObj.loader) loader = metaObj.loader;
-                        } catch (err) { process.stderr.write(`[sync] Erreur lecture meta (list): ${err.message}\n`); }
-                    }
+                if (metaCache.has(instName)) {
+                    const meta = metaCache.get(instName);
+                    if (meta.realName) realName = meta.realName;
+                    if (meta.iconData) iconData = meta.iconData;
+                    if (meta.loader) loader = meta.loader;
                 }
                 richList.push({
                     name: instName,
@@ -162,7 +162,11 @@ async function syncAllInstances() {
             console.log(JSON.stringify({ type: 'CLOUD_LIST', data: list, richData: richList }));
             return;
         }
-        if (isDelete && targetInstance) {
+        if (isDelete) {
+            if (!targetInstance) {
+                console.log(JSON.stringify({ type: 'ERROR', message: "Veuillez spécifier l'instance à supprimer." }));
+                return;
+            }
             await deleteInstance(targetInstance, cloudIndex, provider, retryOpts);
             return;
         }
@@ -203,7 +207,8 @@ async function syncAllInstances() {
                     })
                     .filter(d => !isNaN(d.ts))
                     .sort((a, b) => a.ts - b.ts);
-                const pendingDeltas = deltaFiles.filter(d => d.ts > lastSync || force);
+                const CLOCK_SKEW_TOLERANCE_MS = 60_000;
+                const pendingDeltas = deltaFiles.filter(d => (d.ts > lastSync || force) && d.ts >= (baseTime - CLOCK_SKEW_TOLERANCE_MS));
                 const baseChanged = baseTime > lastSync || force;
                 if (!baseChanged && pendingDeltas.length === 0) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${inst} est déjà à jour.` }));
@@ -233,7 +238,9 @@ async function syncAllInstances() {
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'VERIFYING', value: 100, instance: inst }));
                         console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: 0, instance: inst }));
                         for (const entry of await fs.promises.readdir(targetPath)) {
-                            await safeRm(path.join(targetPath, entry));
+                            if (!IGNORED.has(entry)) {
+                                await safeRm(path.join(targetPath, entry));
+                            }
                         }
                         await extractZip(tempBase, targetPath,
                             (pct) => console.log(JSON.stringify({ type: 'PROGRESS', step: 'EXTRACTING', value: pct, instance: inst }))
@@ -281,29 +288,40 @@ async function syncAllInstances() {
                         : `${deltasApplied} delta(s) appliqué(s).`,
                 }));
             } catch (instErr) {
-                if (isNewInstance) {
+                const safeInst = getCanonicalName(inst);
+                const targetPath = path.join(getInstancesFolder(), safeInst);
+                let restored = false;
+                if (rollbackPath) {
                     try {
-                        const safeInst = getCanonicalName(inst);
-                        const targetPath = path.join(getInstancesFolder(), safeInst);
+                        if (await existsSafe(targetPath)) await safeRm(targetPath);
+                        await fs.promises.rename(rollbackPath, targetPath);
+                        restored = true;
+                        process.stderr.write(`[sync] Instance restaurée automatiquement suite à l'erreur : ${inst}\n`);
+                    } catch (rErr) {
+                        process.stderr.write(`[sync] Échec restauration automatique: ${rErr.message}\n`);
+                    }
+                } else if (isNewInstance) {
+                    try {
                         if (await existsSafe(targetPath)) await safeRm(targetPath);
                     } catch (err) { process.stderr.write(`[sync] Erreur suppression nouvelle instance: ${err.message}\n`); }
                 }
-                const rollbackMsg = rollbackPath
+                const rollbackMsg = (rollbackPath && !restored)
                     ? ` Un rollback est disponible (lance --rollback ${inst} pour restaurer).`
-                    : '';
+                    : (restored ? ' (Instance restaurée dans son état initial).' : '');
                 console.log(JSON.stringify({
                     type: 'ERROR',
                     instance: inst,
                     message: instErr.message + rollbackMsg,
                     errorCode: instErr.errorCode || undefined,
-                    hasRollback: !!rollbackPath,
+                    hasRollback: !!rollbackPath && !restored,
                 }));
             }
         }
     } catch (e) {
+        const errCode = e.code || e.cause?.code;
         if (e.message && (e.message.includes('invalid_grant') || e.message.includes('invalid_token'))) {
             console.log(JSON.stringify({ type: 'ERROR', message: 'Session expirée. Veuillez ré-associer votre compte.' }));
-        } else if (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN' || e.code === 'ECONNREFUSED') {
+        } else if (errCode === 'ENOTFOUND' || errCode === 'EAI_AGAIN' || errCode === 'ECONNREFUSED' || errCode === 'ETIMEDOUT') {
             console.log(JSON.stringify({ type: 'OFFLINE', message: 'Internet indisponible.' }));
         } else {
             console.log(JSON.stringify({ type: 'ERROR', message: e.message }));

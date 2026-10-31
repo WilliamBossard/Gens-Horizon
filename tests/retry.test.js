@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { withRetry } = require('../retry');
+const { withRetry, isRetryable } = require('../retry');
 
 test('withRetry succeeds on first try', async () => {
     let attempts = 0;
@@ -44,4 +44,36 @@ test('withRetry fails after max retries', async () => {
         assert.strictEqual(err.message, 'fail');
         assert.strictEqual(attempts, 3);
     }
+});
+
+test('isRetryable identifies retryable conditions including err.cause and status', () => {
+    assert.strictEqual(isRetryable(null), false);
+    
+    // Direct error code
+    const errConn = new Error('network drop');
+    errConn.code = 'ECONNRESET';
+    assert.strictEqual(isRetryable(errConn), true);
+    
+    // Nested cause error code (like native fetch)
+    const fetchErr = new Error('fetch failed');
+    fetchErr.cause = { code: 'ENOTFOUND' };
+    assert.strictEqual(isRetryable(fetchErr), true);
+    
+    // Status codes
+    const err429 = new Error('Rate limit');
+    err429.statusCode = 429;
+    assert.strictEqual(isRetryable(err429), true);
+    
+    const err503 = new Error('Service Unavailable');
+    err503.status = 503;
+    assert.strictEqual(isRetryable(err503), true);
+    
+    // Non-retryable
+    const err401 = new Error('Unauthorized');
+    err401.statusCode = 401;
+    assert.strictEqual(isRetryable(err401), false);
+    
+    const err403 = new Error('Forbidden');
+    err403.statusCode = 403;
+    assert.strictEqual(isRetryable(err403), false);
 });

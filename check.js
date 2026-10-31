@@ -60,7 +60,7 @@ async function check() {
             const localPath  = path.join(getInstancesFolder(), safeKey);
             const localExists = await existsSafe(localPath);
 
-            if (localExists && effectiveCloudTime > lastSyncTime) {
+            if (!localExists || effectiveCloudTime > lastSyncTime) {
                 report.status = 'UPDATE_AVAILABLE';
                 report.updates.push(instName);
             }
@@ -73,7 +73,10 @@ async function check() {
         }));
 
     } catch (e) {
-        if (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN' || e.code === 'ECONNREFUSED') {
+        const errCode = e.code || e.cause?.code;
+        if (e.message && (e.message.includes('invalid_grant') || e.message.includes('invalid_token') || e.message.includes('AUTH_EXPIRED'))) {
+            console.log(JSON.stringify({ type: 'CHECK_RESULT', status: 'NOT_LOGGED_IN', updates: [], message: 'Session expirée.' }));
+        } else if (errCode === 'ENOTFOUND' || errCode === 'EAI_AGAIN' || errCode === 'ECONNREFUSED' || errCode === 'ETIMEDOUT') {
             console.log(JSON.stringify({ type: 'OFFLINE', status: 'OFFLINE', message: 'Internet indisponible.' }));
         } else {
             console.log(JSON.stringify({ type: 'ERROR', status: 'ERROR', message: e.message }));

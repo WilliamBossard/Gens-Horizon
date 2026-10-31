@@ -4,6 +4,7 @@ const { withRetry } = require('./retry');
 /**
  * Récupère la liste de tous les fichiers du Cloud appartenant à Horizon
  * et supprime automatiquement les doublons (noms de fichiers identiques).
+ * Conserve toujours la version la plus récente en comparant les modifiedTime.
  *
  * @param {Object} provider L'instance du fournisseur Cloud
  * @param {Object} retryOpts Options de réessai
@@ -16,16 +17,24 @@ async function getCloudIndexAndCleanDuplicates(provider, retryOpts, logPrefix) {
     const deletePromises = [];
 
     for (const f of cloudFiles) {
-        if (!cloudIndex[f.name]) {
+        const existing = cloudIndex[f.name];
+        if (!existing) {
             cloudIndex[f.name] = f;
         } else {
+            const fTime = new Date(f.modifiedTime).getTime() || 0;
+            const existTime = new Date(existing.modifiedTime).getTime() || 0;
+            const isFNewer = fTime > existTime || (fTime === existTime && (parseInt(f.size, 10) || 0) > (parseInt(existing.size, 10) || 0));
+            const toKeep = isFNewer ? f : existing;
+            const toDelete = isFNewer ? existing : f;
+            cloudIndex[f.name] = toKeep;
+
             deletePromises.push(
-                withRetry(() => provider.deleteFile(f.id), { ...retryOpts, label: `deleteDuplicate(${f.name})` })
+                withRetry(() => provider.deleteFile(toDelete.id), { ...retryOpts, label: `deleteDuplicate(${toDelete.name})` })
                     .then(() => {
-                        process.stderr.write(`${logPrefix} Doublon supprimé du Cloud : ${f.name}\n`);
+                        process.stderr.write(`${logPrefix} Doublon supprimé du Cloud : ${toDelete.name}\n`);
                     })
                     .catch((e) => {
-                        process.stderr.write(`${logPrefix} Échec suppression doublon ${f.name} : ${e.message}\n`);
+                        process.stderr.write(`${logPrefix} Échec suppression doublon ${toDelete.name} : ${e.message}\n`);
                     })
             );
         }

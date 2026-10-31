@@ -7,14 +7,22 @@ const RETRYABLE_CODES = new Set([
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 function isRetryable(err) {
     if (!err) return false;
-    if (RETRYABLE_CODES.has(err.code))        return true;
-    if (RETRYABLE_STATUS.has(err.statusCode)) return true;
+    const code = err.code || err.cause?.code;
+    if (code && RETRYABLE_CODES.has(code)) return true;
+    const status = err.statusCode || err.status || err.response?.status || err.cause?.statusCode || err.cause?.status;
+    if (status && RETRYABLE_STATUS.has(status)) return true;
+    if (status === 401 || status === 403) return false;
     const msg = (err.message || '').toLowerCase();
-    if (err.statusCode === 401 || err.statusCode === 403) return false;
+    const causeMsg = (err.cause?.message || '').toLowerCase();
     return msg.includes('timeout')
         || msg.includes('socket hang up')
         || msg.includes('network error')
-        || msg.includes('econnreset');
+        || msg.includes('fetch failed')
+        || msg.includes('econnreset')
+        || causeMsg.includes('timeout')
+        || causeMsg.includes('socket hang up')
+        || causeMsg.includes('network error')
+        || causeMsg.includes('econnreset');
 }
 async function withRetry(fn, { maxRetries = 3, baseDelay = 1500, label = 'opération' } = {}) {
     for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {

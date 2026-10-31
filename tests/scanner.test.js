@@ -1,6 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { generateManifest, compareManifests } = require('../scanner');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { generateManifest, compareManifests, IGNORED } = require('../scanner');
 const { withConcurrency } = require('../utils');
 
 test('compareManifests detects changes', () => {
@@ -43,4 +46,35 @@ test('withConcurrency limits correctly', async () => {
 
     await withConcurrency(3, tasks);
     assert.strictEqual(maxRunning, 3);
+});
+
+test('scanner exports IGNORED and ignores specified directories in generateManifest', async () => {
+    assert.ok(IGNORED instanceof Set);
+    assert.ok(IGNORED.has('logs'));
+    assert.ok(IGNORED.has('assets'));
+    assert.ok(IGNORED.has('backups'));
+    assert.ok(IGNORED.has('screenshots'));
+    assert.ok(IGNORED.has('session.lock'));
+
+    const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'horizon-scanner-test-'));
+    try {
+        await fs.promises.writeFile(path.join(tmpDir, 'options.txt'), 'gamma:1.0');
+        await fs.promises.mkdir(path.join(tmpDir, 'saves'), { recursive: true });
+        await fs.promises.writeFile(path.join(tmpDir, 'saves', 'level.dat'), 'data');
+
+        // Create ignored directories
+        await fs.promises.mkdir(path.join(tmpDir, 'logs'), { recursive: true });
+        await fs.promises.writeFile(path.join(tmpDir, 'logs', 'latest.log'), 'log content');
+        await fs.promises.mkdir(path.join(tmpDir, 'screenshots'), { recursive: true });
+        await fs.promises.writeFile(path.join(tmpDir, 'screenshots', 'shot1.png'), 'png data');
+
+        const manifest = await generateManifest(tmpDir);
+
+        assert.ok('options.txt' in manifest);
+        assert.ok('saves/level.dat' in manifest);
+        assert.ok(!('logs/latest.log' in manifest));
+        assert.ok(!('screenshots/shot1.png' in manifest));
+    } finally {
+        await fs.promises.rm(tmpDir, { recursive: true, force: true });
+    }
 });

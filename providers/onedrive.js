@@ -3,6 +3,7 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const Auth = require('../Auth');
 const GRAPH_HOST = 'graph.microsoft.com';
 const APP_ROOT = '/v1.0/me/drive/special/approot';
@@ -55,15 +56,21 @@ class OneDriveProvider {
         if (!res.body.access_token) throw new Error('OneDrive token refresh failed: ' + (res.body.error_description || res.body.error || res.statusCode));
         this._token = res.body.access_token;
         if (res.body.refresh_token) this._refresh = res.body.refresh_token;
-        Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'Bearer' });
+        await Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'Bearer' });
     }
     async _call(method, graphPath, body = null, _retried = false) {
         let res = await graphRequest(method, graphPath, this._token, body);
         if (res.statusCode === 401 && !_retried) { await this._refreshToken(); return this._call(method, graphPath, body, true); }
-        if (res.statusCode === 401) throw new Error('OneDrive : token invalide après refresh (accès révoqué ?)');
+        if (res.statusCode === 401) {
+            const err = new Error('OneDrive : token invalide après refresh (accès révoqué ?)');
+            err.statusCode = 401;
+            throw err;
+        }
         if (res.statusCode >= 400) {
             const msg = res.body?.error?.message || res.body?.message || JSON.stringify(res.body).slice(0, 300);
-            throw new Error(`OneDrive API ${res.statusCode}: ${msg}`);
+            const err = new Error(`OneDrive API ${res.statusCode}: ${msg}`);
+            err.statusCode = res.statusCode;
+            throw err;
         }
         return res;
     }
@@ -104,7 +111,7 @@ class OneDriveProvider {
         
         try {
             while (offset < total) {
-                const end = Math.min(offset + CHUNK_SIZE, total);
+                const end = Math.min(offset + CHUNK, total);
                 const bytesToRead = end - offset;
                 const buffer = Buffer.alloc(bytesToRead);
                 await fd.read(buffer, 0, bytesToRead, offset);
@@ -130,7 +137,11 @@ class OneDriveProvider {
                     });
                     req.on('error', reject); req.write(buffer); req.end();
                 });
-                if (res.statusCode >= 400) throw new Error(`OneDrive chunk error ${res.statusCode}`);
+                if (res.statusCode >= 400) {
+                    const err = new Error(`OneDrive chunk error ${res.statusCode}`);
+                    err.statusCode = res.statusCode;
+                    throw err;
+                }
                 offset = end;
                 if (onProgress && total > 0) {
                     const pct = isLast ? 100 : Math.min(99, Math.round(offset / total * 100));
@@ -271,7 +282,8 @@ class OneDriveProvider {
         });
     }
     async downloadJSON(fileId) {
-        const tmp = path.join(os.tmpdir(), `horizon_db_${Date.now()}.json`);
+        const rand = crypto.randomBytes(4).toString('hex');
+        const tmp = path.join(os.tmpdir(), `horizon_db_${Date.now()}_${rand}.json`);
         registerTemp(tmp);
         try {
             await this.downloadFile(fileId, tmp, null, 0);

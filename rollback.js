@@ -5,11 +5,23 @@ const crypto                      = require('crypto');
 const { getInstancesFolder, getHorizonDataDir } = require('./paths');
 const { getCanonicalName, setupProcessHandlers, writeJsonAtomic, existsSafe } = require('./utils');
 const { acquireLock, releaseLock } = require('./lock');
+const { generateManifest } = require('./scanner');
 setupProcessHandlers();
 async function rollback() {
     const args           = process.argv.slice(2);
     const COMMANDS       = new Set(['rollback']);
-    const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
+    let targetInstance = null;
+    const instIdx = args.indexOf('--instance');
+    if (instIdx !== -1 && args[instIdx + 1] && !args[instIdx + 1].startsWith('--')) {
+        targetInstance = args[instIdx + 1];
+    } else {
+        const eqArg = args.find(a => a.startsWith('--instance='));
+        if (eqArg) {
+            targetInstance = eqArg.split('=')[1];
+        } else {
+            targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
+        }
+    }
     if (!targetInstance) {
         const instDir = getInstancesFolder();
         if (!(await existsSafe(instDir))) {
@@ -65,8 +77,15 @@ async function rollback() {
         if (await existsSafe(syncInfoPath)) {
             try { syncState = JSON.parse(await fs.promises.readFile(syncInfoPath, 'utf8')); } catch(err){ if (err.code !== 'ENOENT') process.stderr.write(`[rollback] Erreur lecture sync state: ${err.message}\n`); }
         }
-        syncState[safeInst] = new Date(rollbackTime).toISOString();
+        delete syncState[safeInst];
         await writeJsonAtomic(syncInfoPath, syncState);
+
+        try {
+            const newManifest = await generateManifest(targetPath);
+            await writeJsonAtomic(path.join(getHorizonDataDir(), `manifest_${safeInst}.json`), newManifest);
+        } catch (mErr) {
+            process.stderr.write(`[rollback] Erreur régénération manifest: ${mErr.message}\n`);
+        }
 
         console.log(JSON.stringify({
             type    : 'SUCCESS',

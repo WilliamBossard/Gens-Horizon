@@ -13,20 +13,19 @@ async function isLockStale() {
     try {
         const stat = await fs.promises.stat(LOCK_FILE);
         const age = Date.now() - stat.mtimeMs;
-        if (age > 30000) return true;
         
         const content = (await fs.promises.readFile(LOCK_FILE, 'utf8')).trim();
         const pid = parseInt(content, 10);
         if (!isNaN(pid)) {
             try { 
                 process.kill(pid, 0); 
-                return false; 
+                return age > STALE_LOCK_MS; 
             } catch (e) { 
                 if (e.code === 'ESRCH') return true; 
-                if (e.code === 'EPERM') return false;
+                if (e.code === 'EPERM') return age > STALE_LOCK_MS;
             }
         }
-        return age > STALE_LOCK_MS;
+        return age > 30000;
     } catch (err) {
         if (err.code !== 'ENOENT') process.stderr.write(`[lock] Erreur lecture verrou: ${err.message}\n`);
         return true;
@@ -64,6 +63,7 @@ async function acquireLock(attempt = 0) {
         await fh.close();
     } catch (err) {
         if (err.code !== 'EEXIST') throw err;
+        await new Promise(r => setTimeout(r, 50));
         return await acquireLock(attempt + 1);
     }
 

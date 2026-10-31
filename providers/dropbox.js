@@ -103,10 +103,16 @@ class DropboxProvider {
             await this._refreshToken();
             return this._api(endpoint, body, true);
         }
-        if (res.statusCode === 401) throw new Error('Dropbox : token invalide après refresh (accès révoqué ?)');
+        if (res.statusCode === 401) {
+            const err = new Error('Dropbox : token invalide après refresh (accès révoqué ?)');
+            err.statusCode = 401;
+            throw err;
+        }
         if (res.statusCode >= 400) {
             const msg = res.body?.error_summary || res.body?.error?.['.tag'] || JSON.stringify(res.body).slice(0, 300);
-            throw new Error(`Dropbox API ${res.statusCode}: ${msg}`);
+            const err = new Error(`Dropbox API ${res.statusCode}: ${msg}`);
+            err.statusCode = res.statusCode;
+            throw err;
         }
         return res.body;
     }
@@ -117,9 +123,13 @@ class DropboxProvider {
             hostname: 'api.dropbox.com', path: '/oauth2/token', method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': buf.length },
         }, buf);
-        if (!res.body.access_token) throw new Error('Dropbox token refresh failed: ' + (res.body.error_description || res.body.error || res.statusCode));
+        if (!res.body.access_token) {
+            const err = new Error('Dropbox token refresh failed: ' + (res.body.error_description || res.body.error || res.statusCode));
+            err.statusCode = res.statusCode;
+            throw err;
+        }
         this._token = res.body.access_token;
-        Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'bearer' }); 
+        await Auth.encryptToken(this._tokenPath, { access_token: this._token, refresh_token: this._refresh, token_type: res.body.token_type || 'bearer' }); 
     }
     async listFiles(nameContains = '') {
         let entries = [];
@@ -149,10 +159,23 @@ class DropboxProvider {
             let bytesToRead = Math.min(CHUNK, total);
             let buffer = Buffer.alloc(bytesToRead);
             await fh.read(buffer, 0, bytesToRead, offset);
-            const startRes = await httpsRequest({
+            let startRes = await httpsRequest({
                 hostname: 'content.dropboxapi.com', path: '/2/files/upload_session/start', method: 'POST',
                 headers: { 'Authorization': this._authHeader(), 'Dropbox-API-Arg': JSON.stringify({ close: false }), 'Content-Type': 'application/octet-stream', 'Content-Length': bytesToRead },
             }, buffer);
+            if (startRes.statusCode === 401) {
+                await this._refreshToken();
+                startRes = await httpsRequest({
+                    hostname: 'content.dropboxapi.com', path: '/2/files/upload_session/start', method: 'POST',
+                    headers: { 'Authorization': this._authHeader(), 'Dropbox-API-Arg': JSON.stringify({ close: false }), 'Content-Type': 'application/octet-stream', 'Content-Length': bytesToRead },
+                }, buffer);
+            }
+            if (startRes.statusCode >= 400 || !startRes.body?.session_id) {
+                const msg = startRes.body?.error_summary || JSON.stringify(startRes.body);
+                const err = new Error(`Dropbox upload_session/start error ${startRes.statusCode}: ${msg}`);
+                err.statusCode = startRes.statusCode;
+                throw err;
+            }
             const sessionId = startRes.body.session_id;
             offset += bytesToRead;
             _report(offset);
@@ -160,10 +183,16 @@ class DropboxProvider {
                 bytesToRead = Math.min(CHUNK, total - offset);
                 buffer = Buffer.alloc(bytesToRead);
                 await fh.read(buffer, 0, bytesToRead, offset);
-                await httpsRequest({
+                const appendRes = await httpsRequest({
                     hostname: 'content.dropboxapi.com', path: '/2/files/upload_session/append_v2', method: 'POST',
                     headers: { 'Authorization': this._authHeader(), 'Dropbox-API-Arg': JSON.stringify({ cursor: { session_id: sessionId, offset }, close: false }), 'Content-Type': 'application/octet-stream', 'Content-Length': bytesToRead },
                 }, buffer);
+                if (appendRes.statusCode >= 400) {
+                    const msg = appendRes.body?.error_summary || JSON.stringify(appendRes.body);
+                    const err = new Error(`Dropbox upload_session/append error ${appendRes.statusCode}: ${msg}`);
+                    err.statusCode = appendRes.statusCode;
+                    throw err;
+                }
                 offset += bytesToRead;
                 _report(offset);
             }
@@ -178,6 +207,12 @@ class DropboxProvider {
                     'Content-Type': 'application/octet-stream', 'Content-Length': lastBytes,
                 },
             }, lastBytes > 0 ? buffer : null);
+            if (finishRes.statusCode >= 400 || !finishRes.body?.id) {
+                const msg = finishRes.body?.error_summary || JSON.stringify(finishRes.body);
+                const err = new Error(`Dropbox upload_session/finish error ${finishRes.statusCode}: ${msg}`);
+                err.statusCode = finishRes.statusCode;
+                throw err;
+            }
             onProgress && onProgress(100);
             return { id: finishRes.body.id, modifiedTime: finishRes.body.server_modified };
         } finally {

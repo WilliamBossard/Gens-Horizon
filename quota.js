@@ -66,7 +66,8 @@ async function quota() {
             instances,
         }));
     } catch (e) {
-        if (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN') {
+        const errCode = e.code || e.cause?.code;
+        if (errCode === 'ENOTFOUND' || errCode === 'EAI_AGAIN' || errCode === 'ECONNREFUSED' || errCode === 'ETIMEDOUT') {
             console.log(JSON.stringify({ type: 'OFFLINE', message: 'Internet indisponible.' }));
         } else {
             console.log(JSON.stringify({ type: 'ERROR', message: e.message }));

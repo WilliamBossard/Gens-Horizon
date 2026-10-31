@@ -2,7 +2,7 @@
 const fs = require('fs');
 const dns = require('dns').promises;
 async function checkConnectivity() {
-    const hosts = ['1.1.1.1', 'google.com', 'microsoft.com'];
+    const hosts = ['google.com', 'cloudflare.com', 'microsoft.com'];
     try {
         await Promise.any(hosts.map(h => dns.lookup(h)));
         return true;
@@ -98,7 +98,8 @@ async function writeJsonAtomicAsync(filePath, data) {
 }
 function getCanonicalName(name) {
     if (!name || typeof name !== 'string') return 'UnknownInstance';
-    return name.replace(/[<>:"/\\|?*\r\n\0'"`;$]/g, "").trim().substring(0, 100);
+    const clean = name.replace(/[<>:"/\\|?*\r\n\0'"`;$]/g, "").trim().substring(0, 100);
+    return clean || 'UnknownInstance';
 }
 
 async function getCloudSettings(settingsPath) {

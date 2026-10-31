@@ -3,7 +3,7 @@ const fs       = require('fs');
 const { ZipArchive } = require('archiver');
 const path     = require('path');
 const { getInstancesFolder, scanInstances, getHorizonDataDir } = require('./paths');
-const { generateManifest, compareManifests }   = require('./scanner');
+const { generateManifest, compareManifests, IGNORED }   = require('./scanner');
 const { getCloudIndexAndCleanDuplicates } = require('./cloud-operations');
 const { getProvider }                          = require('./provider');
 const { acquireLock, releaseLock, LOCK_FILE } = require('./lock');
@@ -29,6 +29,7 @@ async function getFolderSize(dir, currentDepth = 0) {
     try {
         const entries = await fs.promises.readdir(dir, { withFileTypes: true });
         for (const entry of entries) {
+            if (IGNORED.has(entry.name)) continue;
             const fullPath = path.join(dir, entry.name);
             if (entry.isDirectory()) {
                 total += await getFolderSize(fullPath, currentDepth + 1); 
@@ -70,6 +71,8 @@ async function createFullZip(folder, tempZip, inst) {
         output.on('error', async err => { archive.abort(); await safeUnlink(tempZip); reject(err); });
         archive.pipe(output);
         archive.directory(folder, false, (data) => {
+            const parts = data.name.split('/');
+            if (parts.some(p => IGNORED.has(p))) return false;
             return data;
         });
         archive.finalize();
@@ -123,9 +126,6 @@ async function upload() {
         }));
         process.exit(1);
     }
-    const lockHeartbeat = setInterval(async () => {
-        try { await fs.promises.utimes(LOCK_FILE, new Date(), new Date()); } catch (_) { if (_ && _.code !== 'ENOENT') process.stderr.write('[upload.js] Erreur silencieuse interceptée: ' + (_.message || _) + '\n'); }
-    }, 5 * 60_000);
     try {
         const online = await checkConnectivity();
         if (!online) {
@@ -138,7 +138,18 @@ async function upload() {
         const args         = process.argv.slice(2);
         const force        = args.includes('--force');
         const COMMANDS     = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
-        const targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
+        let targetInstance = null;
+        const instIdx = args.indexOf('--instance');
+        if (instIdx !== -1 && args[instIdx + 1] && !args[instIdx + 1].startsWith('--')) {
+            targetInstance = args[instIdx + 1];
+        } else {
+            const eqArg = args.find(a => a.startsWith('--instance='));
+            if (eqArg) {
+                targetInstance = eqArg.split('=')[1];
+            } else {
+                targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
+            }
+        }
         const { sets: settings, retryOpts } = await getCloudSettings(settingsPath);
         const provider = await getProvider(settings);
         if (!provider) {
@@ -162,6 +173,7 @@ async function upload() {
             localInstances = await scanInstances();
         }
         const cloudIndex = await getCloudIndexAndCleanDuplicates(provider, retryOpts, "[upload]");
+        const CLOCK_SKEW_TOLERANCE_MS = 60_000;
         for (const name of Object.keys(cloudIndex)) {
             if (!name.startsWith(PREFIX_DELTA)) continue;
             const body  = name.replace(PREFIX_DELTA, '').replace('.zip', '');
@@ -173,7 +185,7 @@ async function upload() {
             const baseEntry = cloudIndex[baseName];
             if (!baseEntry) continue;
             const baseTime = new Date(baseEntry.modifiedTime).getTime();
-            if (ts < baseTime) {
+            if (ts < baseTime - CLOCK_SKEW_TOLERANCE_MS) {
                 try {
                     await withRetry(() => provider.deleteFile(cloudIndex[name].id), { ...retryOpts, label: `gc_orphanDelta(${name})` });
                     delete cloudIndex[name];
@@ -191,10 +203,18 @@ async function upload() {
                 const baseName     = `${PREFIX_BACKUP}${safeInst}.zip`;
                 const manifestName = `${PREFIX_MANIFEST}${safeInst}.json`;
                 const manifestPath = path.join(dataDir, `manifest_${safeInst}.json`);
-                const oldManifest     = await readJsonSafe(manifestPath);
+                let oldManifest    = await readJsonSafe(manifestPath);
+                const hasBaseOnCloud = !!cloudIndex[baseName];
+                if (Object.keys(oldManifest).length === 0 && hasBaseOnCloud && cloudIndex[manifestName]) {
+                    try {
+                        oldManifest = await provider.downloadJSON(cloudIndex[manifestName].id);
+                        await writeJsonAtomicAsync(manifestPath, oldManifest);
+                    } catch (err) {
+                        process.stderr.write(`[upload] Erreur récupération manifest distant : ${err.message}\n`);
+                    }
+                }
                 const currentManifest = await generateManifest(folder, folder, oldManifest);
                 const diff            = compareManifests(oldManifest, currentManifest);
-                const hasBaseOnCloud = !!cloudIndex[baseName];
                 const useSmartMode   = settings.syncMode === 'SMART';
                 const metaName = `${PREFIX_META}${safeInst}.json`;
                 let metaData = { iconData: "", loader: "vanilla", realName: inst };
@@ -368,15 +388,15 @@ async function upload() {
             }
         }
     } catch (e) {
+        const errCode = e.code || e.cause?.code;
         if (e.message && (e.message.includes('invalid_grant') || e.message.includes('invalid_token'))) {
             console.log(JSON.stringify({ type: 'ERROR', message: 'Session expirée. Veuillez ré-associer votre compte.' }));
-        } else if (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN' || e.code === 'ECONNREFUSED') {
+        } else if (errCode === 'ENOTFOUND' || errCode === 'EAI_AGAIN' || errCode === 'ECONNREFUSED' || errCode === 'ETIMEDOUT') {
             console.log(JSON.stringify({ type: 'OFFLINE', message: 'Internet indisponible ou erreur réseau.' }));
         } else {
             console.log(JSON.stringify({ type: 'ERROR', message: e.message }));
         }
     } finally {
-        clearInterval(lockHeartbeat);
         releaseLock();
     }
 }

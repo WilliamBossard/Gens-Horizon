@@ -113,6 +113,8 @@ async function applyDelta(deltaZipPath, targetPath, onProgress) {
 
     const resolvedTarget = path.resolve(targetPath);
     let deletedFiles = [];
+    const total = zipfile.entryCount;
+    let count = 0;
 
     await new Promise((resolve, reject) => {
         zipfile.on('error', reject);
@@ -144,6 +146,11 @@ async function applyDelta(deltaZipPath, targetPath, onProgress) {
                     const readStream = await openZipStream(zipfile, entry);
                     const { pipeline } = require('stream/promises');
                     await pipeline(readStream, fs.createWriteStream(dest));
+                    count++;
+                    if (onProgress && count % 20 === 0) {
+                        const fakePct = Math.min(99, Math.floor((count / total) * 100));
+                        onProgress(fakePct);
+                    }
                 }
                 zipfile.readEntry();
             } catch (err) {

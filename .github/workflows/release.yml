@@ -76,13 +76,15 @@ jobs:
 
       - name: Prepare Assets
         run: |
-          mv dist/Horizon-win.exe dist/Horizon.exe || true
-          mv dist/Horizon-linux dist/Horizon-linux || true
+          mv dist/Horizon-win.exe dist/Horizon.exe 2>/dev/null || mv dist/Horizon-win-x64.exe dist/Horizon.exe 2>/dev/null || true
+          mv dist/Horizon-linux-x64 dist/Horizon-linux 2>/dev/null || true
+          mv dist/Horizon-macos-x64 dist/Horizon-macos 2>/dev/null || true
 
       - name: Generate SHA256 Checksums
         run: |
-          sha256sum dist/Horizon.exe | awk '{print $1}' > dist/Horizon.exe.sha256
-          sha256sum dist/Horizon-linux | awk '{print $1}' > dist/Horizon-linux.sha256
+          [ -f dist/Horizon.exe ] && sha256sum dist/Horizon.exe | awk '{print $1}' > dist/Horizon.exe.sha256 || true
+          [ -f dist/Horizon-linux ] && sha256sum dist/Horizon-linux | awk '{print $1}' > dist/Horizon-linux.sha256 || true
+          [ -f dist/Horizon-macos ] && sha256sum dist/Horizon-macos | awk '{print $1}' > dist/Horizon-macos.sha256 || true
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v3
@@ -95,5 +97,7 @@ jobs:
             dist/Horizon.exe.sha256
             dist/Horizon-linux
             dist/Horizon-linux.sha256
+            dist/Horizon-macos
+            dist/Horizon-macos.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

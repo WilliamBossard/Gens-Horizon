@@ -1,6 +1,6 @@
-const { existsSafe } = require('./utils');
 'use strict';
 process.env.NODE_NO_WARNINGS = "1";
+const { existsSafe } = require('./utils');
 
 const util = require('util');
 ['log', 'info', 'warn', 'error'].forEach(method => {
@@ -47,10 +47,12 @@ const SETTINGS_PATH = path.join(getHorizonDataDir(), 'horizon_settings.json');
         require('./quota.js');
     } else if (args.includes('--rollback')) {
         require('./rollback.js');
+    } else if (args.includes('--delete')) {
+        require('./sync.js');
     } else {
         console.log(JSON.stringify({
             type: 'ERROR',
-            message: 'Commande manquante. Utiliser : --login, --check, --sync, --upload, --quota, --rollback'
+            message: 'Commande manquante. Utiliser : --login, --check, --sync, --upload, --quota, --rollback, --delete'
         }));
     }
 })();

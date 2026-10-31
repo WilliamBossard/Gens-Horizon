@@ -7,7 +7,7 @@ const IGNORED = new Set([
     'versions', 'libraries', 'assets', 'logs',
     'crash-reports', 'cache', 'webcache', 'temp',
     'screenshots', 'backups', '.git', 'node_modules',
-    '.mixin.out'
+    '.mixin.out', 'session.lock'
 ]);
 const { withConcurrency } = require('./utils');
 
@@ -48,17 +48,28 @@ async function generateManifest(targetPath, basePath = targetPath, oldManifest =
                     }
                 }
             } else {
-                const stats = await fsP.stat(fullPath);
-                const cached = oldManifest[relativePath];
-                if (cached && cached.mtime === stats.mtimeMs && cached.size === stats.size) {
-                    manifest[relativePath] = cached; 
-                } else {
-                    const hash = await hashFile(fullPath);
-                    manifest[relativePath] = {
-                        hash: hash,
-                        mtime: stats.mtimeMs,
-                        size: stats.size
-                    };
+                try {
+                    const stats = await fsP.stat(fullPath);
+                    if (stats.isDirectory()) {
+                        const subManifest = await generateManifest(fullPath, basePath, oldManifest, depth + 1);
+                        Object.assign(manifest, subManifest);
+                    } else if (stats.isFile()) {
+                        const cached = oldManifest[relativePath];
+                        if (cached && cached.mtime === stats.mtimeMs && cached.size === stats.size) {
+                            manifest[relativePath] = cached; 
+                        } else {
+                            const hash = await hashFile(fullPath);
+                            manifest[relativePath] = {
+                                hash: hash,
+                                mtime: stats.mtimeMs,
+                                size: stats.size
+                            };
+                        }
+                    }
+                } catch (err) {
+                    if (err.code !== 'ENOENT') {
+                        process.stderr.write(`[scanner] Fichier ignoré (${err.code}) : ${fullPath}\n`);
+                    }
                 }
             }
         });
@@ -76,4 +87,4 @@ function compareManifests(oldM, newM) {
         added, modified, deleted,
     };
 }
-module.exports = { generateManifest, compareManifests };
+module.exports = { generateManifest, compareManifests, IGNORED };

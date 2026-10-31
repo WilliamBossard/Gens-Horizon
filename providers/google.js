@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('fs');
+const crypto = require('crypto');
 const Auth = require('../Auth');
 class GoogleProvider {
     constructor(tokenData, credentials, tokenPath) {
@@ -37,7 +38,7 @@ class GoogleProvider {
         };
         if (data.refresh_token) merged.refresh_token = data.refresh_token;
         this._tokenData = merged;
-        try { Auth.encryptToken(this._tokenPath, merged); }
+        try { await Auth.encryptToken(this._tokenPath, merged); }
         catch (e) { process.stderr.write(`[google] Échec sauvegarde token rafraîchi : ${e.message}\n`); }
     }
     async _fetchDrive(path, options = {}) {
@@ -66,7 +67,9 @@ class GoogleProvider {
                 orderBy: 'modifiedTime desc'
             });
             if (pageToken) params.append('pageToken', pageToken);
-            if (nameContains) params.append('q', `name contains '${nameContains.replace(/'/g, "\\'")}'`);
+            const queries = ['trashed = false'];
+            if (nameContains) queries.push(`name contains '${nameContains.replace(/'/g, "\\'")}'`);
+            params.append('q', queries.join(' and '));
             const res = await this._fetchDrive(`/files?${params.toString()}`);
             if (!res.ok) throw new Error(`[google] Erreur listFiles : ${await res.text()}`);
             const data = await res.json();
@@ -93,11 +96,12 @@ class GoogleProvider {
             headers: { Authorization: `Bearer ${token}` },
             signal: controller.signal
         });
+        let currentToken = token;
         if (res.status === 401) {
             await this._refreshToken();
-            const newToken = await this._getAccessToken();
+            currentToken = await this._getAccessToken();
             res = await fetch(buildUrl(false), {
-                headers: { Authorization: `Bearer ${newToken}` },
+                headers: { Authorization: `Bearer ${currentToken}` },
                 signal: controller.signal
             });
         }
@@ -107,13 +111,15 @@ class GoogleProvider {
         if (res.ok && (contentType.includes('text/html') || (contentType.includes('application/json') && !contentType.includes('octet')))) {
             process.stderr.write(`[google] Réponse de confirmation détectée, relance avec acknowledgeAbuse=true\n`);
             res = await fetch(buildUrl(true), {
-                headers: { Authorization: `Bearer ${token}` },
+                headers: { Authorization: `Bearer ${currentToken}` },
                 signal: controller.signal
             });
         }
         if (!res.ok) {
             clearTimeout(timeoutId);
-            throw new Error(`[google] Erreur téléchargement : ${await res.text()}`);
+            const err = new Error(`[google] Erreur téléchargement : ${await res.text()}`);
+            err.statusCode = res.status;
+            throw err;
         }
         const dest = fs.createWriteStream(destPath);
         let downloaded = 0, lastPct = -1;
@@ -153,8 +159,8 @@ class GoogleProvider {
         const metadata = { name, parents: existingId ? undefined : ['appDataFolder'] };
         const initMethod = existingId ? 'PATCH' : 'POST';
         const initUrl = existingId 
-            ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=resumable&fields=id,name,size`
-            : `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size`;
+            ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=resumable&fields=id,name,size,modifiedTime`
+            : `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,modifiedTime`;
         let resInit = await fetch(initUrl, {
             method: initMethod,
             headers: {
@@ -191,11 +197,15 @@ class GoogleProvider {
             const https = require('https');
             const { URL } = require('url');
             const parsedUrl = new URL(uploadUrl);
+            const contentRange = fileSize > 0 ? `bytes 0-${fileSize - 1}/${fileSize}` : 'bytes */0';
             const req = https.request({
                 method: 'PUT',
                 hostname: parsedUrl.hostname,
                 path: parsedUrl.pathname + parsedUrl.search,
-                headers: { 'Content-Length': fileSize }
+                headers: {
+                    'Content-Length': fileSize,
+                    'Content-Range': contentRange
+                }
             }, (res) => {
                 let data = '';
                 res.on('data', chunk => data += chunk);
@@ -238,7 +248,7 @@ class GoogleProvider {
     async uploadJSON(name, content, existingId = null) {
         const metadata = { name, parents: existingId ? undefined : ['appDataFolder'] };
         const fileContent = JSON.stringify(content);
-        const boundary = 'foo_bar_baz';
+        const boundary = '-------HorizonBoundary_' + crypto.randomBytes(8).toString('hex');
         let body = `--${boundary}\r\n`;
         body += 'Content-Type: application/json; charset=UTF-8\r\n\r\n';
         body += JSON.stringify(metadata) + '\r\n';
@@ -250,20 +260,35 @@ class GoogleProvider {
         const url = existingId 
             ? `/files/${existingId}?uploadType=multipart`
             : `/files?uploadType=multipart`;
-        const res = await fetch(`https://www.googleapis.com/upload/drive/v3${url}`, {
+        const doUpload = async (tok) => fetch(`https://www.googleapis.com/upload/drive/v3${url}`, {
             method,
             headers: {
-                Authorization: `Bearer ${await this._getAccessToken()}`,
+                Authorization: `Bearer ${tok}`,
                 'Content-Type': `multipart/related; boundary=${boundary}`
             },
             body
         });
-        if (!res.ok) throw new Error(`[google] Erreur uploadJSON: ${await res.text()}`);
+        let tok = await this._getAccessToken();
+        let res = await doUpload(tok);
+        if (res.status === 401) {
+            await this._refreshToken();
+            tok = await this._getAccessToken();
+            res = await doUpload(tok);
+        }
+        if (!res.ok) {
+            const err = new Error(`[google] Erreur uploadJSON: ${await res.text()}`);
+            err.statusCode = res.status;
+            throw err;
+        }
         return await res.json();
     }
     async downloadJSON(fileId) {
         const res = await this._fetchDrive(`/files/${fileId}?alt=media`);
-        if (!res.ok) throw new Error(`[google] downloadJSON : erreur HTTP ${res.status}`);
+        if (!res.ok) {
+            const err = new Error(`[google] downloadJSON : erreur HTTP ${res.status}`);
+            err.statusCode = res.status;
+            throw err;
+        }
         try {
             return await res.json();
         } catch (e) {
@@ -272,11 +297,19 @@ class GoogleProvider {
     }
     async deleteFile(fileId) {
         const res = await this._fetchDrive(`/files/${fileId}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(`[google] deleteFile : erreur HTTP ${res.status}`);
+        if (!res.ok) {
+            const err = new Error(`[google] deleteFile : erreur HTTP ${res.status}`);
+            err.statusCode = res.status;
+            throw err;
+        }
     }
     async getQuota() {
         const res = await this._fetchDrive(`/about?fields=storageQuota`);
-        if (!res.ok) throw new Error(`[google] getQuota : erreur HTTP ${res.status}`);
+        if (!res.ok) {
+            const err = new Error(`[google] getQuota : erreur HTTP ${res.status}`);
+            err.statusCode = res.status;
+            throw err;
+        }
         const data = await res.json();
         const q = data.storageQuota || {};
         return {

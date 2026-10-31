@@ -1,5 +1,5 @@
-const { existsSafe } = require('./utils');
 'use strict';
+const { existsSafe } = require('./utils');
 /**
  * ==============================================================================
  * GENS HORIZON — FACTORY FOURNISSEUR CLOUD
@@ -32,7 +32,11 @@ async function getProvider(settings) {
         tokenData = await getSecureToken(tokenPath);
     } catch (e) {
         process.stderr.write(`[provider] Token illisible pour "${name}" : ${e.message}\n`);
-        try { await fs.promises.unlink(tokenPath); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[provider.js] Erreur silencieuse interceptée:', _.message || _); }
+        try {
+            const backupCorrupt = `${tokenPath}.corrupted_${Date.now()}`;
+            await fs.promises.rename(tokenPath, backupCorrupt);
+            process.stderr.write(`[provider] Token déplacé vers : ${backupCorrupt}\n`);
+        } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[provider.js] Erreur silencieuse interceptée:', _.message || _); }
         return null;
     }
     if (!tokenData) return null;

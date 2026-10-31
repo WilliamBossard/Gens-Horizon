@@ -50,6 +50,7 @@ async function scanInstances() {
     const instances = [];
     for (const item of items) {
         if (!item.isDirectory()) continue;
+        if (item.name.includes('_rollback_')) continue;
         try {
             await fs.promises.access(path.join(instancesDir, item.name, 'instance.json'));
             instances.push(item.name);
@@ -58,12 +59,20 @@ async function scanInstances() {
     return instances;
 }
 function getProviderName(settings) {
+    const VALID = new Set(['google', 'dropbox', 'onedrive']);
     const cliArg = process.argv.find(a => a.startsWith('--provider='));
     if (cliArg) {
         const raw = cliArg.split('=')[1].trim().toLowerCase();
-        const VALID = new Set(['google', 'dropbox', 'onedrive']);
         if (VALID.has(raw)) return raw;
     }
+    const provIdx = process.argv.indexOf('--provider');
+    if (provIdx !== -1 && process.argv[provIdx + 1]) {
+        const raw = process.argv[provIdx + 1].trim().toLowerCase();
+        if (VALID.has(raw)) return raw;
+    }
+    const positional = process.argv.slice(2).find(a => VALID.has(a.trim().toLowerCase()));
+    if (positional) return positional.trim().toLowerCase();
+
     return (settings && settings.provider) || 'google';
 }
 module.exports = { getHorizonDataDir, getInstancesFolder, scanInstances, getProviderName };
