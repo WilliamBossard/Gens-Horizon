@@ -42,7 +42,10 @@
     "yauzl": "^3.4.0"
   },
   "devDependencies": {
-    "@yao-pkg/pkg": "^6.23.0"
+    "@yao-pkg/pkg": "^6.24.0"
+  },
+  "overrides": {
+    "minimatch": "^11.0.3"
   },
   "allowScripts": {
     "esbuild@0.28.2": true
