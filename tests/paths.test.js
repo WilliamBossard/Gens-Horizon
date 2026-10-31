@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { scanInstances, getProviderName } = require('../paths');
+const { scanInstances, getProviderName, getInstancesFolder } = require('../paths');
 
 test('scanInstances ignores _rollback_ directories and requires instance.json', async () => {
     // We can point HORIZON_DATA_DIR / APPDATA to a temporary directory
@@ -18,7 +18,7 @@ test('scanInstances ignores _rollback_ directories and requires instance.json', 
         process.env.USERPROFILE = tmpRoot;
         process.env.HOME = tmpRoot;
 
-        const instancesDir = path.join(tmpRoot, 'GensLauncher', 'instances');
+        const instancesDir = getInstancesFolder();
         await fs.promises.mkdir(instancesDir, { recursive: true });
 
         // Normal instance with instance.json
@@ -62,4 +62,3 @@ test('getProviderName falls back to settings or default', () => {
     process.argv.pop();
     process.argv.pop();
 });
-

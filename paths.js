@@ -11,28 +11,30 @@
 const os   = require('os');
 const path = require('path');
 const fs   = require('fs');
+
 function getHorizonDataDir() {
     if (process.env.HORIZON_DATA_DIR) return process.env.HORIZON_DATA_DIR;
     return process.pkg ? path.dirname(process.execPath) : process.cwd();
 }
+
 function getAppDataPath() {
+    if (process.env.APPDATA) return process.env.APPDATA;
     if (process.platform === 'win32') {
-        const appdata = process.env.APPDATA;
-        if (!appdata) {
-            const profile = process.env.USERPROFILE || os.homedir();
-            return path.join(profile, 'AppData', 'Roaming');
-        }
-        return appdata;
+        const profile = process.env.USERPROFILE || os.homedir();
+        return path.join(profile, 'AppData', 'Roaming');
     } else if (process.platform === 'darwin') {
-        return path.join(os.homedir(), 'Library', 'Application Support');
+        return path.join(process.env.HOME || os.homedir(), 'Library', 'Application Support');
     } else {
-        return path.join(os.homedir(), '.config');
+        return process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || os.homedir(), '.config');
     }
 }
+
 function getInstancesFolder() {
+    if (process.env.GENS_INSTANCES_DIR) return process.env.GENS_INSTANCES_DIR;
     const appData = getAppDataPath();
     return path.join(appData, 'GensLauncher', 'instances');
 }
+
 /**
  * scanInstances() retourne toujours le nom de DOSSIER (clé disque / Horizon), pas data.name.
  */
@@ -58,6 +60,7 @@ async function scanInstances() {
     }
     return instances;
 }
+
 function getProviderName(settings) {
     const VALID = new Set(['google', 'dropbox', 'onedrive']);
     const cliArg = process.argv.find(a => a.startsWith('--provider='));
@@ -75,4 +78,5 @@ function getProviderName(settings) {
 
     return (settings && settings.provider) || 'google';
 }
+
 module.exports = { getHorizonDataDir, getInstancesFolder, scanInstances, getProviderName };
