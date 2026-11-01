@@ -20,6 +20,7 @@ function hashFile(filePath) {
         stream.on('error', (err) => { stream.destroy(); reject(err); });
     });
 }
+
 async function generateManifest(targetPath, basePath = targetPath, oldManifest = {}, depth = 0) {
     if (depth > 40) {
         process.stderr.write(`[scanner] Profondeur maximale atteinte ignorée : ${targetPath}\n`);
@@ -45,6 +46,15 @@ async function generateManifest(targetPath, basePath = targetPath, oldManifest =
                 } catch (err) {
                     if (err.code !== 'ENOENT') {
                         process.stderr.write(`[scanner] Dossier ignoré (${err.code}) : ${fullPath}\n`);
+                        // Préserver les fichiers de ce dossier s'ils existaient dans l'ancien manifest
+                        if (oldManifest) {
+                            const prefix = relativePath + '/';
+                            for (const [k, v] of Object.entries(oldManifest)) {
+                                if (k.startsWith(prefix) && !manifest[k]) {
+                                    manifest[k] = v;
+                                }
+                            }
+                        }
                     }
                 }
             } else {
@@ -69,6 +79,11 @@ async function generateManifest(targetPath, basePath = targetPath, oldManifest =
                 } catch (err) {
                     if (err.code !== 'ENOENT') {
                         process.stderr.write(`[scanner] Fichier ignoré (${err.code}) : ${fullPath}\n`);
+                        // SÉCURITÉ : Ne pas considérer un fichier comme supprimé s'il a subi une erreur I/O (EBUSY/EPERM)
+                        if (oldManifest && oldManifest[relativePath]) {
+                            manifest[relativePath] = oldManifest[relativePath];
+                            process.stderr.write(`[scanner] Conservation de l'ancienne entrée pour : ${relativePath}\n`);
+                        }
                     }
                 }
             }
@@ -76,6 +91,7 @@ async function generateManifest(targetPath, basePath = targetPath, oldManifest =
     await withConcurrency(16, tasks);
     return manifest;
 }
+
 function compareManifests(oldM, newM) {
     const added = Object.keys(newM).filter(f => !oldM[f]);
     const deleted = Object.keys(oldM).filter(f => !newM[f]);
@@ -87,4 +103,5 @@ function compareManifests(oldM, newM) {
         added, modified, deleted,
     };
 }
+
 module.exports = { generateManifest, compareManifests, IGNORED };

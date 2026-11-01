@@ -11,8 +11,18 @@ const { existsSafe } = require('./utils');
 const fs   = require('fs');
 const path = require('path');
 const { getSecureToken }  = require('./Auth');
-const { getConfig }       = require('./config');
 const { getHorizonDataDir, getProviderName } = require('./paths');
+
+function loadGetConfig() {
+    try {
+        return require('./config').getConfig;
+    } catch (e) {
+        return (provider) => {
+            throw new Error(`[provider] Configuration OAuth2 introuvable (config.js). Veuillez créer config.js depuis config.example.js. Détail: ${e.message}`);
+        };
+    }
+}
+
 async function getTokenPath(providerName) {
     const base = getHorizonDataDir();
     const specific = path.join(base, `token_${providerName}.json`);
@@ -23,6 +33,7 @@ async function getTokenPath(providerName) {
     }
     return specific;
 }
+
 async function getProvider(settings) {
     const name      = getProviderName(settings);
     const tokenPath = await getTokenPath(name);
@@ -40,6 +51,7 @@ async function getProvider(settings) {
         return null;
     }
     if (!tokenData) return null;
+    const getConfig = loadGetConfig();
     switch (name) {
         case 'google': {
             const { GoogleProvider } = require('./providers/google');
@@ -57,4 +69,5 @@ async function getProvider(settings) {
             throw new Error(`Fournisseur inconnu : "${name}". Valeurs acceptées : google, dropbox, onedrive`);
     }
 }
+
 module.exports = { getProvider, getTokenPath };

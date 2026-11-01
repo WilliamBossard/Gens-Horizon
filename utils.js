@@ -1,6 +1,8 @@
 'use strict';
 const fs = require('fs');
+const crypto = require('crypto');
 const dns = require('dns').promises;
+
 async function checkConnectivity() {
     const hosts = ['google.com', 'cloudflare.com', 'microsoft.com'];
     try {
@@ -10,6 +12,7 @@ async function checkConnectivity() {
         return false;
     }
 }
+
 async function existsSafe(filePath) {
     try {
         await fs.promises.access(filePath);
@@ -18,6 +21,7 @@ async function existsSafe(filePath) {
         return false;
     }
 }
+
 async function readJsonSafe(filePath, fallback = {}) {
     try { return JSON.parse(await fs.promises.readFile(filePath, 'utf8')); }
     catch (_) { return fallback; }
@@ -79,11 +83,14 @@ function onShutdown(fn) { _shutdownHooks.push(fn); }
 function _runShutdownHooks() {
     for (const fn of _shutdownHooks) { try { fn(); } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[utils.js] Erreur silencieuse interceptée:', _.message || _); } }
 }
+
 function writeJsonAtomic(filePath, data) {
     return writeJsonAtomicAsync(filePath, data);
 }
+
 async function writeJsonAtomicAsync(filePath, data) {
-    const tmp = filePath + '.tmp';
+    const rand = crypto.randomBytes(4).toString('hex');
+    const tmp = `${filePath}.${process.pid}.${Date.now()}.${rand}.tmp`;
     registerTemp(tmp);
     let filehandle;
     try {
@@ -93,13 +100,57 @@ async function writeJsonAtomicAsync(filePath, data) {
     } finally {
         if (filehandle) await filehandle.close();
     }
-    await fs.promises.rename(tmp, filePath);
-    unregisterTemp(tmp);
+    try {
+        let renamed = false;
+        for (let i = 0; i < 5; i++) {
+            try {
+                await fs.promises.rename(tmp, filePath);
+                renamed = true;
+                break;
+            } catch (rErr) {
+                if (i === 4) throw rErr;
+                await new Promise(r => setTimeout(r, 25 * (i + 1)));
+            }
+        }
+    } catch (err) {
+        await safeUnlink(tmp);
+        throw err;
+    } finally {
+        unregisterTemp(tmp);
+    }
 }
+
 function getCanonicalName(name) {
     if (!name || typeof name !== 'string') return 'UnknownInstance';
     const clean = name.replace(/[<>:"/\\|?*\r\n\0'"`;$]/g, "").trim().substring(0, 100);
     return clean || 'UnknownInstance';
+}
+
+function parseTargetInstance(args) {
+    if (!args || !Array.isArray(args)) return null;
+    const instIdx = args.indexOf('--instance');
+    if (instIdx !== -1 && args[instIdx + 1] && !args[instIdx + 1].startsWith('--')) {
+        return args[instIdx + 1];
+    }
+    const eqArg = args.find(a => a.startsWith('--instance='));
+    if (eqArg) {
+        return eqArg.split('=')[1];
+    }
+    const COMMANDS = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback', 'delete']);
+    const FLAGS_WITH_ARGS = new Set(['--provider', '--lang']);
+    const KNOWN_PROVIDERS = new Set(['google', 'dropbox', 'onedrive']);
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg.startsWith('--')) {
+            if (FLAGS_WITH_ARGS.has(arg)) {
+                i++; // Sauter la valeur liée à ce flag
+            }
+            continue;
+        }
+        if (COMMANDS.has(arg) || KNOWN_PROVIDERS.has(arg.toLowerCase())) continue;
+        return arg;
+    }
+    return null;
 }
 
 async function getCloudSettings(settingsPath) {
@@ -113,6 +164,7 @@ async function getCloudSettings(settingsPath) {
     const retryOpts = { maxRetries: sets.maxRetries || 3, baseDelay: sets.retryBaseDelay || sets.baseDelay || 1500 };
     return { sets, retryOpts };
 }
+
 let _handlersSetup = false;
 function setupProcessHandlers() {
     if (_handlersSetup) return;
@@ -169,6 +221,7 @@ function reportSuccess(instance, message, baseChanged = false, deltasApplied = 0
 
 module.exports = {
     getCanonicalName,
+    parseTargetInstance,
     getCloudSettings,
     checkConnectivity,
     readJsonSafe,

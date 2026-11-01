@@ -2,6 +2,7 @@
 const fs = require('fs');
 const yauzl = require('yauzl');
 const path = require('path');
+const { pipeline } = require('stream/promises');
 const { withConcurrency, safeRm, existsSafe } = require('./utils');
 
 // Wrapper Promise pour yauzl.open
@@ -23,7 +24,6 @@ function openZipStream(zipfile, entry) {
     });
 }
 
-// AUDIT-22 : new Promise(async ...) antipattern remplace par async function pure
 async function verifyZipIntegrity(zipPath) {
     let fd;
     try {
@@ -35,6 +35,9 @@ async function verifyZipIntegrity(zipPath) {
             const hex = buf.toString('hex').toUpperCase();
             throw new Error(`Fichier telecharge invalide (pas un ZIP). Signature recue: 0x${hex}.`);
         }
+        await fd.close();
+        fd = null;
+
         // Validation avec yauzl (verifie le Central Directory)
         try {
             const zipfile = await openZip(zipPath, { lazyEntries: true });
@@ -67,7 +70,10 @@ async function extractZip(zipPath, targetPath, onProgress) {
 
     await new Promise((resolve, reject) => {
         zipfile.on('error', reject);
-        zipfile.on('end', resolve);
+        zipfile.on('end', () => {
+            if (onProgress) onProgress(100);
+            resolve();
+        });
         zipfile.on('entry', async (entry) => {
             try {
                 const dest = path.join(targetPath, entry.fileName);
@@ -77,15 +83,14 @@ async function extractZip(zipPath, targetPath, onProgress) {
                     return;
                 }
 
-                if (/\/$/.test(entry.fileName)) {
+                if (/[/\\]$/.test(entry.fileName)) {
                     await fs.promises.mkdir(dest, { recursive: true });
                 } else {
                     await fs.promises.mkdir(path.dirname(dest), { recursive: true });
                     const readStream = await openZipStream(zipfile, entry);
-                    const { pipeline } = require('stream/promises');
                     await pipeline(readStream, fs.createWriteStream(dest));
                     count++;
-                    if (onProgress && count % 50 === 0) {
+                    if (onProgress && (total <= 20 || count % Math.max(1, Math.floor(total / 50)) === 0)) {
                         const fakePct = Math.min(99, Math.floor((count / total) * 100));
                         onProgress(fakePct);
                     }
@@ -102,7 +107,6 @@ async function extractZip(zipPath, targetPath, onProgress) {
     });
 }
 
-
 async function applyDelta(deltaZipPath, targetPath, onProgress) {
     let zipfile;
     try {
@@ -118,15 +122,19 @@ async function applyDelta(deltaZipPath, targetPath, onProgress) {
 
     await new Promise((resolve, reject) => {
         zipfile.on('error', reject);
-        zipfile.on('end', resolve);
+        zipfile.on('end', () => {
+            if (onProgress) onProgress(100);
+            resolve();
+        });
         zipfile.on('entry', async (entry) => {
             try {
                 if (entry.fileName === '__delta__.json') {
                     const readStream = await openZipStream(zipfile, entry);
-                    let data = '';
+                    const chunks = [];
                     for await (const chunk of readStream) {
-                        data += chunk;
+                        chunks.push(chunk);
                     }
+                    const data = Buffer.concat(chunks).toString('utf8');
                     try { deletedFiles = JSON.parse(data).deletedFiles || []; } catch (err) { process.stderr.write(`[zip-utils] Erreur parsing __delta__.json: ${err.message}\n`); }
                     zipfile.readEntry();
                     return;
@@ -139,15 +147,14 @@ async function applyDelta(deltaZipPath, targetPath, onProgress) {
                     return;
                 }
 
-                if (/\/$/.test(entry.fileName)) {
+                if (/[/\\]$/.test(entry.fileName)) {
                     await fs.promises.mkdir(dest, { recursive: true });
                 } else {
                     await fs.promises.mkdir(path.dirname(dest), { recursive: true });
                     const readStream = await openZipStream(zipfile, entry);
-                    const { pipeline } = require('stream/promises');
                     await pipeline(readStream, fs.createWriteStream(dest));
                     count++;
-                    if (onProgress && count % 20 === 0) {
+                    if (onProgress && (total <= 20 || count % Math.max(1, Math.floor(total / 50)) === 0)) {
                         const fakePct = Math.min(99, Math.floor((count / total) * 100));
                         onProgress(fakePct);
                     }

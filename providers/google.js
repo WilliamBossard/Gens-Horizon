@@ -227,6 +227,7 @@ class GoogleProvider {
                     }
                 });
             });
+            req.setTimeout(60000, () => { req.destroy(new Error('Google Drive uploadZip: timeout réseau (60s)')); });
             req.on('error', reject);
             const readStream = fs.createReadStream(srcPath);
             readStream.on('error', (err) => { req.destroy(); reject(err); });

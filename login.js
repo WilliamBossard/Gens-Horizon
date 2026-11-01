@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { getConfig } = require('./config');
 const { getTokenPath } = require('./provider');
 const { getProviderName, getHorizonDataDir, getAppDataPath } = require('./paths');
-const { setupProcessHandlers, existsSafe } = require('./utils');
+const { setupProcessHandlers, existsSafe, writeJsonAtomicAsync } = require('./utils');
 setupProcessHandlers();
 
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
@@ -672,7 +672,7 @@ async function loginPlayer() {
             const sets = JSON.parse(await fs.promises.readFile(settingsPath, 'utf8'));
             if (sets.provider !== providerName) {
                 sets.provider = providerName;
-                await fs.promises.writeFile(settingsPath, JSON.stringify(sets, null, 2));
+                await writeJsonAtomicAsync(settingsPath, sets);
             }
         } catch (_) { if (_ && _.code !== 'ENOENT') console.error('[login.js] Erreur silencieuse interceptée:', _.message || _); }
     }

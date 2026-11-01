@@ -19,10 +19,10 @@ async function isLockStale() {
         if (!isNaN(pid)) {
             try { 
                 process.kill(pid, 0); 
-                return age > STALE_LOCK_MS; 
+                return age > 30000; 
             } catch (e) { 
                 if (e.code === 'ESRCH') return true; 
-                if (e.code === 'EPERM') return age > STALE_LOCK_MS;
+                if (e.code === 'EPERM') return age > 30000;
             }
         }
         return age > 30000;

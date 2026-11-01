@@ -78,3 +78,35 @@ test('scanner exports IGNORED and ignores specified directories in generateManif
         await fs.promises.rm(tmpDir, { recursive: true, force: true });
     }
 });
+
+test('generateManifest retains oldManifest entry on transient non-ENOENT error', async () => {
+    const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'horizon-scanner-preserve-'));
+    const origStat = fs.promises.stat;
+    try {
+        const filePath = path.join(tmpDir, 'locked.txt');
+        await fs.promises.writeFile(filePath, 'important data');
+        const oldM = {
+            'locked.txt': { hash: 'hash123', mtime: 1000, size: 14 }
+        };
+
+        // Mock stat to simulate EBUSY for locked.txt
+        fs.promises.stat = async (p, ...args) => {
+            if (p.includes('locked.txt')) {
+                const err = new Error('resource busy or locked');
+                err.code = 'EBUSY';
+                throw err;
+            }
+            return origStat.call(fs.promises, p, ...args);
+        };
+
+        const manifest = await generateManifest(tmpDir, tmpDir, oldM);
+        assert.strictEqual(manifest['locked.txt'].hash, 'hash123');
+
+        // Verify compareManifests does not consider it deleted
+        const diff = compareManifests(oldM, manifest);
+        assert.strictEqual(diff.deleted.length, 0);
+    } finally {
+        fs.promises.stat = origStat;
+        await fs.promises.rm(tmpDir, { recursive: true, force: true });
+    }
+});

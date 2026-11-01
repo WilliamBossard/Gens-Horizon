@@ -6,11 +6,15 @@ const util = require('util');
 ['log', 'info', 'warn', 'error'].forEach(method => {
     console[method] = function (...args) {
         const msg = util.format(...args);
-        if (msg.trim().startsWith('{') && msg.trim().endsWith('}')) {
-            process.stdout.write(msg + '\n');
-        } else {
-            process.stderr.write(msg + '\n');
+        const trimmed = msg.trim();
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+            try {
+                JSON.parse(trimmed);
+                process.stdout.write(msg + '\n');
+                return;
+            } catch (_) {}
         }
+        process.stderr.write(msg + '\n');
     };
 });
 const fs = require('fs');
@@ -35,19 +39,19 @@ const SETTINGS_PATH = path.join(getHorizonDataDir(), 'horizon_settings.json');
         await fs.promises.writeFile(SETTINGS_PATH, JSON.stringify(defaultSettings, null, 2));
     }
     const args = process.argv.slice(2);
-    if (args.includes('--login')) {
+    if (args.includes('--login') || args.includes('login')) {
         require('./login.js');
-    } else if (args.includes('--check')) {
+    } else if (args.includes('--check') || args.includes('check')) {
         require('./check.js');
-    } else if (args.includes('--sync')) {
+    } else if (args.includes('--sync') || args.includes('sync')) {
         require('./sync.js');
-    } else if (args.includes('--upload')) {
+    } else if (args.includes('--upload') || args.includes('upload')) {
         require('./upload.js');
-    } else if (args.includes('--quota')) {
+    } else if (args.includes('--quota') || args.includes('quota')) {
         require('./quota.js');
-    } else if (args.includes('--rollback')) {
+    } else if (args.includes('--rollback') || args.includes('rollback')) {
         require('./rollback.js');
-    } else if (args.includes('--delete')) {
+    } else if (args.includes('--delete') || args.includes('delete')) {
         require('./sync.js');
     } else {
         console.log(JSON.stringify({

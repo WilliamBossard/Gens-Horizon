@@ -9,9 +9,9 @@ const { withRetry } = require('./retry');
 const {
     checkConnectivity,
     readJsonSafe,
-    writeJsonAtomic,
     writeJsonAtomicAsync,
     getCanonicalName,
+    parseTargetInstance,
     registerTemp,
     unregisterTemp,
     setupProcessHandlers,
@@ -77,19 +77,8 @@ async function syncAllInstances() {
         const syncInfoPath = path.join(dataDir, 'last_sync.json');
         const force = args.includes('--force');
         const isDelete = args.includes('--delete');
-        const COMMANDS = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
-        let targetInstance = null;
-        const instIdx = args.indexOf('--instance');
-        if (instIdx !== -1 && args[instIdx + 1] && !args[instIdx + 1].startsWith('--')) {
-            targetInstance = args[instIdx + 1];
-        } else {
-            const eqArg = args.find(a => a.startsWith('--instance='));
-            if (eqArg) {
-                targetInstance = eqArg.split('=')[1];
-            } else {
-                targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
-            }
-        }
+        const targetInstance = parseTargetInstance(args);
+
         let settings = { syncMode: 'SMART', maxRetries: 3, retryBaseDelay: 1500 };
         if (await fs.promises.access(settingsPath).then(()=>true).catch(()=>false)) {
             try { settings = { ...settings, ...JSON.parse(await fs.promises.readFile(settingsPath, 'utf8')) }; } catch (err) { process.stderr.write(`[sync] Erreur lecture settings: ${err.message}\n`); }
@@ -159,6 +148,7 @@ async function syncAllInstances() {
                     loader: loader
                 });
             }));
+            richList.sort((a, b) => list.indexOf(a.name) - list.indexOf(b.name));
             console.log(JSON.stringify({ type: 'CLOUD_LIST', data: list, richData: richList }));
             return;
         }
@@ -196,8 +186,11 @@ async function syncAllInstances() {
                     }
                     continue;
                 }
-                const targetPath = path.join(getInstancesFolder(), safeInst);
-                const lastSync = syncState[safeInst] ? new Date(syncState[safeInst]).getTime() : 0;
+                const rawPath = path.join(getInstancesFolder(), inst);
+                const safePath = path.join(getInstancesFolder(), safeInst);
+                const targetPath = (await existsSafe(rawPath)) ? rawPath : safePath;
+                const targetExists = await existsSafe(targetPath);
+                const lastSync = targetExists && syncState[safeInst] ? new Date(syncState[safeInst]).getTime() : 0;
                 const baseTime = new Date(baseFile.modifiedTime).getTime();
                 const deltaFiles = Object.keys(cloudIndex)
                     .filter(n => n.startsWith(`GensHorizon_Delta_${safeInst}_`) && n.endsWith('.zip'))
@@ -207,18 +200,21 @@ async function syncAllInstances() {
                     })
                     .filter(d => !isNaN(d.ts))
                     .sort((a, b) => a.ts - b.ts);
-                const CLOCK_SKEW_TOLERANCE_MS = 60_000;
+                const CLOCK_SKEW_TOLERANCE_MS = 15 * 60_000; // 15 minutes de tolérance
                 const pendingDeltas = deltaFiles.filter(d => (d.ts > lastSync || force) && d.ts >= (baseTime - CLOCK_SKEW_TOLERANCE_MS));
-                const baseChanged = baseTime > lastSync || force;
+                const baseChanged = !targetExists || baseTime > lastSync || force;
                 if (!baseChanged && pendingDeltas.length === 0) {
                     console.log(JSON.stringify({ type: 'INFO', instance: inst, message: `${inst} est déjà à jour.` }));
                     continue;
                 }
-                if (!(await fs.promises.access(targetPath).then(()=>true).catch(()=>false))) {
+                if (!(await existsSafe(targetPath))) {
                     await fs.promises.mkdir(targetPath, { recursive: true });
                     isNewInstance = true;
                 } else if (baseChanged || pendingDeltas.length > 0) {
                     rollbackPath = await createRollbackSnapshot(targetPath);
+                    if (!rollbackPath) {
+                        throw new Error(`Échec de création de la sauvegarde rollback pour ${inst}. Synchronisation annulée pour protéger vos fichiers locaux.`);
+                    }
                 }
                 if (baseChanged) {
                     tempBase = path.join(dataDir, `download_base_${safeInst}.zip`);
@@ -289,12 +285,24 @@ async function syncAllInstances() {
                 }));
             } catch (instErr) {
                 const safeInst = getCanonicalName(inst);
-                const targetPath = path.join(getInstancesFolder(), safeInst);
+                const rawPath = path.join(getInstancesFolder(), inst);
+                const safePath = path.join(getInstancesFolder(), safeInst);
+                const targetPath = (await existsSafe(rawPath)) ? rawPath : safePath;
                 let restored = false;
                 if (rollbackPath) {
                     try {
                         if (await existsSafe(targetPath)) await safeRm(targetPath);
-                        await fs.promises.rename(rollbackPath, targetPath);
+                        let renamed = false;
+                        for (let i = 0; i < 5; i++) {
+                            try {
+                                await fs.promises.rename(rollbackPath, targetPath);
+                                renamed = true;
+                                break;
+                            } catch (rErr) {
+                                if (i === 4) throw rErr;
+                                await new Promise(r => setTimeout(r, 50 * (i + 1)));
+                            }
+                        }
                         restored = true;
                         process.stderr.write(`[sync] Instance restaurée automatiquement suite à l'erreur : ${inst}\n`);
                     } catch (rErr) {

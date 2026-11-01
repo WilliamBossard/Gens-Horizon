@@ -12,9 +12,9 @@ const {
     checkConnectivity,
     getCloudSettings,
     readJsonSafe,
-    writeJsonAtomic,
     writeJsonAtomicAsync,
     getCanonicalName,
+    parseTargetInstance,
     registerTemp,
     unregisterTemp,
     setupProcessHandlers,
@@ -137,19 +137,7 @@ async function upload() {
         const syncInfoPath = path.join(dataDir, 'last_sync.json');
         const args         = process.argv.slice(2);
         const force        = args.includes('--force');
-        const COMMANDS     = new Set(['sync', 'upload', 'check', 'login', 'quota', 'rollback']);
-        let targetInstance = null;
-        const instIdx = args.indexOf('--instance');
-        if (instIdx !== -1 && args[instIdx + 1] && !args[instIdx + 1].startsWith('--')) {
-            targetInstance = args[instIdx + 1];
-        } else {
-            const eqArg = args.find(a => a.startsWith('--instance='));
-            if (eqArg) {
-                targetInstance = eqArg.split('=')[1];
-            } else {
-                targetInstance = args.find(a => !a.startsWith('--') && !COMMANDS.has(a));
-            }
-        }
+        const targetInstance = parseTargetInstance(args);
         const { sets: settings, retryOpts } = await getCloudSettings(settingsPath);
         const provider = await getProvider(settings);
         if (!provider) {
@@ -163,8 +151,10 @@ async function upload() {
         let localInstances = [];
         if (targetInstance) {
             console.log(JSON.stringify({ type: 'PROGRESS', step: 'CHECKING', value: 0, instance: targetInstance }));
-            const targetFolder = path.join(getInstancesFolder(), getCanonicalName(targetInstance));
-            try { await fs.promises.access(targetFolder); } catch {
+            const rawFolder = path.join(getInstancesFolder(), targetInstance);
+            const safeFolder = path.join(getInstancesFolder(), getCanonicalName(targetInstance));
+            const targetFolder = (await existsSafe(rawFolder)) ? rawFolder : safeFolder;
+            if (!(await existsSafe(targetFolder))) {
                 console.log(JSON.stringify({ type: 'ERROR', message: `Instance ${targetInstance} introuvable localement.` }));
                 return;
             }
@@ -173,7 +163,7 @@ async function upload() {
             localInstances = await scanInstances();
         }
         const cloudIndex = await getCloudIndexAndCleanDuplicates(provider, retryOpts, "[upload]");
-        const CLOCK_SKEW_TOLERANCE_MS = 60_000;
+        const CLOCK_SKEW_TOLERANCE_MS = 15 * 60_000; // 15 minutes de tolérance
         for (const name of Object.keys(cloudIndex)) {
             if (!name.startsWith(PREFIX_DELTA)) continue;
             const body  = name.replace(PREFIX_DELTA, '').replace('.zip', '');
@@ -198,7 +188,9 @@ async function upload() {
         let syncState = await readJsonSafe(syncInfoPath);
         for (const inst of localInstances) {
             try {
-                const folder = path.join(getInstancesFolder(), getCanonicalName(inst));
+                const rawFolder = path.join(getInstancesFolder(), inst);
+                const safeFolder = path.join(getInstancesFolder(), getCanonicalName(inst));
+                const folder = (await existsSafe(rawFolder)) ? rawFolder : safeFolder;
                 const safeInst = getCanonicalName(inst); 
                 const baseName     = `${PREFIX_BACKUP}${safeInst}.zip`;
                 const manifestName = `${PREFIX_MANIFEST}${safeInst}.json`;

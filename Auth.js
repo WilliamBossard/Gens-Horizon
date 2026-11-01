@@ -12,47 +12,62 @@ const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { getHorizonDataDir } = require('./paths');
-const { registerTemp, unregisterTemp, existsSafe } = require('./utils');
-const BASE_DIR = getHorizonDataDir();
-const MACHINE_ID_FILE = path.join(BASE_DIR, '.machine_id');
-const SALT_FILE = path.join(BASE_DIR, 'salt.key');
+const { registerTemp, unregisterTemp, existsSafe, safeUnlink } = require('./utils');
 const TOKEN_FILE_MODE = 0o600;
 
 let machineID = null;
 let salt = null;
 
+function getMachineIdFile() {
+    return path.join(getHorizonDataDir(), '.machine_id');
+}
+function getSaltFile() {
+    return path.join(getHorizonDataDir(), 'salt.key');
+}
+
 async function initAuthData() {
     if (machineID && salt) return;
     
-    if (await existsSafe(MACHINE_ID_FILE)) {
-        machineID = (await fs.promises.readFile(MACHINE_ID_FILE, 'utf8')).trim();
+    const machineIdFile = getMachineIdFile();
+    const saltFile = getSaltFile();
+
+    if (await existsSafe(machineIdFile)) {
+        machineID = (await fs.promises.readFile(machineIdFile, 'utf8')).trim();
     } else {
         machineID = crypto.randomBytes(32).toString('hex');
         try {
-            await fs.promises.writeFile(MACHINE_ID_FILE, machineID, { mode: 0o600 });
+            await fs.promises.writeFile(machineIdFile, machineID, { mode: 0o600 });
         } catch (e) {
             process.stderr.write(`[Auth] AVERTISSEMENT : Création de .machine_id échouée (${e.message}). Utilisation du fallback matériel.\n`);
-            const nets = os.networkInterfaces();
             let mac = '00:00:00:00:00:00';
-            for (const name of Object.keys(nets)) {
-                for (const net of nets[name]) {
-                    if (!net.internal && net.mac !== '00:00:00:00:00:00') {
-                        mac = net.mac;
-                        break;
+            try {
+                const nets = os.networkInterfaces() || {};
+                for (const name of Object.keys(nets)) {
+                    for (const net of (nets[name] || [])) {
+                        if (!net.internal && net.mac && net.mac !== '00:00:00:00:00:00') {
+                            mac = net.mac;
+                            break;
+                        }
                     }
+                    if (mac !== '00:00:00:00:00:00') break;
                 }
-                if (mac !== '00:00:00:00:00:00') break;
+            } catch (_) {}
+            let username = '';
+            try {
+                username = os.userInfo().username || '';
+            } catch (_) {
+                username = process.env.USERNAME || process.env.USER || '';
             }
-            machineID = crypto.createHash('sha256').update(os.hostname() + mac + (os.userInfo().username || '')).digest('hex');
+            machineID = crypto.createHash('sha256').update(os.hostname() + mac + username).digest('hex');
         }
     }
 
-    if (await existsSafe(SALT_FILE)) {
-        salt = await fs.promises.readFile(SALT_FILE);
+    if (await existsSafe(saltFile)) {
+        salt = await fs.promises.readFile(saltFile);
     } else {
         salt = crypto.randomBytes(16);
         try {
-            await fs.promises.writeFile(SALT_FILE, salt, { mode: TOKEN_FILE_MODE });
+            await fs.promises.writeFile(saltFile, salt, { mode: TOKEN_FILE_MODE });
         } catch (e) {
             throw new Error(`[Auth] ERREUR CRITIQUE : Impossible d'écrire le fichier de sécurité (salt.key). Vérifiez les permissions. Détail : ${e.message}`);
         }
@@ -73,6 +88,7 @@ function getSecretKey() {
     })();
     return SECRET_KEY_PROMISE;
 }
+
 async function _encrypt(text) {
     const key = await getSecretKey();
     const iv = crypto.randomBytes(12);
@@ -82,6 +98,7 @@ async function _encrypt(text) {
     const authTag = cipher.getAuthTag().toString('hex');
     return iv.toString('hex') + ':' + authTag + ':' + encrypted;
 }
+
 async function _decrypt(text) {
     try {
         const key = await getSecretKey();
@@ -107,6 +124,7 @@ async function _decrypt(text) {
         throw new Error('Impossible de déchiffrer le token. (Machine différente ou fichier corrompu ?)');
     }
 }
+
 async function getSecureToken(filePath) {
     if (!(await existsSafe(filePath))) return null;
     const raw = (await fs.promises.readFile(filePath, 'utf8')).trim();
@@ -128,17 +146,36 @@ async function getSecureToken(filePath) {
         throw new Error('Impossible de déchiffrer le token. (Machine différente ?)');
     }
 }
+
 async function encryptToken(filePath, tokenData) {
-    const tmp = filePath + '.tmp';
+    const rand = crypto.randomBytes(4).toString('hex');
+    const tmp = `${filePath}.${process.pid}.${Date.now()}.${rand}.tmp`;
     registerTemp(tmp);
     const encrypted = await _encrypt(JSON.stringify(tokenData));
     await fs.promises.writeFile(tmp, encrypted, {
         encoding: 'utf8',
         mode: TOKEN_FILE_MODE
     });
-    await fs.promises.rename(tmp, filePath);
-    unregisterTemp(tmp);
+    try {
+        let renamed = false;
+        for (let i = 0; i < 5; i++) {
+            try {
+                await fs.promises.rename(tmp, filePath);
+                renamed = true;
+                break;
+            } catch (rErr) {
+                if (i === 4) throw rErr;
+                await new Promise(r => setTimeout(r, 25 * (i + 1)));
+            }
+        }
+    } catch (err) {
+        await safeUnlink(tmp);
+        throw err;
+    } finally {
+        unregisterTemp(tmp);
+    }
 }
+
 module.exports = {
     getSecureToken,
     encryptToken,
