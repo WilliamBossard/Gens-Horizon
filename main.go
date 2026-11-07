@@ -24,6 +24,9 @@ func main() {
 				os.Exit(0)
 			}
 		}
+		if err := stdinScanner.Err(); err != nil {
+			ipc.Logf("[Horizon] Erreur lecture stdin : %v", err)
+		}
 	}()
 
 	// Nettoyage automatique des fichiers temporaires orphelins (> 10 min)
