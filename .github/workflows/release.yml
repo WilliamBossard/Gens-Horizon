@@ -25,6 +25,9 @@ jobs:
       - name: Run Tests
         run: go test -v ./...
 
+      - name: Install lipo (Universal Binary tool)
+        run: go install github.com/konoui/lipo@latest
+
       - name: Compile Horizon Binaries (Cross-Platform)
         run: |
           mkdir -p dist
@@ -47,7 +50,7 @@ jobs:
           # macOS Universal Binary (x86_64 + ARM64 Apple Silicon)
           GOOS=darwin GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/Horizon-macos-amd64 .
           GOOS=darwin GOARCH=arm64 go build -ldflags="$LDFLAGS" -o dist/Horizon-macos-arm64 .
-          llvm-lipo -create -output dist/Horizon-macos dist/Horizon-macos-amd64 dist/Horizon-macos-arm64
+          lipo -create -output dist/Horizon-macos dist/Horizon-macos-amd64 dist/Horizon-macos-arm64
           rm dist/Horizon-macos-amd64 dist/Horizon-macos-arm64
 
       - name: Generate SHA256 Checksums
