@@ -5,30 +5,33 @@ This document thoroughly describes the architecture, synchronization model, cryp
 ---
 
 ## 1. Overview & Global Architecture
-Gens-Horizon is a standalone CLI engine written in Node.js, designed to run in the background. It is responsible for the bidirectional synchronization of game instances with Cloud providers (Google Drive, Dropbox, OneDrive).
+Gens-Horizon is a standalone CLI engine written in **Go (Golang)**, designed to run in the background. It is responsible for the bidirectional synchronization of game instances with Cloud providers (Google Drive, Dropbox, OneDrive).
 
 It manages file versioning via a **"Delta Sync"** (differential synchronization) approach and **"Incremental Backups"**, guaranteeing blazing speed and drastic savings in bandwidth and storage.
 
-### Core Components
-- **`index.js`**: Main CLI router. Handles commands passed to the binary (e.g., `--sync`, `--login`, `--rollback`). It redirects `console.log` streams to `stderr` to protect the IPC JSON stream.
-- **`provider.js` & `/providers`**: Implements the Factory pattern (`getProvider()`). This design makes the engine agnostic to the Cloud used. Each provider inherits a common interface handling OAuth2 authentication, quotas, and file upload/download.
-- **`sync.js` / `upload.js`**: The core synchronization engines.
-  - `upload.js` identifies modified files, creates a partial archive (Delta), and uploads it to the Cloud.
-  - `sync.js` queries the Cloud, downloads missing Deltas, and applies them chronologically locally.
-- **`scanner.js`**: The local file scanner. It uses **SHA-256** hashing coupled with fast checks (mtime/size) and a concurrency limiter (`withConcurrency`) to instantly generate an instance Manifest without saturating the disk (EMFILE).
-- **`rollback.js`**: Allows restoring a local instance to the exact state of a past Delta, reconstructing the history deterministically.
-- **`cloud-operations.js`**: Encapsulates high-level operations on the Cloud Index (remote file list). Notably provides `getCloudIndexAndCleanDuplicates()` which fetches the cloud index and automatically purges obsolete backup duplicates to prevent excessive quota consumption. Used by `sync.js` and `upload.js`. <!-- AUDIT-24 -->
-- **`zip-utils.js`**: Utilities for secure ZIP file extraction.
-  - Strict protection against **Path Traversal** attacks (`resDest.startsWith(resolvedTarget)`).
-  - Verification of the ZIP magic signature (`0x504B0304`) AND the central directory before extraction.
-  - Uses **yauzl** for highly memory-optimized decompression. (Note: The engine strictly refuses zips whose central directory is unreadable, without attempting sequential fallback).
+### Core Architecture & Packages
+- **`main.go`**: Main CLI router. Dispatches subcommands (`--sync`, `--login`, `--rollback`, `--check`, `--upload`, `--quota`). It listens on `os.Stdin` for graceful `SHUTDOWN` commands sent by `Gens-Launcher`.
+- **`ipc/`**: Encapsulates the JSON stream over `os.Stdout`. All diagnostic or debug logs are redirected to `os.Stderr` to protect the IPC JSON stream.
+- **`providers/`**: Implements the Factory pattern (`GetProvider()`). Providers (`google.go`, `dropbox.go`, `onedrive.go`) share a common Go interface for OAuth2 tokens, quotas, and upload/download.
+- **`operations/`**: High-level commands (`sync.go`, `upload.go`, `check.go`, `quota.go`, `rollback.go`, `login.go`).
+  - `upload.go` identifies modified files, creates a partial archive (Delta), and uploads it to the Cloud.
+  - `sync.go` queries the Cloud, downloads missing Deltas, and applies them chronologically locally.
+  - `cloud_ops.go` purges obsolete backup duplicates on the cloud to prevent excessive quota consumption.
+- **`scanner/`**: Local file scanner. Uses **SHA-256** hashing with worker pool concurrency (16 goroutines) and fast checks (`mtime`/`size`) to generate instance Manifests instantly without saturating disk I/O.
+- **`ziputils/`**: Safe ZIP compression and extraction.
+  - Strict protection against **Path Traversal / Zip-Slip** attacks.
+  - Verification of the ZIP magic signature (`0x504B0304`) and central directory before extraction.
+- **`auth/`**: Token cryptographic primitives (PBKDF2 600,000 iterations, hardware-bound machine ID, AES-256-GCM).
+- **`lock/`**: Process synchronization lock (`horizon.lock`) with 5s heartbeat and stale lock handling.
+- **`paths/`**: Environment and data paths resolution for the Gens ecosystem.
+- **`retry/`**: Adaptive HTTP retry engine with jitter.
 
 ---
 
 ## 2. Communication Protocol (IPC JSON)
 The Horizon engine runs as a child process of the Launcher. It communicates asynchronously via standard input/output streams (`stdout` and `stdin`).
 
-All data emitted on `stdout` is strictly formatted in pure JSON. Example:
+All data emitted on `stdout` is strictly formatted in pure JSON lines. Example:
 ```json
 {
   "type": "PROGRESS",
@@ -37,9 +40,9 @@ All data emitted on `stdout` is strictly formatted in pure JSON. Example:
   "instance": "Aventure"
 }
 ```
-*Note: All `console.log/warn` emitted by internal libraries are intercepted and sent to `process.stderr` to prevent JSON parsing corruption on the Launcher side.*
+*Note: All diagnostics or error messages are sent to `os.Stderr` to prevent JSON parsing corruption on the Launcher side.*
 
-Common message types include: `PROGRESS`, `INFO`, `SUCCESS`, `ERROR`, `ROLLBACK_LIST`, `CHECK_RESULT`, `CLOUD_LIST`.
+Common message types include: `PROGRESS`, `INFO`, `SUCCESS`, `ERROR`, `ROLLBACK_LIST`, `CHECK_RESULT`, `CLOUD_LIST`, `QUOTA`, `OFFLINE`.
 
 ---
 
@@ -47,35 +50,30 @@ Common message types include: `PROGRESS`, `INFO`, `SUCCESS`, `ERROR`, `ROLLBACK_
 
 The application follows NIST recommendations and applies "Defense in Depth":
 
-1. **Hardware-Bound Authentication (`Auth.js`)**:
-   OAuth2 tokens are never stored in plaintext. They are encrypted on disk in `AES-256-GCM` (the authenticated GCM mode replaces the old CBC for maximum security).
+1. **Hardware-Bound Authentication (`internal/auth/auth.go`)**:
+   OAuth2 tokens are never stored in plaintext. They are encrypted on disk in `AES-256-GCM`.
    The encryption key (32 bytes) is derived as follows:
    - Function: `PBKDF2`
    - Iterations: **600,000** (Current NIST/OWASP standard to block offline brute-forcing).
-   - Salt: Random `salt.key` file (16 bytes) generated on first launch, stored with `mode: 0o600`.
-   - Password: Content of `.machine_id` — a random **256-bit** (32 bytes) identifier generated once on first launch with `crypto.randomBytes(32)`. Unlike the hostname, this ID cannot be guessed or reproduced on another machine.
-   *Stealing the Horizon folder without the physical machine (and its `.machine_id`) makes decryption virtually impossible.*
+   - Salt: Random `salt.key` file (16 bytes) generated on first launch with mode `0600`.
+   - Password: Content of `.machine_id` — a random **256-bit** (32 bytes) identifier generated once on first launch with cryptographically secure random bytes. Unlike the hostname, this ID cannot be guessed or reproduced on another machine.
 
-   Seamless migration: If a token is encrypted with the old format (AES-CBC), it is automatically migrated to AES-GCM upon the first successful decryption.
-
-2. **Synchronization Integrity (`lock.js`)**:
+2. **Synchronization Integrity (`internal/lock/lock.go`)**:
    A lockfile system prevents launching multiple simultaneous synchronization operations (which would corrupt the instance).
-   - Mechanism: The `horizon.lock` file contains the PID of the master process. Creation is atomic (`O_CREAT | O_EXCL`).
-   - **Heartbeat**: The lock timestamp is updated every 5 seconds (`fs.promises.utimes`) to distinguish active processes from zombie processes.
-   - **Coupling with the Launcher**: The Launcher (`ipc-horizon.js`) reads the lockfile's `mtimeMs` via `fs.promises.stat()` to check for an active Horizon process. This implicit coupling means the heartbeat interval (5s) and the stale lock threshold (2h) must remain consistent between both projects.
-   - "Stale Lock": A lock is considered stale if the PID process is no longer running (`ESRCH`) or if it is older than 2 hours (`STALE_LOCK_MS = 7200000`). It is then purged automatically. If deletion fails (OS error), Horizon gracefully aborts without busy-waiting.
+   - Mechanism: The `horizon.lock` file contains the PID of the master process. Creation is atomic (`O_CREATE | O_EXCL`).
+   - **Heartbeat**: The lock timestamp is updated every 5 seconds (`os.Chtimes`) to distinguish active processes from zombie processes.
+   - **Coupling with the Launcher**: The Launcher (`ipc-horizon.js`) reads the lockfile's `mtimeMs` via `fs.promises.stat()` to check for an active Horizon process.
+   - "Stale Lock": A lock is considered stale if the PID process is no longer running or if the heartbeat is older than 30 seconds.
 
-3. **Offline Tolerance**:
-   Gens-Horizon is protected against "vacuum" executions. Although the engine autonomously handles transient network errors (adaptive Retry-Strategy), it is the **parent Launcher** that acts as the primary failsafe via `CloudUI.js` by disabling the Horizon execution chain when the machine is declared offline. This prevents the generation of unnecessary error logs and ensures resource conservation.
-
-4. **CI/CD Protection (`config.js`)**:
-   OAuth credentials (Client ID / Secret) are not hardcoded. The `config.js` file is generated dynamically at compile time (via GitHub Secrets). If missing or containing dummy keys, the engine will refuse to start to avoid leaking invalid credentials.
+3. **CI/CD & Secret Injection**:
+   OAuth credentials (Client ID / Secret) are not hardcoded. In CI/CD (`.github/workflows/release.yml`), they are injected at compile time via `-ldflags`. In local development, `config.json` (modeled after `config.example.json`) or environment variables can be used.
 
 ---
 
 ## 4. Tests and Quality
 
-The project includes test coverage via the native `node:test` module.
-- To run tests locally: `npm test`
-- Tests verify symmetric cryptography integrity, the adaptive retry system, locks, and hashing with concurrency limiting.
-- Continuous Integration (GitHub Actions) runs tests on Linux and Windows environments before any native compilation via `pkg`.
+Tests are run using standard Go tooling:
+```bash
+go test -v ./...
+```
+Tests verify symmetric cryptography integrity, lock management, multi-threaded scanner performance, and safe zip decompression.

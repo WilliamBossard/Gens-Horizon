@@ -1,4 +1,5 @@
 config.js
+config.json
 horizon_settings.json
 manifest_*.json
 last_sync.json

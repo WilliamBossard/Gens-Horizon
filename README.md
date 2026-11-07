@@ -2,27 +2,31 @@
 
 A cloud synchronization service for Minecraft players. Gens-Horizon is the official, high-performance headless cloud synchronization engine for the Gens ecosystem. It is designed to run in the background (CLI) and securely sync your local game instances with major cloud storage providers like Google Drive, Dropbox, and OneDrive.
 
+Written in **Go (Golang)** for minimum binary footprint (~7.5 MB), ultra-fast startup (<10 ms), and low memory overhead (~15 MB).
+
 ## Key Features
 
 - **Delta Sync Technology:** Only uploads and downloads the modified parts of files, drastically reducing bandwidth and saving cloud storage space.
 - **Incremental Backups:** Keep a full history of your instance versions and roll back to any previous state deterministically.
 - **Enterprise-Grade Security:** Utilizes PBKDF2 (600,000 iterations) with AES-256-GCM encryption. All OAuth2 tokens are hardware-bound and securely encrypted on disk.
-- **High Performance:** Multi-threaded local file hashing (SHA-256) and highly optimized zip extraction using `yauzl`.
-- **Concurrency & Locking:** A robust lockfile mechanism prevents multiple synchronization processes from running simultaneously and corrupting your game data.
+- **High Performance:** Multi-threaded local file hashing (SHA-256) and memory-optimized zip extraction.
+- **Concurrency & Locking:** A robust lockfile mechanism with a 5s heartbeat prevents multiple synchronization processes from running simultaneously and corrupting your game data.
+- **Zero Runtime Dependencies:** Compiles down to a standalone native binary for Windows, Linux, and macOS without needing Node.js or any external runtime.
 
 ## Getting Started
 
 Gens-Horizon operates as a child process of **Gens-Launcher**. However, if you wish to run or compile it standalone for development purposes:
 
 ### Prerequisites
-- **Node.js** (version 18 or higher recommended)
+- **Go** (version 1.22 or higher recommended)
 
-### Installation
-Clone the repository and install dependencies:
+### Build
 ```bash
-git clone https://github.com/YourUsername/gens-horizon.git
-cd gens-horizon
-npm install
+# Build the binary
+go build -ldflags="-s -w" -o dist/Horizon.exe .
+
+# Run tests
+go test -v ./...
 ```
 
 ### Running the Engine
@@ -30,13 +34,13 @@ Gens-Horizon communicates via strict JSON over `stdout`/`stdin`. Typical command
 
 ```bash
 # Check for a new version
-node index.js --check
+./dist/Horizon.exe --check
 
 # Perform a cloud synchronization for a specific instance
-node index.js --sync --instance "MyInstanceName"
+./dist/Horizon.exe --sync --instance "MyInstanceName"
 
 # Log into a cloud provider
-node index.js --login google
+./dist/Horizon.exe --login google
 ```
 
 ## Security & Architecture

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Nom de la version (ex: v1.1.0)'
+        description: 'Nom de la version (ex: v1.4.2)'
         required: true
-        default: 'v1.1.0'
+        default: 'v1.4.2'
 
 jobs:
   build-and-release:
@@ -14,80 +14,45 @@ jobs:
 
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          node-version: '24'
+          go-version: '1.24'
+          check-latest: true
 
+      - name: Run Tests
+        run: go test -v ./...
 
-      - name: Install Dependencies
-        run: npm install
-
-      - name: Inject API Credentials (config.js)
+      - name: Compile Horizon Binaries (Cross-Platform)
         run: |
-          cat << 'EOF' > config.js
-          const config = {
-              credentials: {
-                  google: {
-                      client_id: "${{ secrets.G_CLIENT_ID }}",
-                      client_secret: "${{ secrets.G_CLIENT_SECRET }}",
-                      auth_uri: "https://accounts.google.com/o/oauth2/auth",
-                      token_uri: "https://oauth2.googleapis.com/token",
-                      redirect_uri: "http://127.0.0.1:12543"
-                  },
-                  dropbox: {
-                      client_id: "${{ secrets.D_CLIENT_ID }}",
-                      client_secret: "${{ secrets.D_CLIENT_SECRET }}",
-                      auth_uri: "https://www.dropbox.com/oauth2/authorize",
-                      token_uri: "https://api.dropbox.com/oauth2/token",
-                      redirect_uri: "http://127.0.0.1:12544"
-                  },
-                  onedrive: {
-                      client_id: "${{ secrets.O_CLIENT_ID }}",
-                      client_secret: "",
-                      auth_uri: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-                      token_uri: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-                      redirect_uri: "http://127.0.0.1:12545",
-                      scope: "Files.ReadWrite offline_access User.Read"
-                  }
-              }
-          };
+          mkdir -p dist
+          LDFLAGS="-s -w -X 'github.com/WilliamBossard/Gens-Horizon/config.GoogleClientID=${{ secrets.G_CLIENT_ID }}' \
+                         -X 'github.com/WilliamBossard/Gens-Horizon/config.GoogleClientSecret=${{ secrets.G_CLIENT_SECRET }}' \
+                         -X 'github.com/WilliamBossard/Gens-Horizon/config.DropboxClientID=${{ secrets.D_CLIENT_ID }}' \
+                         -X 'github.com/WilliamBossard/Gens-Horizon/config.DropboxClientSecret=${{ secrets.D_CLIENT_SECRET }}' \
+                         -X 'github.com/WilliamBossard/Gens-Horizon/config.OneDriveClientID=${{ secrets.O_CLIENT_ID }}' \
+                         -X 'github.com/WilliamBossard/Gens-Horizon/config.AppVersion=${{ github.event.inputs.tag_name }}'"
 
-          module.exports = {
-              getConfig: (provider) => {
-                  const provConfig = config.credentials[provider];
-                  if (!provConfig) throw new Error(`Unknown provider: ${provider}`);
-                  if (provConfig.client_id === "fake") {
-                      throw new Error(`Configuration OAuth2 manquante pour ${provider}. Veuillez éditer config.js.`);
-                  }
-                  return provConfig;
-              },
-              ...config
-          };
-          EOF
+          # Windows amd64
+          GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/Horizon.exe .
 
-      - name: Execute Tests
-        run: npm test
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/Horizon-linux .
 
-      - name: Compile with pkg
-        run: npm run dist
-
-      - name: Prepare Assets
-        run: |
-          mv dist/Horizon-win.exe dist/Horizon.exe 2>/dev/null || mv dist/Horizon-win-x64.exe dist/Horizon.exe 2>/dev/null || true
-          mv dist/Horizon-linux-x64 dist/Horizon-linux 2>/dev/null || true
-          mv dist/Horizon-macos-x64 dist/Horizon-macos 2>/dev/null || true
+          # macOS amd64
+          GOOS=darwin GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/Horizon-macos .
 
       - name: Generate SHA256 Checksums
         run: |
-          [ -f dist/Horizon.exe ] && sha256sum dist/Horizon.exe | awk '{print $1}' > dist/Horizon.exe.sha256 || true
-          [ -f dist/Horizon-linux ] && sha256sum dist/Horizon-linux | awk '{print $1}' > dist/Horizon-linux.sha256 || true
-          [ -f dist/Horizon-macos ] && sha256sum dist/Horizon-macos | awk '{print $1}' > dist/Horizon-macos.sha256 || true
+          cd dist
+          sha256sum Horizon.exe | awk '{print $1}' > Horizon.exe.sha256
+          sha256sum Horizon-linux | awk '{print $1}' > Horizon-linux.sha256
+          sha256sum Horizon-macos | awk '{print $1}' > Horizon-macos.sha256
 
       - name: Publish to GitHub Releases
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag_name }}
           name: Release ${{ github.event.inputs.tag_name }}
@@ -99,5 +64,3 @@ jobs:
             dist/Horizon-linux.sha256
             dist/Horizon-macos
             dist/Horizon-macos.sha256
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
