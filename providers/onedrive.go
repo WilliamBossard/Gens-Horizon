@@ -102,7 +102,7 @@ func (o *OneDriveProvider) refreshToken() error {
 	}
 
 	if err := auth.EncryptToken(o.tokenPath, o.tokenData); err != nil {
-		ipc.Logf("[onedrive] Ã‰chec sauvegarde token rafraÃ®chi : %v", err)
+		ipc.Logf("[onedrive] Échec sauvegarde token rafraîchi : %v", err)
 	}
 
 	return nil
@@ -346,7 +346,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 		UploadURL string `json:"uploadUrl"`
 	}
 	if err := json.Unmarshal(sessBytes, &sessionRes); err != nil || sessionRes.UploadURL == "" {
-		return "", errors.New("aucune URL d'upload session retournÃ©e par OneDrive")
+		return "", errors.New("aucune URL d'upload session retournée par OneDrive")
 	}
 
 	// Upload par chunks de 10 Mo

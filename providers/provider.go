@@ -45,7 +45,7 @@ func GetTokenPath(providerName string) string {
 	return specific
 }
 
-// GetProvider instancie le provider sÃ©lectionnÃ© avec son token dÃ©chiffrÃ©
+// GetProvider instancie le provider sélectionné avec son token déchiffré
 func GetProvider(settings config.Settings) (Provider, error) {
 	name := settings.Provider
 	if name == "" {
@@ -54,7 +54,7 @@ func GetProvider(settings config.Settings) (Provider, error) {
 
 	tokenPath := GetTokenPath(name)
 	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
-		return nil, nil // Non connectÃ©
+		return nil, nil // Non connecté
 	}
 
 	var tokenData auth.TokenData

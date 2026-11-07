@@ -182,7 +182,7 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 		return manifest, nil
 	}
 
-	// Traitement parallÃ¨le des hashes via un pool de workers (concurrence max: 16)
+	// Traitement parallèle des hashes via un pool de workers (concurrence max: 16)
 	workerCount := 16
 	if len(tasks) < workerCount {
 		workerCount = len(tasks)
@@ -202,8 +202,8 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 			for t := range taskChan {
 				hash, err := HashFile(t.fullPath)
 				if err != nil {
-					ipc.Logf("[scanner] Fichier ignorÃ© (%v) : %s", err, t.fullPath)
-					// Conserver l'ancienne entrÃ©e en cas d'erreur EBUSY/EPERM
+					ipc.Logf("[scanner] Fichier ignoré (%v) : %s", err, t.fullPath)
+					// Conserver l'ancienne entrée en cas d'erreur EBUSY/EPERM
 					if oldManifest != nil {
 						if oldEntry, ok := oldManifest[t.relPath]; ok {
 							manifestMu.Lock()
@@ -229,7 +229,7 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 	return manifest, nil
 }
 
-// CompareManifests compare deux manifests et retourne les fichiers ajoutÃ©s, modifiÃ©s et supprimÃ©s
+// CompareManifests compare deux manifests et retourne les fichiers ajoutés, modifiés et supprimés
 func CompareManifests(oldM, newM Manifest) ManifestDiff {
 	diff := ManifestDiff{
 		Added:    []string{},

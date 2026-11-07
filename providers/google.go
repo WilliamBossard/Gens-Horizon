@@ -68,13 +68,13 @@ func (g *GoogleProvider) refreshToken() error {
 
 	resp, err := http.PostForm("https://oauth2.googleapis.com/token", form)
 	if err != nil {
-		return fmt.Errorf("erreur requÃªte refresh token : %w", err)
+		return fmt.Errorf("erreur requête refresh token : %w", err)
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Ã©chec rafraÃ®chissement token (HTTP %d) : %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("échec rafraîchissement token (HTTP %d) : %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var res struct {
@@ -93,7 +93,7 @@ func (g *GoogleProvider) refreshToken() error {
 	}
 
 	if err := auth.EncryptToken(g.tokenPath, g.tokenData); err != nil {
-		ipc.Logf("[google] Ã‰chec sauvegarde token rafraÃ®chi : %v", err)
+		ipc.Logf("[google] Échec sauvegarde token rafraîchi : %v", err)
 	}
 
 	return nil
@@ -241,7 +241,7 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 		defer resp.Body.Close()
 	}
 
-	// DÃ©tection page de confirmation Google Drive pour gros fichiers
+	// Détection page de confirmation Google Drive pour gros fichiers
 	contentType := resp.Header.Get("Content-Type")
 	if resp.StatusCode == http.StatusOK && (strings.Contains(contentType, "text/html") || (strings.Contains(contentType, "application/json") && !strings.Contains(contentType, "octet"))) {
 		_ = resp.Body.Close()
@@ -256,7 +256,7 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("[google] Erreur tÃ©lÃ©chargement HTTP %d : %s", resp.StatusCode, string(b))
+		return fmt.Errorf("[google] Erreur téléchargement HTTP %d : %s", resp.StatusCode, string(b))
 	}
 
 	out, err := os.Create(destPath)
@@ -299,7 +299,7 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 
 	if totalSize > 0 && downloaded < totalSize {
 		_ = os.Remove(destPath)
-		return fmt.Errorf("tÃ©lÃ©chargement incomplet : %d / %d octets reÃ§us", downloaded, totalSize)
+		return fmt.Errorf("téléchargement incomplet : %d / %d octets reçus", downloaded, totalSize)
 	}
 
 	return nil
@@ -361,18 +361,18 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("[google] initiation upload resumable Ã©chouÃ©e : HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("[google] initiation upload resumable échouée : HTTP %d", resp.StatusCode)
 	}
 
 	uploadURL := resp.Header.Get("Location")
 	if uploadURL == "" {
-		return "", errors.New("[google] aucune URL d'upload retournÃ©e")
+		return "", errors.New("[google] aucune URL d'upload retournée")
 	}
 
-	// Validation de sÃ©curitÃ© de l'URL d'upload
+	// Validation de sécurité de l'URL d'upload
 	parsedU, err := url.Parse(uploadURL)
 	if err != nil || (!strings.HasSuffix(parsedU.Hostname(), "googleapis.com") && parsedU.Hostname() != "googleapis.com") {
-		return "", fmt.Errorf("[google] sÃ©curitÃ© : URL d'upload suspecte %s", uploadURL)
+		return "", fmt.Errorf("[google] sécurité : URL d'upload suspecte %s", uploadURL)
 	}
 
 	// Streaming PUT vers l'uploadURL
@@ -402,7 +402,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 
 	respBytes, _ := io.ReadAll(putResp.Body)
 	if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("[google] Ã©chec upload ZIP (HTTP %d) : %s", putResp.StatusCode, string(respBytes))
+		return "", fmt.Errorf("[google] échec upload ZIP (HTTP %d) : %s", putResp.StatusCode, string(respBytes))
 	}
 
 	var res struct {

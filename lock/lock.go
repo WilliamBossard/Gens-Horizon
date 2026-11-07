@@ -26,7 +26,7 @@ func getLockFilePath() string {
 	return filepath.Join(paths.GetHorizonDataDir(), "horizon.lock")
 }
 
-// IsLockStale vÃ©rifie si le fichier de lock correspond Ã  un processus mort ou Ã  un heartbeat dÃ©passÃ©
+// IsLockStale vérifie si le fichier de lock correspond à un processus mort ou à un heartbeat dépassé
 func isLockStale(lockPath string) bool {
 	info, err := os.Stat(lockPath)
 	if err != nil {
@@ -47,11 +47,11 @@ func isLockStale(lockPath string) bool {
 	if !alive {
 		return true
 	}
-	// Si le processus tourne encore mais que le heartbeat n'a pas Ã©tÃ© mis Ã  jour depuis 30s
+	// Si le processus tourne encore mais que le heartbeat n'a pas été mis à jour depuis 30s
 	return age > 30*time.Second
 }
 
-// AcquireLock tente d'acquÃ©rir le verrou. Renvoie true en cas de succÃ¨s, false si une instance tourne dÃ©jÃ .
+// AcquireLock tente d'acquérir le verrou. Renvoie true en cas de succès, false si une instance tourne déjà.
 func AcquireLock() bool {
 	lockMu.Lock()
 	defer lockMu.Unlock()
@@ -61,7 +61,7 @@ func AcquireLock() bool {
 	for attempt := 0; attempt < 5; attempt++ {
 		if _, err := os.Stat(lockPath); err == nil {
 			if isLockStale(lockPath) {
-				ipc.Logf("[lock] Verrou pÃ©rimÃ© dÃ©tectÃ© â€” nettoyage.")
+				ipc.Logf("[lock] Verrou périmé détecté — nettoyage.")
 				_ = os.Remove(lockPath)
 			} else {
 				return false
@@ -103,7 +103,7 @@ func startHeartbeat(lockPath string) {
 	}()
 }
 
-// ReleaseLock libÃ¨re le verrou si le PID correspond
+// ReleaseLock libère le verrou si le PID correspond
 func ReleaseLock() {
 	lockMu.Lock()
 	defer lockMu.Unlock()

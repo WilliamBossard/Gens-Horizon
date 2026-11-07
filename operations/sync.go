@@ -40,7 +40,7 @@ func Sync(args []string) {
 	settings := paths.LoadSettings()
 	p, err := providers.GetProvider(settings)
 	if err != nil || p == nil {
-		ipc.SendError("AUTH_EXPIRED", "Session expirÃ©e. Veuillez lier Ã  nouveau votre compte depuis les paramÃ¨tres.", "")
+		ipc.SendError("AUTH_EXPIRED", "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.", "")
 		return
 	}
 
@@ -70,7 +70,7 @@ func Sync(args []string) {
 	// 2. Traitement de --delete
 	if isDelete {
 		if targetInst == "" {
-			ipc.SendError("ARG_MISSING", "Veuillez spÃ©cifier l'instance Ã  supprimer du cloud.", "")
+			ipc.SendError("ARG_MISSING", "Veuillez spécifier l'instance à supprimer du cloud.", "")
 			return
 		}
 		handleDelete(targetInst, cloudIndex, p, dataDir)
@@ -105,7 +105,7 @@ func Sync(args []string) {
 		baseBackupName := fmt.Sprintf("%s%s.zip", PrefixBackup, safeInst)
 		baseFile, hasBase := cloudIndex[baseBackupName]
 		if !hasBase {
-			ipc.SendError("NOT_FOUND", fmt.Sprintf("Aucune sauvegarde cloud trouvÃ©e pour l'instance '%s'.", inst), inst)
+			ipc.SendError("NOT_FOUND", fmt.Sprintf("Aucune sauvegarde cloud trouvée pour l'instance '%s'.", inst), inst)
 			continue
 		}
 
@@ -204,7 +204,7 @@ func Sync(args []string) {
 			err = p.DownloadFile(d.file.ID, tempDelta, nil, d.file.Size)
 			if err != nil {
 				_ = os.Remove(tempDelta)
-				ipc.Logf("[sync] Ã‰chec tÃ©lÃ©chargement delta %s : %v", d.file.Name, err)
+				ipc.Logf("[sync] Échec téléchargement delta %s : %v", d.file.Name, err)
 				continue
 			}
 
@@ -216,7 +216,7 @@ func Sync(args []string) {
 			_ = os.Remove(tempDelta)
 		}
 
-		// TÃ©lÃ©chargement du manifest distant pour synchroniser la rÃ©fÃ©rence locale
+		// Téléchargement du manifest distant pour synchroniser la référence locale
 		manifestName := fmt.Sprintf("%s%s.json", PrefixManifest, safeInst)
 		if mf, ok := cloudIndex[manifestName]; ok {
 			var remoteM scanner.Manifest
@@ -234,10 +234,15 @@ func Sync(args []string) {
 			cleanupRollback(rollbackPath)
 		}
 
+		syncMsg := "Base + delta(s) appliqué(s)."
+		if !needsBaseExtract {
+			syncMsg = fmt.Sprintf("%d delta(s) appliqué(s).", len(deltas))
+		}
+
 		ipc.Send(ipc.BaseMessage{
 			Type:     "SUCCESS",
 			Instance: inst,
-			Message:  "Synchronisation terminÃ©e avec succÃ¨s.",
+			Message:  syncMsg,
 		})
 	}
 }
@@ -391,7 +396,7 @@ func handleDelete(targetInst string, cloudIndex map[string]providers.CloudFile, 
 	ipc.Send(ipc.BaseMessage{
 		Type:     "SUCCESS",
 		Instance: targetInst,
-		Message:  "SupprimÃ© du cloud.",
+		Message:  "Supprimé du cloud.",
 	})
 }
 
@@ -402,11 +407,11 @@ func createRollbackSnapshot(localPath string) string {
 	rollbackFolder := filepath.Join(instDir, fmt.Sprintf("%s_rollback_%d", folderName, timestamp))
 
 	if err := copyDir(localPath, rollbackFolder); err != nil {
-		ipc.Logf("[sync] Impossible de crÃ©er le snapshot rollback : %v", err)
+		ipc.Logf("[sync] Impossible de créer le snapshot rollback : %v", err)
 		return ""
 	}
 
-	ipc.Logf("[sync] Snapshot rollback crÃ©Ã© : %s", filepath.Base(rollbackFolder))
+	ipc.Logf("[sync] Snapshot rollback créé : %s", filepath.Base(rollbackFolder))
 	return rollbackFolder
 }
 

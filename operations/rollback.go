@@ -22,7 +22,7 @@ func Rollback(args []string) {
 	if targetInst == "" {
 		entries, err := os.ReadDir(instDir)
 		if err != nil {
-			ipc.SendInfo("Aucun dossier d'instances trouvÃ©.")
+			ipc.SendInfo("Aucun dossier d'instances trouvé.")
 			return
 		}
 
@@ -103,11 +103,11 @@ func Rollback(args []string) {
 	// Restauration : vider le dossier actuel et recopier depuis le rollback
 	_ = os.RemoveAll(targetPath)
 	if err := copyDir(bestFolder, targetPath); err != nil {
-		ipc.SendError("RESTORE_FAILED", fmt.Sprintf("Ã‰chec de restauration du rollback : %v", err), targetInst)
+		ipc.SendError("RESTORE_FAILED", fmt.Sprintf("Échec de restauration du rollback : %v", err), targetInst)
 		return
 	}
 
-	// RÃ©gÃ©nÃ©ration du manifest local
+	// Régénération du manifest local
 	newManifest, _ := scanner.GenerateManifest(targetPath, nil)
 	localManifestFile := filepath.Join(paths.GetHorizonDataDir(), fmt.Sprintf("manifest_%s.json", safeInst))
 	if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
@@ -117,7 +117,7 @@ func Rollback(args []string) {
 	ipc.Send(ipc.BaseMessage{
 		Type:     "SUCCESS",
 		Instance: targetInst,
-		Message:  "Rollback effectuÃ© avec succÃ¨s.",
+		Message:  "Rollback effectué avec succès.",
 	})
 }
 

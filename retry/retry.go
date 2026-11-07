@@ -45,7 +45,7 @@ func IsRetryable(err error) bool {
 		}
 		return false
 	}
-	return true // Erreurs rÃ©seau / timeouts par dÃ©faut
+	return true // Erreurs réseau / timeouts par défaut
 }
 
 func Do(ctx context.Context, opts Options, fn func() error) error {
@@ -78,7 +78,7 @@ func Do(ctx context.Context, opts Options, fn func() error) error {
 		}
 
 		if opts.Label != "" {
-			ipc.Logf("[retry] %s : tentative %d/%d Ã©chouÃ©e (%v). Nouvelle tentative dans %v...", opts.Label, attempt, opts.MaxRetries, err, actualDelay)
+			ipc.Logf("[retry] %s : tentative %d/%d échouée (%v). Nouvelle tentative dans %v...", opts.Label, attempt, opts.MaxRetries, err, actualDelay)
 		}
 
 		select {

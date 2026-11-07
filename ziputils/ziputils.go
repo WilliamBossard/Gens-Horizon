@@ -23,7 +23,7 @@ var zipBufPool = sync.Pool{
 	},
 }
 
-// VerifyZipIntegrity vÃ©rifie la signature magique ZIP (0x50 0x4B 0x03 0x04) et le Central Directory
+// VerifyZipIntegrity vérifie la signature magique ZIP (0x50 0x4B 0x03 0x04) et le Central Directory
 func VerifyZipIntegrity(zipPath string) error {
 	f, err := os.Open(zipPath)
 	if err != nil {
@@ -33,23 +33,23 @@ func VerifyZipIntegrity(zipPath string) error {
 
 	var magic [4]byte
 	if _, err := io.ReadFull(f, magic[:]); err != nil {
-		return errors.New("fichier trop court pour Ãªtre une archive ZIP")
+		return errors.New("fichier trop court pour être une archive ZIP")
 	}
 
 	if magic[0] != 0x50 || magic[1] != 0x4B || magic[2] != 0x03 || magic[3] != 0x04 {
-		return fmt.Errorf("signature ZIP invalide (reÃ§u : 0x%02X%02X%02X%02X)", magic[0], magic[1], magic[2], magic[3])
+		return fmt.Errorf("signature ZIP invalide (reçu : 0x%02X%02X%02X%02X)", magic[0], magic[1], magic[2], magic[3])
 	}
 
 	// Validation du Central Directory via archive/zip standard
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return fmt.Errorf("archive ZIP tronquÃ©e ou corrompue : %w", err)
+		return fmt.Errorf("archive ZIP tronquée ou corrompue : %w", err)
 	}
 	_ = zr.Close()
 	return nil
 }
 
-// ExtractZip extrait de maniÃ¨re sÃ©curisÃ©e une archive (protection Zip Slip stricte)
+// ExtractZip extrait de manière sécurisée une archive (protection Zip Slip stricte)
 func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) error {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {

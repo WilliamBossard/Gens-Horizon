@@ -50,7 +50,7 @@ func Upload(args []string) {
 	settings := paths.LoadSettings()
 	p, err := providers.GetProvider(settings)
 	if err != nil || p == nil {
-		ipc.SendError("AUTH_EXPIRED", "Session expirÃ©e. Veuillez lier Ã  nouveau votre compte depuis les paramÃ¨tres.", "")
+		ipc.SendError("AUTH_EXPIRED", "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.", "")
 		return
 	}
 
@@ -74,7 +74,7 @@ func Upload(args []string) {
 	}
 
 	if len(instances) == 0 {
-		ipc.SendInfo("Aucune instance locale Ã  envoyer vers le Cloud.")
+		ipc.SendInfo("Aucune instance locale à envoyer vers le Cloud.")
 		return
 	}
 
@@ -107,7 +107,7 @@ func Upload(args []string) {
 			_ = json.Unmarshal(data, &oldLocalManifest)
 		}
 
-		// 2. Scan et gÃ©nÃ©ration du nouveau manifest
+		// 2. Scan et génération du nouveau manifest
 		newManifest, err := scanner.GenerateManifest(localInstFolder, oldLocalManifest)
 		if err != nil {
 			ipc.SendError("SCAN_FAILED", err.Error(), inst)
@@ -223,7 +223,6 @@ func Upload(args []string) {
 				"type":     "SUCCESS",
 				"instance": inst,
 				"mode":     "FULL",
-				"message":  "Sauvegarde complète terminée.",
 			})
 		} else {
 			// Sauvegarde différentielle (Delta Sync)
@@ -300,7 +299,6 @@ func Upload(args []string) {
 				"instance": inst,
 				"mode":     "SMART",
 				"summary":  summary,
-				"message":  "Synchronisation différentielle terminée.",
 			})
 		}
 	}

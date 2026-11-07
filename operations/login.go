@@ -63,7 +63,7 @@ func Login(args []string) {
 
 	listener, err := net.Listen("tcp", "127.0.0.1:"+port)
 	if err != nil {
-		ipc.SendError("PORT_IN_USE", fmt.Sprintf("Le port local %s est dÃ©jÃ  utilisÃ© : %v", port, err), "")
+		ipc.SendError("PORT_IN_USE", fmt.Sprintf("Le port local %s est déjà utilisé : %v", port, err), "")
 		return
 	}
 
@@ -115,8 +115,8 @@ func Login(args []string) {
 		q := r.URL.Query()
 		if q.Get("error") != "" {
 			w.WriteHeader(http.StatusForbidden)
-			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Connexion annulÃ©e</h2><p>%s</p></body></html>", q.Get("error"))
-			ipc.SendError("AUTH_CANCELLED", "La demande de connexion a Ã©tÃ© refusÃ©e ou annulÃ©e.", "")
+			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Connexion annulée</h2><p>%s</p></body></html>", q.Get("error"))
+			ipc.SendError("AUTH_CANCELLED", "La demande de connexion a été refusée ou annulée.", "")
 			close(done)
 			return
 		}
@@ -125,7 +125,7 @@ func Login(args []string) {
 		if retState != state {
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Erreur CSRF</h2><p>Le jeton de session est invalide.</p></body></html>")
-			ipc.SendError("CSRF_ERROR", "Jeton de sÃ©curitÃ© state invalide.", "")
+			ipc.SendError("CSRF_ERROR", "Jeton de sécurité state invalide.", "")
 			close(done)
 			return
 		}
@@ -138,11 +138,11 @@ func Login(args []string) {
 			return
 		}
 
-		// Ã‰change du code d'autorisation contre des jetons
+		// Échange du code d'autorisation contre des jetons
 		tokenData, err := exchangeCodeForToken(providerName, cfg, code)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Ã‰chec de la connexion</h2><p>%v</p></body></html>", err)
+			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Échec de la connexion</h2><p>%v</p></body></html>", err)
 			ipc.SendError("EXCHANGE_ERROR", err.Error(), "")
 			close(done)
 			return
@@ -157,7 +157,7 @@ func Login(args []string) {
 			return
 		}
 
-		// Sauvegarde du provider sÃ©lectionnÃ© dans horizon_settings.json
+		// Sauvegarde du provider sélectionné dans horizon_settings.json
 		settings.Provider = providerName
 		settingsPath := paths.GetSettingsPath()
 		if b, err := json.MarshalIndent(settings, "", "  "); err == nil {
@@ -165,11 +165,11 @@ func Login(args []string) {
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Connexion RÃ©ussie</title><style>body{background:#18181b;color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}.card{background:#27272a;padding:40px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,0.5);text-align:center;max-width:400px}h2{color:#22c55e;margin-top:0}p{color:#a1a1aa;line-height:1.5}</style></head><body><div class="card"><h2>Connexion rÃ©ussie !</h2><p>Votre compte Cloud a Ã©tÃ© associÃ© avec succÃ¨s Ã  Gens Launcher.<br><br>Vous pouvez fermer cet onglet et continuer Ã  jouer.</p></div></body></html>`)
+		fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Connexion Réussie</title><style>body{background:#18181b;color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}.card{background:#27272a;padding:40px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,0.5);text-align:center;max-width:400px}h2{color:#22c55e;margin-top:0}p{color:#a1a1aa;line-height:1.5}</style></head><body><div class="card"><h2>Connexion réussie !</h2><p>Votre compte Cloud a été associé avec succès à Gens Launcher.<br><br>Vous pouvez fermer cet onglet et continuer à jouer.</p></div></body></html>`)
 
 		ipc.Send(ipc.BaseMessage{
 			Type:    "SUCCESS",
-			Message: "Connexion rÃ©ussie !",
+			Message: "Connexion réussie !",
 		})
 		close(done)
 	})
@@ -187,7 +187,7 @@ func Login(args []string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
-		ipc.SendError("TIMEOUT", "DÃ©lai d'attente d'authentification dÃ©passÃ© (5 minutes).", "")
+		ipc.SendError("TIMEOUT", "Délai d'attente d'authentification dépassé (5 minutes).", "")
 	}
 }
 

@@ -57,7 +57,7 @@ func initAuthData() error {
 		if _, err := io.ReadFull(rand.Reader, buf); err == nil {
 			machineID = hex.EncodeToString(buf)
 			if err := os.WriteFile(mIDFile, []byte(machineID), 0600); err != nil {
-				ipc.Logf("[Auth] AVERTISSEMENT : Ã‰criture de .machine_id Ã©chouÃ©e (%v). Utilisation du fallback matÃ©riel.", err)
+				ipc.Logf("[Auth] AVERTISSEMENT : Écriture de .machine_id échouée (%v). Utilisation du fallback matériel.", err)
 				machineID = generateHardwareFallbackID()
 			}
 		} else {
@@ -71,14 +71,14 @@ func initAuthData() error {
 	} else {
 		salt = make([]byte, 16)
 		if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-			return fmt.Errorf("impossible de gÃ©nÃ©rer un salt alÃ©atoire : %w", err)
+			return fmt.Errorf("impossible de générer un salt aléatoire : %w", err)
 		}
 		if err := os.WriteFile(sFile, salt, 0600); err != nil {
-			return fmt.Errorf("impossible d'Ã©crire le salt de sÃ©curitÃ© (salt.key) : %w", err)
+			return fmt.Errorf("impossible d'écrire le salt de sécurité (salt.key) : %w", err)
 		}
 	}
 
-	// 3. DÃ©rivation PBKDF2 (600 000 itÃ©rations, SHA-256, clÃ© 32 octets)
+	// 3. Dérivation PBKDF2 (600 000 itérations, SHA-256, clé 32 octets)
 	secretKey = pbkdf2.Key([]byte(machineID), salt, 600000, 32, sha256.New)
 	return nil
 }
@@ -141,7 +141,7 @@ func Encrypt(text string) (string, error) {
 		return "", err
 	}
 
-	// Go append automatiquement le tag (16 octets) Ã  la fin du ciphertext
+	// Go append automatiquement le tag (16 octets) à la fin du ciphertext
 	sealed := gcm.Seal(nil, iv, []byte(text), nil)
 	tagSize := gcm.Overhead() // 16 octets
 	ciphertext := sealed[:len(sealed)-tagSize]
@@ -150,7 +150,7 @@ func Encrypt(text string) (string, error) {
 	return hex.EncodeToString(iv) + ":" + hex.EncodeToString(authTag) + ":" + hex.EncodeToString(ciphertext), nil
 }
 
-// Decrypt dÃ©chiffre une chaÃ®ne chiffrÃ©e en AES-256-GCM ou l'ancien format AES-CBC
+// Decrypt déchiffre une chaîne chiffrée en AES-256-GCM ou l'ancien format AES-CBC
 func Decrypt(encryptedText string) (string, bool, error) {
 	key, err := GetSecretKey()
 	if err != nil {
@@ -186,7 +186,7 @@ func Decrypt(encryptedText string) (string, bool, error) {
 		ciphertextWithTag := append(ciphertext, authTag...)
 		plaintext, err := gcm.Open(nil, iv, ciphertextWithTag, nil)
 		if err != nil {
-			return "", false, fmt.Errorf("Ã©chec de dÃ©chiffrement GCM (tag invalide ou clÃ© incorrecte) : %w", err)
+			return "", false, fmt.Errorf("échec de déchiffrement GCM (tag invalide ou clé incorrecte) : %w", err)
 		}
 		return string(plaintext), false, nil
 	} else if len(parts) >= 2 {
@@ -220,12 +220,12 @@ func Decrypt(encryptedText string) (string, bool, error) {
 		return string(unpadded), true, nil
 	}
 
-	return "", false, errors.New("format de token chiffrÃ© non reconnu")
+	return "", false, errors.New("format de token chiffré non reconnu")
 }
 
 func pkcs7Unpad(data []byte) ([]byte, error) {
 	if len(data) == 0 {
-		return nil, errors.New("donnÃ©es vides")
+		return nil, errors.New("données vides")
 	}
 	padLen := int(data[len(data)-1])
 	if padLen == 0 || padLen > aes.BlockSize || padLen > len(data) {
@@ -239,7 +239,7 @@ func pkcs7Unpad(data []byte) ([]byte, error) {
 	return data[:len(data)-padLen], nil
 }
 
-// GetSecureToken lit et dÃ©chiffre le token OAuth depuis son fichier
+// GetSecureToken lit et déchiffre le token OAuth depuis son fichier
 func GetSecureToken(filePath string, target any) error {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -250,23 +250,23 @@ func GetSecureToken(filePath string, target any) error {
 		return errors.New("fichier de token vide")
 	}
 
-	// Si le fichier commence par '{', c'est du JSON en clair -> migrer vers chiffrÃ©
+	// Si le fichier commence par '{', c'est du JSON en clair -> migrer vers chiffré
 	if strings.HasPrefix(content, "{") {
 		if err := json.Unmarshal([]byte(content), target); err != nil {
 			return err
 		}
-		ipc.Logf("[Auth] SÃ©curisation immÃ©diate du token en clair : %s", filePath)
+		ipc.Logf("[Auth] Sécurisation immédiate du token en clair : %s", filePath)
 		_ = EncryptToken(filePath, target)
 		return nil
 	}
 
 	decrypted, needsMigration, err := Decrypt(content)
 	if err != nil {
-		return fmt.Errorf("impossible de dÃ©chiffrer le token : %w", err)
+		return fmt.Errorf("impossible de déchiffrer le token : %w", err)
 	}
 
 	if err := json.Unmarshal([]byte(decrypted), target); err != nil {
-		return fmt.Errorf("json token invalide aprÃ¨s dÃ©chiffrement : %w", err)
+		return fmt.Errorf("json token invalide après déchiffrement : %w", err)
 	}
 
 	if needsMigration {
@@ -277,7 +277,7 @@ func GetSecureToken(filePath string, target any) error {
 	return nil
 }
 
-// EncryptToken chiffre et Ã©crit les donnÃ©es de token sur disque de faÃ§on atomique
+// EncryptToken chiffre et écrit les données de token sur disque de façon atomique
 func EncryptToken(filePath string, tokenData any) error {
 	rawJSON, err := json.Marshal(tokenData)
 	if err != nil {
@@ -288,7 +288,7 @@ func EncryptToken(filePath string, tokenData any) error {
 		return err
 	}
 
-	// Ã‰criture atomique via fichier temporaire
+	// Écriture atomique via fichier temporaire
 	tmpFile := filePath + ".tmp"
 	if err := os.WriteFile(tmpFile, []byte(encrypted), 0600); err != nil {
 		return err
@@ -296,7 +296,7 @@ func EncryptToken(filePath string, tokenData any) error {
 	return os.Rename(tmpFile, filePath)
 }
 
-// TokenData reprÃ©sente la structure standard d'un jeton OAuth2
+// TokenData représente la structure standard d'un jeton OAuth2
 type TokenData struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token,omitempty"`
@@ -305,7 +305,7 @@ type TokenData struct {
 	Scope        string `json:"scope,omitempty"`
 }
 
-// HasExpired vÃ©rifie si le token expire bientÃ´t (marge de 60s)
+// HasExpired vérifie si le token expire bientôt (marge de 60s)
 func (t *TokenData) HasExpired() bool {
 	if t.AccessToken == "" {
 		return true

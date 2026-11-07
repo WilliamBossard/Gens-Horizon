@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"time"
@@ -20,7 +21,7 @@ func Quota(args []string) {
 	settings := paths.LoadSettings()
 	p, err := providers.GetProvider(settings)
 	if err != nil || p == nil {
-		ipc.SendError("AUTH_EXPIRED", "Session expirÃ©e. Veuillez lier Ã  nouveau votre compte depuis les paramÃ¨tres.", "")
+		ipc.SendError("AUTH_EXPIRED", "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.", "")
 		return
 	}
 
@@ -31,7 +32,7 @@ func Quota(args []string) {
 	}
 
 	var usedBytes, totalBytes int64
-	err = retry.Do(nil, retryOpts, func() error {
+	err = retry.Do(context.Background(), retryOpts, func() error {
 		var qErr error
 		usedBytes, totalBytes, qErr = p.GetQuota()
 		return qErr
@@ -42,7 +43,7 @@ func Quota(args []string) {
 	}
 
 	var cloudFiles []providers.CloudFile
-	_ = retry.Do(nil, retryOpts, func() error {
+	_ = retry.Do(context.Background(), retryOpts, func() error {
 		var lErr error
 		cloudFiles, lErr = p.ListFiles("GensHorizon_")
 		return lErr

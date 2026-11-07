@@ -6,11 +6,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/config"
 )
 
-// GetHorizonDataDir renvoie le dossier oÃ¹ vivent les fichiers de donnÃ©es d'Horizon (bin)
+// GetHorizonDataDir renvoie le dossier où vivent les fichiers de données d'Horizon (bin)
 func GetHorizonDataDir() string {
 	if val := os.Getenv("HORIZON_DATA_DIR"); val != "" {
 		return val
@@ -26,7 +27,7 @@ func GetHorizonDataDir() string {
 	return "."
 }
 
-// GetAppDataPath renvoie le chemin AppData du systÃ¨me
+// GetAppDataPath renvoie le chemin AppData du système
 func GetAppDataPath() string {
 	if val := os.Getenv("APPDATA"); val != "" {
 		return val
@@ -98,7 +99,7 @@ func LoadSettings() config.Settings {
 
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
-		// Ã‰crit les paramÃ¨tres par dÃ©faut
+		// Écrit les paramètres par défaut
 		if b, err := json.MarshalIndent(defaults, "", "  "); err == nil {
 			_ = os.WriteFile(settingsPath, b, 0644)
 		}
@@ -110,6 +111,34 @@ func LoadSettings() config.Settings {
 		return defaults
 	}
 	return loaded
+}
+
+// CleanupOrphanedTemps supprime les fichiers temporaires orphelins (temp_*.zip, *.tmp)
+// laissés dans le dossier de données après une coupure ou un crash.
+// Seuls les fichiers vieux de plus de 10 minutes sont supprimés pour ne pas impacter une opération concurrente.
+func CleanupOrphanedTemps(dataDir string) {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return
+	}
+	threshold := time.Now().Add(-10 * time.Minute)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		isTemp := strings.HasPrefix(name, "temp_") || strings.HasSuffix(name, ".tmp")
+		if !isTemp {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(threshold) {
+			_ = os.Remove(filepath.Join(dataDir, name))
+		}
+	}
 }
 
 // GetProviderName extrait le provider depuis les arguments CLI ou les settings

@@ -13,20 +13,23 @@ import (
 )
 
 func main() {
-	// Ã‰coute de l'arrÃªt gracieux demandÃ© par le Launcher via stdin
+	// Écoute de l'arrêt gracieux demandé par le Launcher via stdin
 	go func() {
 		stdinScanner := bufio.NewScanner(os.Stdin)
 		for stdinScanner.Scan() {
 			text := strings.TrimSpace(stdinScanner.Text())
 			if text == "SHUTDOWN" {
-				ipc.Logf("[Horizon] ArrÃªt gracieux (SHUTDOWN) reÃ§u sur stdin.")
+				ipc.Logf("[Horizon] Arrêt gracieux (SHUTDOWN) reçu sur stdin.")
 				lock.ReleaseLock()
 				os.Exit(0)
 			}
 		}
 	}()
 
-	// Initialisation des settings par dÃ©faut si absents
+	// Nettoyage automatique des fichiers temporaires orphelins (> 10 min)
+	paths.CleanupOrphanedTemps(paths.GetHorizonDataDir())
+
+	// Initialisation des settings par défaut si absents
 	_ = paths.LoadSettings()
 
 	args := os.Args[1:]

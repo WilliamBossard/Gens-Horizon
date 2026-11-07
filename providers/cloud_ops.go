@@ -8,7 +8,7 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
-// GetCloudIndexAndCleanDuplicates rÃ©cupÃ¨re la liste des fichiers cloud et purge automatiquement les doublons obsolÃ¨tes
+// GetCloudIndexAndCleanDuplicates récupère la liste des fichiers cloud et purge automatiquement les doublons obsolètes
 func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix string) (map[string]CloudFile, error) {
 	var cloudFiles []CloudFile
 	err := retry.Do(context.Background(), opts, func() error {
@@ -48,7 +48,7 @@ func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix s
 		}
 	}
 
-	// Suppression parallÃ¨le des doublons (concurrence max: 4)
+	// Suppression parallèle des doublons (concurrence max: 4)
 	if len(deleteQueue) > 0 {
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, 4)
@@ -63,7 +63,7 @@ func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix s
 				_ = retry.Do(context.Background(), delOpts, func() error {
 					return p.DeleteFile(file.ID)
 				})
-				ipc.Logf("%s Doublon purgÃ© du Cloud : %s (%s)", logPrefix, file.Name, file.ID)
+				ipc.Logf("%s Doublon purgé du Cloud : %s (%s)", logPrefix, file.Name, file.ID)
 			}(item)
 		}
 		wg.Wait()

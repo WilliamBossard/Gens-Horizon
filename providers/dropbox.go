@@ -85,7 +85,7 @@ func (d *DropboxProvider) refreshToken() error {
 	}
 
 	if err := auth.EncryptToken(d.tokenPath, d.tokenData); err != nil {
-		ipc.Logf("[dropbox] Ã‰chec sauvegarde token rafraÃ®chi : %v", err)
+		ipc.Logf("[dropbox] Échec sauvegarde token rafraîchi : %v", err)
 	}
 
 	return nil
@@ -323,7 +323,7 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 	}
 	fileSize := info.Size()
 
-	// Upload direct (jusqu'Ã  150 Mo chez Dropbox)
+	// Upload direct (jusqu'à 150 Mo chez Dropbox)
 	targetPath := "/" + name
 	if existingID != "" && strings.HasPrefix(existingID, "id:") {
 		targetPath = existingID
