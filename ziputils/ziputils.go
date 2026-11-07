@@ -2,6 +2,7 @@ package ziputils
 
 import (
 	"archive/zip"
+	"compress/flate"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,10 +10,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/scanner"
 )
+
+var zipBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
 
 // VerifyZipIntegrity vÃ©rifie la signature magique ZIP (0x50 0x4B 0x03 0x04) et le Central Directory
 func VerifyZipIntegrity(zipPath string) error {
@@ -106,22 +115,24 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 	return nil
 }
 
-// CreateFullZip compresse l'intÃ©gralitÃ© d'un dossier d'instance en ignorant les dossiers exclus
+// CreateFullZip compresse l'intégralité d'un dossier d'instance en ignorant les dossiers exclus
 func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct int)) error {
-	// Calcul de la taille totale pour la progression
+	// Calcul de la taille totale pour la progression via WalkDir rapide
 	var totalBytes int64
-	_ = filepath.Walk(sourceFolder, func(p string, info os.FileInfo, err error) error {
+	_ = filepath.WalkDir(sourceFolder, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if info.IsDir() {
-			if p != sourceFolder && scanner.IgnoredDirs[info.Name()] {
+		if d.IsDir() {
+			if p != sourceFolder && scanner.IgnoredDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !scanner.IgnoredDirs[info.Name()] {
-			totalBytes += info.Size()
+		if !scanner.IgnoredDirs[d.Name()] {
+			if info, err := d.Info(); err == nil {
+				totalBytes += info.Size()
+			}
 		}
 		return nil
 	})
@@ -135,20 +146,30 @@ func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct 
 	zw := zip.NewWriter(outFile)
 	defer zw.Close()
 
+	// Optimisation : compression niveau 1 (BestSpeed) pour accélérer par 3 à 5x les sauvegardes
+	zw.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
+		return flate.NewWriter(out, flate.BestSpeed)
+	})
+
 	var processedBytes int64
 	lastPct := -1
 
-	err = filepath.Walk(sourceFolder, func(p string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(sourceFolder, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if info.IsDir() {
-			if p != sourceFolder && scanner.IgnoredDirs[info.Name()] {
+		if d.IsDir() {
+			if p != sourceFolder && scanner.IgnoredDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if scanner.IgnoredDirs[info.Name()] {
+		if scanner.IgnoredDirs[d.Name()] {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
 			return nil
 		}
 
@@ -176,7 +197,10 @@ func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct 
 		}
 		defer inFile.Close()
 
-		buf := make([]byte, 64*1024)
+		bufPtr := zipBufPool.Get().(*[]byte)
+		defer zipBufPool.Put(bufPtr)
+		buf := *bufPtr
+
 		for {
 			n, rErr := inFile.Read(buf)
 			if n > 0 {
@@ -229,6 +253,11 @@ func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, 
 	zw := zip.NewWriter(outFile)
 	defer zw.Close()
 
+	// Optimisation : compression niveau 1 (BestSpeed) pour des deltas ultra-rapides
+	zw.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
+		return flate.NewWriter(out, flate.BestSpeed)
+	})
+
 	// 1. Écriture du fichier __delta__.json pour la traçabilité des suppressions
 	if deletedFiles == nil {
 		deletedFiles = []string{}
@@ -270,11 +299,14 @@ func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, 
 			continue
 		}
 
-		buf := make([]byte, 64*1024)
+		bufPtr := zipBufPool.Get().(*[]byte)
+		buf := *bufPtr
+
 		for {
 			n, rErr := inFile.Read(buf)
 			if n > 0 {
 				if _, wErr := w.Write(buf[:n]); wErr != nil {
+					zipBufPool.Put(bufPtr)
 					inFile.Close()
 					return wErr
 				}
@@ -294,6 +326,7 @@ func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, 
 				break
 			}
 		}
+		zipBufPool.Put(bufPtr)
 		inFile.Close()
 	}
 

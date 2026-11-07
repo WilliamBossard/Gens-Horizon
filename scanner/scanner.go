@@ -80,6 +80,13 @@ type ManifestDiff struct {
 	HasChanges bool     `json:"hasChanges"`
 }
 
+var bufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
+
 func HashFile(filePath string) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -87,9 +94,11 @@ func HashFile(filePath string) (string, error) {
 	}
 	defer f.Close()
 
+	bufPtr := bufPool.Get().(*[]byte)
+	defer bufPool.Put(bufPtr)
+
 	h := sha256.New()
-	buf := make([]byte, 64*1024)
-	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+	if _, err := io.CopyBuffer(h, f, *bufPtr); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
@@ -102,24 +111,24 @@ type scanTask struct {
 	mtimeMs  int64
 }
 
-// GenerateManifest scanne rÃ©cursivement targetDir et gÃ©nÃ¨re le Manifest
+// GenerateManifest scanne récursivement targetDir et génère le Manifest avec WalkDir optimisé
 func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) {
 	manifest := make(Manifest)
 	var manifestMu sync.Mutex
 
 	var tasks []scanTask
 
-	err := filepath.Walk(targetDir, func(currentPath string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(targetDir, func(currentPath string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
 			}
-			ipc.Logf("[scanner] AccÃ¨s refusÃ© ou erreur : %s (%v)", currentPath, err)
+			ipc.Logf("[scanner] Accès refusé ou erreur : %s (%v)", currentPath, err)
 			return nil
 		}
 
-		name := info.Name()
-		if info.IsDir() {
+		name := d.Name()
+		if d.IsDir() {
 			if currentPath != targetDir && IgnoredDirs[name] {
 				return filepath.SkipDir
 			}
@@ -130,13 +139,18 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 			return nil
 		}
 
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+
 		rel, err := filepath.Rel(targetDir, currentPath)
 		if err != nil {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
 
-		// VÃ©rification rapide dans le cache du manifest prÃ©cÃ©dent
+		// Vérification rapide dans le cache du manifest précédent
 		mtimeMs := info.ModTime().UnixMilli()
 		size := info.Size()
 
