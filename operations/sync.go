@@ -149,9 +149,10 @@ func Sync(args []string) {
 		// Optimisation performance : Si aucun changement, terminer immédiatement sans copie disque
 		if !needsBaseExtract && len(deltas) == 0 {
 			ipc.Send(ipc.BaseMessage{
-				Type:     "SUCCESS",
-				Instance: inst,
-				Message:  "Instance déjà à jour.",
+				Type:      "SUCCESS",
+				Instance:  inst,
+				Message:   "Instance is already up to date.",
+				ErrorCode: "UP_TO_DATE",
 			})
 			continue
 		}
@@ -234,15 +235,16 @@ func Sync(args []string) {
 			cleanupRollback(rollbackPath)
 		}
 
-		syncMsg := "Base + delta(s) appliqué(s)."
-		if !needsBaseExtract {
-			syncMsg = fmt.Sprintf("%d delta(s) appliqué(s).", len(deltas))
+		syncMsg := fmt.Sprintf("%d delta(s) applied.", len(deltas))
+		if needsBaseExtract {
+			syncMsg = "Base + delta(s) applied."
 		}
 
 		ipc.Send(ipc.BaseMessage{
-			Type:     "SUCCESS",
-			Instance: inst,
-			Message:  syncMsg,
+			Type:      "SUCCESS",
+			Instance:  inst,
+			Message:   syncMsg,
+			ErrorCode: "SYNC_SUCCESS",
 		})
 	}
 }
@@ -396,9 +398,10 @@ func handleDelete(targetInst string, cloudIndex map[string]providers.CloudFile, 
 	}
 
 	ipc.Send(ipc.BaseMessage{
-		Type:     "SUCCESS",
-		Instance: targetInst,
-		Message:  "Supprimé du cloud.",
+		Type:      "SUCCESS",
+		Instance:  targetInst,
+		Message:   "Deleted from Cloud.",
+		ErrorCode: "DELETED_CLOUD",
 	})
 }
 

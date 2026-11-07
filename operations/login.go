@@ -168,8 +168,9 @@ func Login(args []string) {
 		fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Connexion Réussie</title><style>body{background:#18181b;color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}.card{background:#27272a;padding:40px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,0.5);text-align:center;max-width:400px}h2{color:#22c55e;margin-top:0}p{color:#a1a1aa;line-height:1.5}</style></head><body><div class="card"><h2>Connexion réussie !</h2><p>Votre compte Cloud a été associé avec succès à Gens Launcher.<br><br>Vous pouvez fermer cet onglet et continuer à jouer.</p></div></body></html>`)
 
 		ipc.Send(ipc.BaseMessage{
-			Type:    "SUCCESS",
-			Message: "Connexion réussie !",
+			Type:      "SUCCESS",
+			Message:   "Authentication successful! Token saved.",
+			ErrorCode: "AUTH_SUCCESS",
 		})
 		close(done)
 	})

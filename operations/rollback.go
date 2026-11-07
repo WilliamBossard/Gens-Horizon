@@ -115,9 +115,10 @@ func Rollback(args []string) {
 	}
 
 	ipc.Send(ipc.BaseMessage{
-		Type:     "SUCCESS",
-		Instance: targetInst,
-		Message:  "Rollback effectué avec succès.",
+		Type:      "SUCCESS",
+		Instance:  targetInst,
+		Message:   "Rollback completed successfully.",
+		ErrorCode: "ROLLBACK_SUCCESS",
 	})
 }
 

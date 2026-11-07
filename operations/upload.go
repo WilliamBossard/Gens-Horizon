@@ -229,9 +229,10 @@ func Upload(args []string) {
 			diff := scanner.CompareManifests(remoteManifest, newManifest)
 			if !diff.HasChanges {
 				ipc.Send(ipc.BaseMessage{
-					Type:     "SUCCESS",
-					Instance: inst,
-					Message:  "Instance déjà à jour sur le Cloud.",
+					Type:      "SUCCESS",
+					Instance:  inst,
+					Message:   "Instance is already up to date on Cloud.",
+					ErrorCode: "UP_TO_DATE_CLOUD",
 				})
 				updateLastSync(dataDir, safeInst)
 				continue
