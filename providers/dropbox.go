@@ -217,70 +217,27 @@ func (d *DropboxProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 }
 
 func (d *DropboxProvider) DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
-	tok, err := d.getAccessToken()
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, "https://content.dropboxapi.com/2/files/download", nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-	arg, _ := json.Marshal(map[string]string{"path": fileID})
-	req.Header.Set("Dropbox-API-Arg", string(arg))
-
 	dlClient := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := dlClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	arg, _ := json.Marshal(map[string]string{"path": fileID})
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("dropbox download HTTP %d : %s", resp.StatusCode, string(b))
-	}
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	buf := make([]byte, 64*1024)
-	var downloaded int64
-	lastPct := -1
-
-	for {
-		n, rErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, wErr := out.Write(buf[:n]); wErr != nil {
-				_ = os.Remove(destPath)
-				return wErr
-			}
-			downloaded += int64(n)
-			if onProgress != nil && totalSize > 0 {
-				pct := int((downloaded * 100) / totalSize)
-				if pct > 100 {
-					pct = 100
-				}
-				if pct != lastPct && (pct >= lastPct+2 || pct == 100) {
-					onProgress(pct)
-					lastPct = pct
-				}
-			}
+	return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+		tok, err := d.getAccessToken()
+		if err != nil {
+			return nil, err
 		}
-		if rErr != nil {
-			if rErr == io.EOF {
-				break
-			}
-			_ = os.Remove(destPath)
-			return rErr
-		}
-	}
 
-	return nil
+		req, err := http.NewRequest(http.MethodPost, "https://content.dropboxapi.com/2/files/download", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Dropbox-API-Arg", string(arg))
+		if offset > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		}
+
+		return dlClient.Do(req)
+	})
 }
 
 func (d *DropboxProvider) DownloadJSON(fileID string, target any) error {

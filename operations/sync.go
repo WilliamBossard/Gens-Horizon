@@ -198,23 +198,49 @@ func Sync(args []string) {
 			return deltas[i].timestamp < deltas[j].timestamp
 		})
 
-		for _, d := range deltas {
-			ipc.Logf("[sync] Application du delta cloud : %s (taille: %d octets)", d.file.Name, d.file.Size)
-			tempDelta := filepath.Join(dataDir, fmt.Sprintf("temp_delta_%s_%d.zip", safeInst, d.timestamp))
+		// Pré-téléchargement parallèle des deltas (concurrence max: 4)
+		type downloadedDelta struct {
+			tempPath string
+			valid    bool
+		}
+		dlResults := make([]downloadedDelta, len(deltas))
+		if len(deltas) > 0 {
+			var dlWg sync.WaitGroup
+			dlSem := make(chan struct{}, 4)
+			for i, d := range deltas {
+				dlWg.Add(1)
+				dlSem <- struct{}{}
+				go func(idx int, item deltaEntry) {
+					defer dlWg.Done()
+					defer func() { <-dlSem }()
+					tempDelta := filepath.Join(dataDir, fmt.Sprintf("temp_delta_%s_%d.zip", safeInst, item.timestamp))
+					if dErr := p.DownloadFile(item.file.ID, tempDelta, nil, item.file.Size); dErr != nil {
+						_ = os.Remove(tempDelta)
+						ipc.Logf("[sync] Échec téléchargement delta %s : %v", item.file.Name, dErr)
+						return
+					}
+					if vErr := ziputils.VerifyZipIntegrity(tempDelta); vErr != nil {
+						_ = os.Remove(tempDelta)
+						ipc.Logf("[sync] Archive delta corrompue %s : %v", item.file.Name, vErr)
+						return
+					}
+					dlResults[idx] = downloadedDelta{tempPath: tempDelta, valid: true}
+				}(i, d)
+			}
+			dlWg.Wait()
+		}
 
-			err = p.DownloadFile(d.file.ID, tempDelta, nil, d.file.Size)
-			if err != nil {
-				_ = os.Remove(tempDelta)
-				ipc.Logf("[sync] Échec téléchargement delta %s : %v", d.file.Name, err)
+		// Application séquentielle stricte dans l'ordre chronologique
+		for i, d := range deltas {
+			res := dlResults[i]
+			if !res.valid {
 				continue
 			}
-
-			if err := ziputils.VerifyZipIntegrity(tempDelta); err == nil {
-				_ = ziputils.ApplyDelta(tempDelta, localPath, func(pct int) {
-					ipc.SendDeltaProgress("APPLYING_DELTA", pct, inst, d.file.Name)
-				})
-			}
-			_ = os.Remove(tempDelta)
+			ipc.Logf("[sync] Application du delta cloud : %s (taille: %d octets)", d.file.Name, d.file.Size)
+			_ = ziputils.ApplyDelta(res.tempPath, localPath, func(pct int) {
+				ipc.SendDeltaProgress("APPLYING_DELTA", pct, inst, d.file.Name)
+			})
+			_ = os.Remove(res.tempPath)
 		}
 
 		// Téléchargement du manifest distant pour synchroniser la référence locale
@@ -437,6 +463,13 @@ func copyDir(src, dst string) error {
 		target := filepath.Join(dst, rel)
 		if info.IsDir() {
 			return os.MkdirAll(target, info.Mode())
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		// Tentative de hardlink instantané (0 écriture disque, ~30ms pour toute l'instance)
+		if err := os.Link(path, target); err == nil {
+			return nil
 		}
 		in, err := os.Open(path)
 		if err != nil {

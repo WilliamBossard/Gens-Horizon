@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
@@ -32,20 +33,27 @@ func Quota(args []string) {
 	}
 
 	var usedBytes, totalBytes int64
-	err = retry.Do(context.Background(), retryOpts, func() error {
-		var qErr error
-		usedBytes, totalBytes, qErr = p.GetQuota()
-		return qErr
-	})
-	if err != nil {
-		ipc.SendError("QUOTA_ERROR", err.Error(), "")
-		return
-	}
-
+	var quotaErr error
 	var cloudFiles []providers.CloudFile
-	if cached, ok := providers.GetCachedCloudIndex(p.Name(), providers.DefaultCloudIndexTTL); ok {
-		cloudFiles = cached
-	} else {
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		quotaErr = retry.Do(context.Background(), retryOpts, func() error {
+			var qErr error
+			usedBytes, totalBytes, qErr = p.GetQuota()
+			return qErr
+		})
+	}()
+
+	go func() {
+		defer wg.Done()
+		if cached, ok := providers.GetCachedCloudIndex(p.Name(), providers.DefaultCloudIndexTTL); ok {
+			cloudFiles = cached
+			return
+		}
 		_ = retry.Do(context.Background(), retryOpts, func() error {
 			var lErr error
 			cloudFiles, lErr = p.ListFiles("GensHorizon_")
@@ -54,6 +62,13 @@ func Quota(args []string) {
 		if len(cloudFiles) > 0 {
 			providers.SaveCachedCloudIndex(p.Name(), cloudFiles)
 		}
+	}()
+
+	wg.Wait()
+
+	if quotaErr != nil {
+		ipc.SendError("QUOTA_ERROR", quotaErr.Error(), "")
+		return
 	}
 
 	var horizonUsed int64

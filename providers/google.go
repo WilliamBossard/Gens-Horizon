@@ -200,11 +200,6 @@ func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 }
 
 func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
-	tok, err := g.getAccessToken()
-	if err != nil {
-		return err
-	}
-
 	buildURL := func(confirm bool) string {
 		u := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?alt=media", fileID)
 		if confirm {
@@ -213,96 +208,63 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 		return u
 	}
 
-	req, err := http.NewRequest(http.MethodGet, buildURL(false), nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-
 	dlClient := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := dlClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	confirmAbuse := false
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		_ = resp.Body.Close()
-		g.mu.Lock()
-		_ = g.refreshToken()
-		g.mu.Unlock()
-		newTok, _ := g.getAccessToken()
-		req, _ = http.NewRequest(http.MethodGet, buildURL(false), nil)
-		req.Header.Set("Authorization", "Bearer "+newTok)
-		resp, err = dlClient.Do(req)
+	return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+		tok, err := g.getAccessToken()
 		if err != nil {
-			return err
+			return nil, err
 		}
-		defer resp.Body.Close()
-	}
 
-	// Détection page de confirmation Google Drive pour gros fichiers
-	contentType := resp.Header.Get("Content-Type")
-	if resp.StatusCode == http.StatusOK && (strings.Contains(contentType, "text/html") || (strings.Contains(contentType, "application/json") && !strings.Contains(contentType, "octet"))) {
-		_ = resp.Body.Close()
-		req, _ = http.NewRequest(http.MethodGet, buildURL(true), nil)
+		req, err := http.NewRequest(http.MethodGet, buildURL(confirmAbuse), nil)
+		if err != nil {
+			return nil, err
+		}
 		req.Header.Set("Authorization", "Bearer "+tok)
-		resp, err = dlClient.Do(req)
+		if offset > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		}
+
+		resp, err := dlClient.Do(req)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		defer resp.Body.Close()
-	}
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("[google] Erreur téléchargement HTTP %d : %s", resp.StatusCode, string(b))
-	}
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	buf := make([]byte, 64*1024)
-	var downloaded int64
-	lastPct := -1
-
-	for {
-		n, rErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, wErr := out.Write(buf[:n]); wErr != nil {
-				_ = os.Remove(destPath)
-				return wErr
+		if resp.StatusCode == http.StatusUnauthorized {
+			_ = resp.Body.Close()
+			g.mu.Lock()
+			_ = g.refreshToken()
+			g.mu.Unlock()
+			newTok, _ := g.getAccessToken()
+			req, _ = http.NewRequest(http.MethodGet, buildURL(confirmAbuse), nil)
+			req.Header.Set("Authorization", "Bearer "+newTok)
+			if offset > 0 {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 			}
-			downloaded += int64(n)
-			if onProgress != nil && totalSize > 0 {
-				pct := int((downloaded * 100) / totalSize)
-				if pct > 100 {
-					pct = 100
-				}
-				if pct != lastPct && (pct >= lastPct+2 || pct == 100) {
-					onProgress(pct)
-					lastPct = pct
-				}
+			resp, err = dlClient.Do(req)
+			if err != nil {
+				return nil, err
 			}
 		}
-		if rErr != nil {
-			if rErr == io.EOF {
-				break
+
+		contentType := resp.Header.Get("Content-Type")
+		if resp.StatusCode == http.StatusOK && (strings.Contains(contentType, "text/html") || (strings.Contains(contentType, "application/json") && !strings.Contains(contentType, "octet"))) {
+			_ = resp.Body.Close()
+			confirmAbuse = true
+			req, _ = http.NewRequest(http.MethodGet, buildURL(true), nil)
+			req.Header.Set("Authorization", "Bearer "+tok)
+			if offset > 0 {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 			}
-			_ = os.Remove(destPath)
-			return rErr
+			resp, err = dlClient.Do(req)
+			if err != nil {
+				return nil, err
+			}
 		}
-	}
 
-	if totalSize > 0 && downloaded < totalSize {
-		_ = os.Remove(destPath)
-		return fmt.Errorf("téléchargement incomplet : %d / %d octets reçus", downloaded, totalSize)
-	}
-
-	return nil
+		return resp, nil
+	})
 }
 
 func (g *GoogleProvider) DownloadJSON(fileID string, target any) error {

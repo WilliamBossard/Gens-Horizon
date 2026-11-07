@@ -97,6 +97,8 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 			return err
 		}
 
+		// Détache tout hardlink éventuel (protection du snapshot rollback) avant d'écrire le nouveau fichier
+		_ = os.Remove(cleanDest)
 		outFile, err := os.OpenFile(cleanDest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, zf.Mode())
 		if err != nil {
 			_ = rc.Close()
@@ -407,6 +409,8 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 			return err
 		}
 
+		// Détache tout hardlink éventuel (protection du snapshot rollback) avant d'écrire le nouveau fichier
+		_ = os.Remove(cleanDest)
 		outFile, err := os.OpenFile(cleanDest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, zf.Mode())
 		if err != nil {
 			_ = rc.Close()

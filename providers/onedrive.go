@@ -191,69 +191,26 @@ func (o *OneDriveProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 }
 
 func (o *OneDriveProvider) DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
-	tok, err := o.getAccessToken()
-	if err != nil {
-		return err
-	}
-
-	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/content", fileID)
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-
 	dlClient := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := dlClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/content", fileID)
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("onedrive download HTTP %d : %s", resp.StatusCode, string(b))
-	}
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	buf := make([]byte, 64*1024)
-	var downloaded int64
-	lastPct := -1
-
-	for {
-		n, rErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, wErr := out.Write(buf[:n]); wErr != nil {
-				_ = os.Remove(destPath)
-				return wErr
-			}
-			downloaded += int64(n)
-			if onProgress != nil && totalSize > 0 {
-				pct := int((downloaded * 100) / totalSize)
-				if pct > 100 {
-					pct = 100
-				}
-				if pct != lastPct && (pct >= lastPct+2 || pct == 100) {
-					onProgress(pct)
-					lastPct = pct
-				}
-			}
+	return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+		tok, err := o.getAccessToken()
+		if err != nil {
+			return nil, err
 		}
-		if rErr != nil {
-			if rErr == io.EOF {
-				break
-			}
-			_ = os.Remove(destPath)
-			return rErr
-		}
-	}
 
-	return nil
+		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		if offset > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		}
+
+		return dlClient.Do(req)
+	})
 }
 
 func (o *OneDriveProvider) DownloadJSON(fileID string, target any) error {

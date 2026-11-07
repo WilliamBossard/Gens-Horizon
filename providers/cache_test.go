@@ -2,11 +2,59 @@ package providers
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+type failingHalfReader struct {
+	data []byte
+	pos  int
+}
+
+func (r *failingHalfReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, errors.New("simulated network connection drop")
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+func TestDownloadWithResume(t *testing.T) {
+	fullContent := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	callCount := 0
+
+	tmpDir, _ := os.MkdirTemp("", "horizon_dl_resume_*")
+	defer os.RemoveAll(tmpDir)
+	dest := filepath.Join(tmpDir, "out.bin")
+
+	err := downloadWithResume(dest, int64(len(fullContent)), nil, func(offset int64) (*http.Response, error) {
+		callCount++
+		if callCount == 1 {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(&failingHalfReader{data: fullContent[:10]}),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusPartialContent,
+			Body:       io.NopCloser(bytes.NewReader(fullContent[offset:])),
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("downloadWithResume failed: %v", err)
+	}
+
+	got, err := os.ReadFile(dest)
+	if err != nil || !bytes.Equal(got, fullContent) {
+		t.Errorf("content mismatch: got '%s', expected '%s'", string(got), string(fullContent))
+	}
+}
 
 func TestProgressReader(t *testing.T) {
 	data := bytes.Repeat([]byte("A"), 1000)
@@ -75,3 +123,4 @@ func TestCloudIndexCacheLifecycle(t *testing.T) {
 		t.Errorf("expected cache miss after InvalidateCloudIndexCache")
 	}
 }
+
