@@ -41,14 +41,21 @@ jobs:
           # Linux amd64
           GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/Horizon-linux .
 
-          # macOS amd64
-          GOOS=darwin GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/Horizon-macos .
+          # Linux arm64 (Raspberry Pi 5, Steam Deck, etc.)
+          GOOS=linux GOARCH=arm64 go build -ldflags="$LDFLAGS" -o dist/Horizon-linux-arm64 .
+
+          # macOS Universal Binary (x86_64 + ARM64 Apple Silicon)
+          GOOS=darwin GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/Horizon-macos-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -ldflags="$LDFLAGS" -o dist/Horizon-macos-arm64 .
+          llvm-lipo -create -output dist/Horizon-macos dist/Horizon-macos-amd64 dist/Horizon-macos-arm64
+          rm dist/Horizon-macos-amd64 dist/Horizon-macos-arm64
 
       - name: Generate SHA256 Checksums
         run: |
           cd dist
           sha256sum Horizon.exe | awk '{print $1}' > Horizon.exe.sha256
           sha256sum Horizon-linux | awk '{print $1}' > Horizon-linux.sha256
+          sha256sum Horizon-linux-arm64 | awk '{print $1}' > Horizon-linux-arm64.sha256
           sha256sum Horizon-macos | awk '{print $1}' > Horizon-macos.sha256
 
       - name: Publish to GitHub Releases
@@ -62,5 +69,7 @@ jobs:
             dist/Horizon.exe.sha256
             dist/Horizon-linux
             dist/Horizon-linux.sha256
+            dist/Horizon-linux-arm64
+            dist/Horizon-linux-arm64.sha256
             dist/Horizon-macos
             dist/Horizon-macos.sha256

@@ -34,7 +34,7 @@ func NewGoogleProvider(tokenData auth.TokenData, creds config.ProviderConfig, to
 		tokenData: tokenData,
 		creds:     creds,
 		tokenPath: tokenPath,
-		client:    &http.Client{Timeout: 60 * time.Second},
+		client:    NewPooledClient(60 * time.Second),
 	}
 }
 
@@ -208,7 +208,7 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 		return u
 	}
 
-	dlClient := &http.Client{Timeout: 10 * time.Minute}
+	dlClient := NewPooledClient(10 * time.Minute)
 	confirmAbuse := false
 
 	return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
@@ -346,7 +346,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 	}
 	defer file.Close()
 
-	uploadClient := &http.Client{Timeout: 5 * time.Minute}
+	uploadClient := NewPooledClient(5 * time.Minute)
 
 	if fileSize == 0 {
 		putReq, err := http.NewRequest(http.MethodPut, uploadURL, http.NoBody)

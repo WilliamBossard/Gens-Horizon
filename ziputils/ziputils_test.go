@@ -3,6 +3,7 @@ package ziputils
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -164,5 +165,42 @@ func TestStreamingZip(t *testing.T) {
 		t.Fatalf("expected non-empty deltaBuf")
 	}
 }
+
+func TestParallelExtraction(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "horizon_parallel_extract_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "source")
+	_ = os.MkdirAll(sourceDir, 0755)
+
+	numFiles := 50
+	for i := 0; i < numFiles; i++ {
+		sub := filepath.Join(sourceDir, fmt.Sprintf("sub_%d", i%5))
+		_ = os.MkdirAll(sub, 0755)
+		_ = os.WriteFile(filepath.Join(sub, fmt.Sprintf("file_%d.txt", i)), []byte(fmt.Sprintf("content_%d", i)), 0644)
+	}
+
+	zipPath := filepath.Join(tmpDir, "parallel.zip")
+	if err := CreateFullZip(sourceDir, zipPath, nil); err != nil {
+		t.Fatalf("CreateFullZip failed: %v", err)
+	}
+
+	destDir := filepath.Join(tmpDir, "extracted")
+	if err := ExtractZip(zipPath, destDir, nil); err != nil {
+		t.Fatalf("ExtractZip failed: %v", err)
+	}
+
+	for i := 0; i < numFiles; i++ {
+		sub := filepath.Join(destDir, fmt.Sprintf("sub_%d", i%5))
+		data, err := os.ReadFile(filepath.Join(sub, fmt.Sprintf("file_%d.txt", i)))
+		if err != nil || string(data) != fmt.Sprintf("content_%d", i) {
+			t.Errorf("mismatch on file_%d.txt: %v, got '%s'", i, err, string(data))
+		}
+	}
+}
+
 
 

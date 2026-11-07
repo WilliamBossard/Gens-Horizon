@@ -30,7 +30,7 @@ func NewDropboxProvider(tokenData auth.TokenData, creds config.ProviderConfig, t
 		tokenData: tokenData,
 		creds:     creds,
 		tokenPath: tokenPath,
-		client:    &http.Client{Timeout: 60 * time.Second},
+		client:    NewPooledClient(60 * time.Second),
 	}
 }
 
@@ -217,7 +217,7 @@ func (d *DropboxProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 }
 
 func (d *DropboxProvider) DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
-	dlClient := &http.Client{Timeout: 10 * time.Minute}
+	dlClient := NewPooledClient(10 * time.Minute)
 	arg, _ := json.Marshal(map[string]string{"path": fileID})
 
 	return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
@@ -292,7 +292,7 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 	defer file.Close()
 
 	const dropboxChunkSize = int64(8 * 1024 * 1024)
-	uploadClient := &http.Client{Timeout: 5 * time.Minute}
+	uploadClient := NewPooledClient(5 * time.Minute)
 	var processed int64
 	lastPct := -1
 

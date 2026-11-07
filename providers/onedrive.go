@@ -31,7 +31,7 @@ func NewOneDriveProvider(tokenData auth.TokenData, creds config.ProviderConfig, 
 		tokenData: tokenData,
 		creds:     creds,
 		tokenPath: tokenPath,
-		client:    &http.Client{Timeout: 60 * time.Second},
+		client:    NewPooledClient(60 * time.Second),
 	}
 }
 
@@ -191,7 +191,7 @@ func (o *OneDriveProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 }
 
 func (o *OneDriveProvider) DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
-	dlClient := &http.Client{Timeout: 10 * time.Minute}
+	dlClient := NewPooledClient(10 * time.Minute)
 	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/content", fileID)
 
 	return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
@@ -326,7 +326,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 	}
 	defer file.Close()
 
-	uploadClient := &http.Client{Timeout: 5 * time.Minute}
+	uploadClient := NewPooledClient(5 * time.Minute)
 	var offset int64
 	var finalID string
 

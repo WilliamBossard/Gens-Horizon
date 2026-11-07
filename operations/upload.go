@@ -185,10 +185,26 @@ func Upload(args []string) {
 			}
 		}
 
-		needsFullBackup := !hasBase || !hasRemoteManifest || len(existingDeltas) >= cleanupThreshold
+		var totalDeltasSize int64
+		var oldestDeltaTime int64 = time.Now().UnixMilli()
+		for _, d := range existingDeltas {
+			totalDeltasSize += d.Size
+			if d.ModifiedTime.UnixMilli() < oldestDeltaTime {
+				oldestDeltaTime = d.ModifiedTime.UnixMilli()
+			}
+		}
+
+		isDeltaThresholdExceeded := len(existingDeltas) >= cleanupThreshold
+		isSizeSignificant := hasBase && baseFile.Size > 0 && totalDeltasSize >= (baseFile.Size/2)
+		isDeltaTooOld := len(existingDeltas) > 0 && time.Since(time.UnixMilli(oldestDeltaTime)) > 30*24*time.Hour
+		isHardCapReached := len(existingDeltas) >= cleanupThreshold*2
+
+		// Smart Consolidation : consolidation complète si le seuil est atteint ET (taille cumulée > 50% de la base, deltas > 30j, ou plafond de sécurité)
+		needsFullBackup := !hasBase || !hasRemoteManifest ||
+			(isDeltaThresholdExceeded && (isSizeSignificant || isDeltaTooOld || isHardCapReached))
 
 		if needsFullBackup {
-			ipc.Logf("[upload] Création d'une sauvegarde complète pour %s (deltas=%d, max=%d)", inst, len(existingDeltas), cleanupThreshold)
+			ipc.Logf("[upload] Création d'une sauvegarde complète pour %s (deltas=%d, tailleDeltas=%d, baseSize=%d, max=%d)", inst, len(existingDeltas), totalDeltasSize, baseFile.Size, cleanupThreshold)
 			tempZip := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_full_%s_%d.zip", safeInst, time.Now().UnixMilli()))
 
 			ipc.SendProgress("COMPRESSING", 0, inst)

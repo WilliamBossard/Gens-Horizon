@@ -10,8 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/scanner"
@@ -61,7 +63,7 @@ func VerifyZipIntegrity(zipPath string) error {
 	return nil
 }
 
-// ExtractZip extrait de manière sécurisée une archive (protection Zip Slip stricte)
+// ExtractZip extrait de manière sécurisée une archive (protection Zip Slip stricte) avec extraction parallèle
 func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) error {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -70,9 +72,9 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 	defer zr.Close()
 
 	cleanTarget := filepath.Clean(targetPath)
-	total := len(zr.File)
-	count := 0
 
+	// Étape 1 : Création synchrone rapide de tous les répertoires et filtrage des fichiers valides
+	var filesToExtract []*zip.File
 	for _, zf := range zr.File {
 		destPath := filepath.Join(cleanTarget, zf.Name)
 		cleanDest := filepath.Clean(destPath)
@@ -93,34 +95,108 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 			return err
 		}
 
-		rc, err := zf.Open()
-		if err != nil {
-			return err
-		}
+		filesToExtract = append(filesToExtract, zf)
+	}
 
-		// Détache tout hardlink éventuel (protection du snapshot rollback) avant d'écrire le nouveau fichier
-		_ = os.Remove(cleanDest)
-		outFile, err := os.OpenFile(cleanDest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, zf.Mode())
-		if err != nil {
-			_ = rc.Close()
-			return err
+	total := len(filesToExtract)
+	if total == 0 {
+		if onProgress != nil {
+			onProgress(100)
 		}
+		return nil
+	}
 
-		_, err = io.Copy(outFile, rc)
-		_ = outFile.Close()
-		_ = rc.Close()
-		if err != nil {
-			return err
-		}
+	// Étape 2 : Extraction concurrente des fichiers via un Worker Pool
+	workerCount := runtime.NumCPU() * 2
+	if workerCount < 4 {
+		workerCount = 4
+	}
+	if workerCount > 16 {
+		workerCount = 16
+	}
+	if workerCount > total {
+		workerCount = total
+	}
 
-		count++
-		if onProgress != nil && total > 0 {
-			pct := (count * 100) / total
-			if pct > 99 {
-				pct = 99
+	taskChan := make(chan *zip.File, total)
+	for _, zf := range filesToExtract {
+		taskChan <- zf
+	}
+	close(taskChan)
+
+	var extractedCount atomic.Int64
+	var firstErr error
+	var errMu sync.Mutex
+
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for zf := range taskChan {
+				errMu.Lock()
+				hasErr := firstErr != nil
+				errMu.Unlock()
+				if hasErr {
+					return
+				}
+
+				destPath := filepath.Join(cleanTarget, zf.Name)
+				cleanDest := filepath.Clean(destPath)
+
+				rc, err := zf.Open()
+				if err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					errMu.Unlock()
+					return
+				}
+
+				// Détache tout hardlink éventuel (protection du snapshot rollback) avant d'écrire le nouveau fichier
+				_ = os.Remove(cleanDest)
+				outFile, err := os.OpenFile(cleanDest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, zf.Mode())
+				if err != nil {
+					_ = rc.Close()
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					errMu.Unlock()
+					return
+				}
+
+				bufPtr := zipBufPool.Get().(*[]byte)
+				_, copyErr := io.CopyBuffer(outFile, rc, *bufPtr)
+				zipBufPool.Put(bufPtr)
+				_ = outFile.Close()
+				_ = rc.Close()
+
+				if copyErr != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = copyErr
+					}
+					errMu.Unlock()
+					return
+				}
+
+				cur := extractedCount.Add(1)
+				if onProgress != nil && total > 0 {
+					pct := int((cur * 100) / int64(total))
+					if pct > 99 {
+						pct = 99
+					}
+					onProgress(pct)
+				}
 			}
-			onProgress(pct)
-		}
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
 	}
 
 	if onProgress != nil {
@@ -373,7 +449,7 @@ func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, 
 	return bufWriter.Flush()
 }
 
-// ApplyDelta extrait les fichiers modifiés et supprime les fichiers supprimés indiqués dans __delta__.json
+// ApplyDelta extrait les fichiers modifiés et supprime les fichiers supprimés indiqués dans __delta__.json en parallèle
 func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct int)) error {
 	zr, err := zip.OpenReader(deltaZipPath)
 	if err != nil {
@@ -383,11 +459,10 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 
 	cleanTarget := filepath.Clean(targetFolder)
 	var deletedFiles []string
-	total := len(zr.File)
-	count := 0
+	var filesToExtract []*zip.File
 
+	// 1. Détection de __delta__.json et préparation des dossiers
 	for _, zf := range zr.File {
-		// Interception de __delta__.json pour récupérer la liste des suppressions sans l'extraire sur le disque
 		if zf.Name == "__delta__.json" {
 			rc, err := zf.Open()
 			if err == nil {
@@ -400,7 +475,6 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 					}
 				}
 			}
-			count++
 			continue
 		}
 
@@ -423,49 +497,121 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 			return err
 		}
 
-		rc, err := zf.Open()
-		if err != nil {
-			return err
-		}
+		filesToExtract = append(filesToExtract, zf)
+	}
 
-		// Détache tout hardlink éventuel (protection du snapshot rollback) avant d'écrire le nouveau fichier
-		_ = os.Remove(cleanDest)
-		outFile, err := os.OpenFile(cleanDest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, zf.Mode())
-		if err != nil {
-			_ = rc.Close()
-			return err
-		}
-
-		_, err = io.Copy(outFile, rc)
-		_ = outFile.Close()
-		_ = rc.Close()
-		if err != nil {
-			return err
-		}
-
-		count++
-		if onProgress != nil && total > 0 {
-			pct := (count * 100) / total
-			if pct > 99 {
-				pct = 99
-			}
-			onProgress(pct)
+	// 2. Suppression des fichiers orphelins indiqués dans le manifest du delta
+	for _, rel := range deletedFiles {
+		delPath := filepath.Join(cleanTarget, filepath.FromSlash(rel))
+		cleanDel := filepath.Clean(delPath)
+		if strings.HasPrefix(cleanDel, cleanTarget+string(filepath.Separator)) {
+			_ = os.Remove(cleanDel)
 		}
 	}
 
-	// Suppression des fichiers marqués supprimés
-	for _, rel := range deletedFiles {
-		absPath := filepath.Join(cleanTarget, filepath.FromSlash(rel))
-		cleanAbs := filepath.Clean(absPath)
-		if strings.HasPrefix(cleanAbs, cleanTarget+string(filepath.Separator)) {
-			_ = os.Remove(cleanAbs)
+	total := len(filesToExtract)
+	if total == 0 {
+		if onProgress != nil {
+			onProgress(100)
 		}
+		return nil
+	}
+
+	// 3. Extraction parallèle des fichiers modifiés
+	workerCount := runtime.NumCPU() * 2
+	if workerCount < 4 {
+		workerCount = 4
+	}
+	if workerCount > 16 {
+		workerCount = 16
+	}
+	if workerCount > total {
+		workerCount = total
+	}
+
+	taskChan := make(chan *zip.File, total)
+	for _, zf := range filesToExtract {
+		taskChan <- zf
+	}
+	close(taskChan)
+
+	var extractedCount atomic.Int64
+	var firstErr error
+	var errMu sync.Mutex
+
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for zf := range taskChan {
+				errMu.Lock()
+				hasErr := firstErr != nil
+				errMu.Unlock()
+				if hasErr {
+					return
+				}
+
+				destPath := filepath.Join(cleanTarget, zf.Name)
+				cleanDest := filepath.Clean(destPath)
+
+				rc, err := zf.Open()
+				if err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					errMu.Unlock()
+					return
+				}
+
+				_ = os.Remove(cleanDest)
+				outFile, err := os.OpenFile(cleanDest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, zf.Mode())
+				if err != nil {
+					_ = rc.Close()
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					errMu.Unlock()
+					return
+				}
+
+				bufPtr := zipBufPool.Get().(*[]byte)
+				_, copyErr := io.CopyBuffer(outFile, rc, *bufPtr)
+				zipBufPool.Put(bufPtr)
+				_ = outFile.Close()
+				_ = rc.Close()
+
+				if copyErr != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = copyErr
+					}
+					errMu.Unlock()
+					return
+				}
+
+				cur := extractedCount.Add(1)
+				if onProgress != nil && total > 0 {
+					pct := int((cur * 100) / int64(total))
+					if pct > 99 {
+						pct = 99
+					}
+					onProgress(pct)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
 	}
 
 	if onProgress != nil {
 		onProgress(100)
 	}
-
 	return nil
 }
 
