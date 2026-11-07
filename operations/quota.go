@@ -43,11 +43,18 @@ func Quota(args []string) {
 	}
 
 	var cloudFiles []providers.CloudFile
-	_ = retry.Do(context.Background(), retryOpts, func() error {
-		var lErr error
-		cloudFiles, lErr = p.ListFiles("GensHorizon_")
-		return lErr
-	})
+	if cached, ok := providers.GetCachedCloudIndex(p.Name(), providers.DefaultCloudIndexTTL); ok {
+		cloudFiles = cached
+	} else {
+		_ = retry.Do(context.Background(), retryOpts, func() error {
+			var lErr error
+			cloudFiles, lErr = p.ListFiles("GensHorizon_")
+			return lErr
+		})
+		if len(cloudFiles) > 0 {
+			providers.SaveCachedCloudIndex(p.Name(), cloudFiles)
+		}
+	}
 
 	var horizonUsed int64
 	instanceMap := make(map[string]int64)

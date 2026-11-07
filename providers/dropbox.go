@@ -323,7 +323,6 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 	}
 	fileSize := info.Size()
 
-	// Upload direct (jusqu'à 150 Mo chez Dropbox)
 	targetPath := "/" + name
 	if existingID != "" && strings.HasPrefix(existingID, "id:") {
 		targetPath = existingID
@@ -335,45 +334,252 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 	}
 	defer file.Close()
 
-	req, err := http.NewRequest(http.MethodPost, "https://content.dropboxapi.com/2/files/upload", file)
-	if err != nil {
-		return "", err
-	}
-	req.ContentLength = fileSize
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Content-Type", "application/octet-stream")
+	const dropboxChunkSize = int64(8 * 1024 * 1024)
+	uploadClient := &http.Client{Timeout: 5 * time.Minute}
+	var processed int64
+	lastPct := -1
 
-	arg, _ := json.Marshal(map[string]any{
-		"path":       targetPath,
-		"mode":       "overwrite",
-		"autorename": false,
-		"mute":       true,
-	})
-	req.Header.Set("Dropbox-API-Arg", string(arg))
+	// Pour les petits fichiers (<= 8 Mo) : upload direct avec ProgressReader
+	if fileSize <= dropboxChunkSize {
+		pr := &ProgressReader{
+			Reader:     file,
+			TotalSize:  fileSize,
+			Processed:  &processed,
+			LastPct:    &lastPct,
+			OnProgress: onProgress,
+		}
 
-	uploadClient := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := uploadClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
+		req, err := http.NewRequest(http.MethodPost, "https://content.dropboxapi.com/2/files/upload", pr)
+		if err != nil {
+			return "", err
+		}
+		req.ContentLength = fileSize
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Content-Type", "application/octet-stream")
 
-	respBytes, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("dropbox uploadZip HTTP %d : %s", resp.StatusCode, string(respBytes))
+		arg, _ := json.Marshal(map[string]any{
+			"path":       targetPath,
+			"mode":       "overwrite",
+			"autorename": false,
+			"mute":       true,
+		})
+		req.Header.Set("Dropbox-API-Arg", string(arg))
+
+		resp, err := uploadClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+
+		respBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("dropbox uploadZip HTTP %d : %s", resp.StatusCode, string(respBytes))
+		}
+
+		var res struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(respBytes, &res); err != nil {
+			return "", err
+		}
+
+		InvalidateCloudIndexCache()
+		if onProgress != nil {
+			onProgress(100)
+		}
+		return res.ID, nil
 	}
 
-	var res struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(respBytes, &res); err != nil {
-		return "", err
+	// Pour les fichiers > 8 Mo : session d'upload par blocs (upload_session/start, append_v2, finish)
+	firstChunk := dropboxChunkSize
+	var sessionID string
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*1500) * time.Millisecond)
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return "", err
+		}
+		processed = 0
+
+		pr := &ProgressReader{
+			Reader:     io.LimitReader(file, firstChunk),
+			TotalSize:  fileSize,
+			Processed:  &processed,
+			LastPct:    &lastPct,
+			OnProgress: onProgress,
+		}
+
+		startReq, err := http.NewRequest(http.MethodPost, "https://content.dropboxapi.com/2/files/upload_session/start", pr)
+		if err != nil {
+			return "", err
+		}
+		startReq.ContentLength = firstChunk
+		startReq.Header.Set("Authorization", "Bearer "+tok)
+		startReq.Header.Set("Content-Type", "application/octet-stream")
+		startArg, _ := json.Marshal(map[string]any{"close": false})
+		startReq.Header.Set("Dropbox-API-Arg", string(startArg))
+
+		resp, err := uploadClient.Do(startReq)
+		if err != nil {
+			if attempt == 2 {
+				return "", err
+			}
+			continue
+		}
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			if attempt == 2 {
+				return "", fmt.Errorf("dropbox session start HTTP %d : %s", resp.StatusCode, string(b))
+			}
+			continue
+		}
+
+		var sRes struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(b, &sRes); err != nil || sRes.SessionID == "" {
+			return "", fmt.Errorf("dropbox session_id invalide : %v", err)
+		}
+		sessionID = sRes.SessionID
+		break
 	}
 
+	offset := firstChunk
+	for offset+dropboxChunkSize < fileSize {
+		chunkLen := dropboxChunkSize
+		var appended bool
+		var lastErr error
+
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt*1500) * time.Millisecond)
+			}
+			if _, err := file.Seek(offset, io.SeekStart); err != nil {
+				return "", err
+			}
+			processed = offset
+
+			pr := &ProgressReader{
+				Reader:     io.LimitReader(file, chunkLen),
+				TotalSize:  fileSize,
+				Processed:  &processed,
+				LastPct:    &lastPct,
+				OnProgress: onProgress,
+			}
+
+			appReq, err := http.NewRequest(http.MethodPost, "https://content.dropboxapi.com/2/files/upload_session/append_v2", pr)
+			if err != nil {
+				return "", err
+			}
+			appReq.ContentLength = chunkLen
+			appReq.Header.Set("Authorization", "Bearer "+tok)
+			appReq.Header.Set("Content-Type", "application/octet-stream")
+			appArg, _ := json.Marshal(map[string]any{
+				"cursor": map[string]any{
+					"session_id": sessionID,
+					"offset":     offset,
+				},
+				"close": false,
+			})
+			appReq.Header.Set("Dropbox-API-Arg", string(appArg))
+
+			resp, err := uploadClient.Do(appReq)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				appended = true
+				break
+			}
+			lastErr = fmt.Errorf("dropbox append_v2 HTTP %d : %s", resp.StatusCode, string(b))
+		}
+		if !appended {
+			return "", lastErr
+		}
+		offset += chunkLen
+	}
+
+	// Dernier bloc : upload_session/finish
+	finalLen := fileSize - offset
+	var finalID string
+	var finishErr error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*1500) * time.Millisecond)
+		}
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			return "", err
+		}
+		processed = offset
+
+		pr := &ProgressReader{
+			Reader:     io.LimitReader(file, finalLen),
+			TotalSize:  fileSize,
+			Processed:  &processed,
+			LastPct:    &lastPct,
+			OnProgress: onProgress,
+		}
+
+		finReq, err := http.NewRequest(http.MethodPost, "https://content.dropboxapi.com/2/files/upload_session/finish", pr)
+		if err != nil {
+			return "", err
+		}
+		finReq.ContentLength = finalLen
+		finReq.Header.Set("Authorization", "Bearer "+tok)
+		finReq.Header.Set("Content-Type", "application/octet-stream")
+		finArg, _ := json.Marshal(map[string]any{
+			"cursor": map[string]any{
+				"session_id": sessionID,
+				"offset":     offset,
+			},
+			"commit": map[string]any{
+				"path":       targetPath,
+				"mode":       "overwrite",
+				"autorename": false,
+				"mute":       true,
+			},
+		})
+		finReq.Header.Set("Dropbox-API-Arg", string(finArg))
+
+		resp, err := uploadClient.Do(finReq)
+		if err != nil {
+			finishErr = err
+			continue
+		}
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			var res struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(b, &res); err != nil {
+				return "", err
+			}
+			finalID = res.ID
+			finishErr = nil
+			break
+		}
+		finishErr = fmt.Errorf("dropbox finish HTTP %d : %s", resp.StatusCode, string(b))
+	}
+
+	if finishErr != nil {
+		return "", finishErr
+	}
+
+	InvalidateCloudIndexCache()
 	if onProgress != nil {
 		onProgress(100)
 	}
-	return res.ID, nil
+	return finalID, nil
 }
 
 func (d *DropboxProvider) UploadJSON(name string, data any, existingID string) (string, error) {
@@ -423,11 +629,15 @@ func (d *DropboxProvider) UploadJSON(name string, data any, existingID string) (
 		ID string `json:"id"`
 	}
 	_ = json.Unmarshal(respBytes, &res)
+	InvalidateCloudIndexCache()
 	return res.ID, nil
 }
 
 func (d *DropboxProvider) DeleteFile(fileID string) error {
 	_, err := d.doRPC("files/delete_v2", map[string]string{"path": fileID})
+	if err == nil {
+		InvalidateCloudIndexCache()
+	}
 	return err
 }
 

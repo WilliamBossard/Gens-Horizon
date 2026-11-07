@@ -375,49 +375,205 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 		return "", fmt.Errorf("[google] sécurité : URL d'upload suspecte %s", uploadURL)
 	}
 
-	// Streaming PUT vers l'uploadURL
+	// Upload par blocs (chunks de 8 Mo = multiple de 256 Ko requis par Google Drive)
+	const googleChunkSize = int64(8 * 1024 * 1024)
+
 	file, err := os.Open(srcPath)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
 
-	putReq, err := http.NewRequest(http.MethodPut, uploadURL, file)
-	if err != nil {
-		return "", err
-	}
-	putReq.ContentLength = fileSize
-	if fileSize > 0 {
-		putReq.Header.Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", fileSize-1, fileSize))
-	} else {
+	uploadClient := &http.Client{Timeout: 5 * time.Minute}
+
+	if fileSize == 0 {
+		putReq, err := http.NewRequest(http.MethodPut, uploadURL, http.NoBody)
+		if err != nil {
+			return "", err
+		}
+		putReq.ContentLength = 0
 		putReq.Header.Set("Content-Range", "bytes */0")
+		putResp, err := uploadClient.Do(putReq)
+		if err != nil {
+			return "", err
+		}
+		defer putResp.Body.Close()
+		respBytes, _ := io.ReadAll(putResp.Body)
+		if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
+			return "", fmt.Errorf("[google] échec upload ZIP vide (HTTP %d) : %s", putResp.StatusCode, string(respBytes))
+		}
+		var res struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(respBytes, &res); err != nil {
+			return "", err
+		}
+		InvalidateCloudIndexCache()
+		if onProgress != nil {
+			onProgress(100)
+		}
+		return res.ID, nil
 	}
 
-	uploadClient := &http.Client{Timeout: 10 * time.Minute}
-	putResp, err := uploadClient.Do(putReq)
+	var offset int64
+	var processed int64
+	lastPct := -1
+
+	for offset < fileSize {
+		remaining := fileSize - offset
+		chunkLen := googleChunkSize
+		if remaining < chunkLen {
+			chunkLen = remaining
+		}
+
+		var chunkDone bool
+		var lastErr error
+
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt*1500) * time.Millisecond)
+				if serverOffset, completedBody, qErr := queryGoogleUploadOffset(uploadClient, uploadURL, fileSize); qErr == nil {
+					if completedBody != nil {
+						var res struct {
+							ID string `json:"id"`
+						}
+						if err := json.Unmarshal(completedBody, &res); err == nil && res.ID != "" {
+							InvalidateCloudIndexCache()
+							if onProgress != nil {
+								onProgress(100)
+							}
+							return res.ID, nil
+						}
+					}
+					if serverOffset >= 0 && serverOffset <= fileSize {
+						offset = serverOffset
+						remaining = fileSize - offset
+						if remaining <= 0 {
+							break
+						}
+						chunkLen = googleChunkSize
+						if remaining < chunkLen {
+							chunkLen = remaining
+						}
+					}
+				}
+			}
+
+			if _, err := file.Seek(offset, io.SeekStart); err != nil {
+				return "", err
+			}
+			processed = offset
+
+			pr := &ProgressReader{
+				Reader:     io.LimitReader(file, chunkLen),
+				TotalSize:  fileSize,
+				Processed:  &processed,
+				LastPct:    &lastPct,
+				OnProgress: onProgress,
+			}
+
+			putReq, err := http.NewRequest(http.MethodPut, uploadURL, pr)
+			if err != nil {
+				return "", err
+			}
+			putReq.ContentLength = chunkLen
+			putReq.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+chunkLen-1, fileSize))
+
+			putResp, err := uploadClient.Do(putReq)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+
+			respBytes, _ := io.ReadAll(putResp.Body)
+			_ = putResp.Body.Close()
+
+			// 308 Resume Incomplete : chunk validé par Google Drive
+			if putResp.StatusCode == http.StatusPermanentRedirect {
+				if nextOff := parseGoogleRangeHeader(putResp.Header.Get("Range")); nextOff > offset {
+					offset = nextOff
+				} else {
+					offset += chunkLen
+				}
+				chunkDone = true
+				break
+			}
+
+			// 200 OK ou 201 Created : upload complet terminé
+			if putResp.StatusCode == http.StatusOK || putResp.StatusCode == http.StatusCreated {
+				var res struct {
+					ID   string `json:"id"`
+					Size string `json:"size"`
+				}
+				if err := json.Unmarshal(respBytes, &res); err != nil {
+					return "", err
+				}
+				InvalidateCloudIndexCache()
+				if onProgress != nil {
+					onProgress(100)
+				}
+				return res.ID, nil
+			}
+
+			lastErr = fmt.Errorf("[google] échec upload chunk (HTTP %d) : %s", putResp.StatusCode, string(respBytes))
+			if putResp.StatusCode >= 400 && putResp.StatusCode < 500 && putResp.StatusCode != http.StatusTooManyRequests {
+				return "", lastErr
+			}
+		}
+
+		if !chunkDone {
+			if lastErr != nil {
+				return "", lastErr
+			}
+			return "", errors.New("[google] échec inattendu lors de l'upload par blocs")
+		}
+	}
+
+	return "", errors.New("[google] upload terminé sans réponse finale du serveur")
+}
+
+func parseGoogleRangeHeader(rangeHdr string) int64 {
+	// Format attendu : "bytes=0-8388607"
+	if !strings.HasPrefix(rangeHdr, "bytes=") {
+		return -1
+	}
+	parts := strings.Split(strings.TrimPrefix(rangeHdr, "bytes="), "-")
+	if len(parts) != 2 {
+		return -1
+	}
+	endByte, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+	if err != nil || endByte < 0 {
+		return -1
+	}
+	return endByte + 1
+}
+
+func queryGoogleUploadOffset(client *http.Client, uploadURL string, totalSize int64) (int64, []byte, error) {
+	req, err := http.NewRequest(http.MethodPut, uploadURL, http.NoBody)
 	if err != nil {
-		return "", err
+		return -1, nil, err
 	}
-	defer putResp.Body.Close()
+	req.ContentLength = 0
+	req.Header.Set("Content-Range", fmt.Sprintf("bytes */%d", totalSize))
 
-	respBytes, _ := io.ReadAll(putResp.Body)
-	if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("[google] échec upload ZIP (HTTP %d) : %s", putResp.StatusCode, string(respBytes))
+	resp, err := client.Do(req)
+	if err != nil {
+		return -1, nil, err
 	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
 
-	var res struct {
-		ID   string `json:"id"`
-		Size string `json:"size"`
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		return totalSize, body, nil
 	}
-	if err := json.Unmarshal(respBytes, &res); err != nil {
-		return "", err
+	if resp.StatusCode == http.StatusPermanentRedirect {
+		nextOff := parseGoogleRangeHeader(resp.Header.Get("Range"))
+		if nextOff < 0 {
+			return 0, nil, nil
+		}
+		return nextOff, nil, nil
 	}
-
-	if onProgress != nil {
-		onProgress(100)
-	}
-
-	return res.ID, nil
+	return -1, nil, fmt.Errorf("status %d", resp.StatusCode)
 }
 
 func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (string, error) {
@@ -482,6 +638,7 @@ func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (s
 		ID string `json:"id"`
 	}
 	_ = json.Unmarshal(respBytes, &res)
+	InvalidateCloudIndexCache()
 	return res.ID, nil
 }
 
@@ -500,6 +657,7 @@ func (g *GoogleProvider) DeleteFile(fileID string) error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("[google] deleteFile HTTP %d", resp.StatusCode)
 	}
+	InvalidateCloudIndexCache()
 	return nil
 }
 

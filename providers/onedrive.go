@@ -284,7 +284,10 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 	}
 	fileSize := info.Size()
 
-	// Pour < 4 Mo : upload direct PUT simple
+	var processed int64
+	lastPct := -1
+
+	// Pour < 4 Mo : upload direct PUT simple avec ProgressReader
 	if fileSize < 4*1024*1024 {
 		file, err := os.Open(srcPath)
 		if err != nil {
@@ -292,8 +295,16 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 		}
 		defer file.Close()
 
+		pr := &ProgressReader{
+			Reader:     file,
+			TotalSize:  fileSize,
+			Processed:  &processed,
+			LastPct:    &lastPct,
+			OnProgress: onProgress,
+		}
+
 		reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/special/approot:/%s:/content", url.PathEscape(name))
-		req, err := http.NewRequest(http.MethodPut, reqURL, file)
+		req, err := http.NewRequest(http.MethodPut, reqURL, pr)
 		if err != nil {
 			return "", err
 		}
@@ -314,6 +325,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 			ID string `json:"id"`
 		}
 		_ = json.Unmarshal(b, &res)
+		InvalidateCloudIndexCache()
 		if onProgress != nil {
 			onProgress(100)
 		}
@@ -349,7 +361,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 		return "", errors.New("aucune URL d'upload session retournée par OneDrive")
 	}
 
-	// Upload par chunks de 10 Mo
+	// Upload par chunks de 10 Mo avec ProgressReader et reprise
 	chunkSize := int64(10 * 1024 * 1024)
 	file, err := os.Open(srcPath)
 	if err != nil {
@@ -357,7 +369,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 	}
 	defer file.Close()
 
-	uploadClient := &http.Client{Timeout: 10 * time.Minute}
+	uploadClient := &http.Client{Timeout: 5 * time.Minute}
 	var offset int64
 	var finalID string
 
@@ -368,47 +380,67 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 			currentChunk = remaining
 		}
 
-		chunkBuf := make([]byte, currentChunk)
-		if _, err := io.ReadFull(file, chunkBuf); err != nil {
-			return "", err
+		var chunkDone bool
+		var lastErr error
+
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt*1500) * time.Millisecond)
+			}
+			if _, err := file.Seek(offset, io.SeekStart); err != nil {
+				return "", err
+			}
+			processed = offset
+
+			pr := &ProgressReader{
+				Reader:     io.LimitReader(file, currentChunk),
+				TotalSize:  fileSize,
+				Processed:  &processed,
+				LastPct:    &lastPct,
+				OnProgress: onProgress,
+			}
+
+			chunkReq, err := http.NewRequest(http.MethodPut, sessionRes.UploadURL, pr)
+			if err != nil {
+				return "", err
+			}
+			chunkReq.ContentLength = currentChunk
+			chunkReq.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+currentChunk-1, fileSize))
+
+			chunkResp, err := uploadClient.Do(chunkReq)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			chunkBody, _ := io.ReadAll(chunkResp.Body)
+			_ = chunkResp.Body.Close()
+
+			if chunkResp.StatusCode != http.StatusOK && chunkResp.StatusCode != http.StatusCreated && chunkResp.StatusCode != http.StatusAccepted {
+				lastErr = fmt.Errorf("onedrive chunk upload HTTP %d : %s", chunkResp.StatusCode, string(chunkBody))
+				continue
+			}
+
+			if chunkResp.StatusCode == http.StatusOK || chunkResp.StatusCode == http.StatusCreated {
+				var doneRes struct {
+					ID string `json:"id"`
+				}
+				_ = json.Unmarshal(chunkBody, &doneRes)
+				finalID = doneRes.ID
+			}
+			chunkDone = true
+			break
 		}
 
-		chunkReq, err := http.NewRequest(http.MethodPut, sessionRes.UploadURL, bytes.NewReader(chunkBuf))
-		if err != nil {
-			return "", err
+		if !chunkDone {
+			return "", lastErr
 		}
-		chunkReq.ContentLength = currentChunk
-		chunkReq.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+currentChunk-1, fileSize))
-
-		chunkResp, err := uploadClient.Do(chunkReq)
-		if err != nil {
-			return "", err
-		}
-		chunkBody, _ := io.ReadAll(chunkResp.Body)
-		_ = chunkResp.Body.Close()
-
-		if chunkResp.StatusCode != http.StatusOK && chunkResp.StatusCode != http.StatusCreated && chunkResp.StatusCode != http.StatusAccepted {
-			return "", fmt.Errorf("onedrive chunk upload HTTP %d : %s", chunkResp.StatusCode, string(chunkBody))
-		}
-
 		offset += currentChunk
-		if onProgress != nil {
-			pct := int((offset * 100) / fileSize)
-			if pct > 100 {
-				pct = 100
-			}
-			onProgress(pct)
-		}
-
-		if chunkResp.StatusCode == http.StatusOK || chunkResp.StatusCode == http.StatusCreated {
-			var doneRes struct {
-				ID string `json:"id"`
-			}
-			_ = json.Unmarshal(chunkBody, &doneRes)
-			finalID = doneRes.ID
-		}
 	}
 
+	InvalidateCloudIndexCache()
+	if onProgress != nil {
+		onProgress(100)
+	}
 	return finalID, nil
 }
 
@@ -441,6 +473,7 @@ func (o *OneDriveProvider) UploadJSON(name string, data any, existingID string) 
 		ID string `json:"id"`
 	}
 	_ = json.Unmarshal(b, &res)
+	InvalidateCloudIndexCache()
 	return res.ID, nil
 }
 
@@ -460,6 +493,7 @@ func (o *OneDriveProvider) DeleteFile(fileID string) error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("onedrive delete HTTP %d", resp.StatusCode)
 	}
+	InvalidateCloudIndexCache()
 	return nil
 }
 

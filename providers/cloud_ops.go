@@ -8,8 +8,16 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
-// GetCloudIndexAndCleanDuplicates récupère la liste des fichiers cloud et purge automatiquement les doublons obsolètes
+// GetCloudIndexAndCleanDuplicates récupère la liste des fichiers cloud (avec cache éphémère 45s) et purge automatiquement les doublons obsolètes
 func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix string) (map[string]CloudFile, error) {
+	if cachedFiles, ok := GetCachedCloudIndex(p.Name(), DefaultCloudIndexTTL); ok {
+		cloudIndex := make(map[string]CloudFile, len(cachedFiles))
+		for _, f := range cachedFiles {
+			cloudIndex[f.Name] = f
+		}
+		return cloudIndex, nil
+	}
+
 	var cloudFiles []CloudFile
 	err := retry.Do(context.Background(), opts, func() error {
 		files, err := p.ListFiles("GensHorizon_")
@@ -68,6 +76,13 @@ func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix s
 		}
 		wg.Wait()
 	}
+
+	// Enregistrement dans le cache éphémère (fichiers dédupliqués)
+	cleanList := make([]CloudFile, 0, len(cloudIndex))
+	for _, f := range cloudIndex {
+		cleanList = append(cleanList, f)
+	}
+	SaveCachedCloudIndex(p.Name(), cleanList)
 
 	return cloudIndex, nil
 }

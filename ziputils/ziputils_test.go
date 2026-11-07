@@ -50,6 +50,24 @@ func TestZipAndExtractRoundTrip(t *testing.T) {
 		t.Fatalf("CreateFullZip failed: %v", err)
 	}
 
+	zr, err := zip.OpenReader(destZip)
+	if err != nil {
+		t.Fatalf("OpenReader failed: %v", err)
+	}
+	for _, zf := range zr.File {
+		switch zf.Name {
+		case "mods/jei.jar":
+			if zf.Method != zip.Store {
+				t.Errorf("expected mods/jei.jar to use zip.Store, got %d", zf.Method)
+			}
+		case "options.txt":
+			if zf.Method != zip.Deflate {
+				t.Errorf("expected options.txt to use zip.Deflate, got %d", zf.Method)
+			}
+		}
+	}
+	_ = zr.Close()
+
 	extractedDir := filepath.Join(tmpDir, "extracted")
 	if err := ExtractZip(destZip, extractedDir, nil); err != nil {
 		t.Fatalf("ExtractZip failed: %v", err)

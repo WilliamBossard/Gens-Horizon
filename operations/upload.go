@@ -78,6 +78,7 @@ func Upload(args []string) {
 		return
 	}
 
+	providers.InvalidateCloudIndexCache()
 	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicates(p, retryOpts, "[upload]")
 	if err != nil {
 		ipc.SendError("CLOUD_ERROR", err.Error(), "")

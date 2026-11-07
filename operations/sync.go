@@ -379,6 +379,7 @@ func handleDelete(targetInst string, cloudIndex map[string]providers.CloudFile, 
 			_ = p.DeleteFile(f.ID)
 		}
 	}
+	providers.InvalidateCloudIndexCache()
 
 	// Suppression locale
 	_ = os.Remove(paths.GetManifestPath(safeInst))

@@ -23,6 +23,17 @@ var zipBufPool = sync.Pool{
 	},
 }
 
+// isPrecompressed détermine si un fichier est déjà compressé afin d'utiliser zip.Store (copie directe sans CPU)
+func isPrecompressed(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".jar", ".zip", ".gz", ".png", ".jpg", ".jpeg", ".ogg", ".mp3", ".webp", ".7z", ".rar":
+		return true
+	default:
+		return false
+	}
+}
+
 // VerifyZipIntegrity vérifie la signature magique ZIP (0x50 0x4B 0x03 0x04) et le Central Directory
 func VerifyZipIntegrity(zipPath string) error {
 	f, err := os.Open(zipPath)
@@ -184,7 +195,11 @@ func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct 
 			return err
 		}
 		header.Name = rel
-		header.Method = zip.Deflate
+		if isPrecompressed(header.Name) {
+			header.Method = zip.Store
+		} else {
+			header.Method = zip.Deflate
+		}
 
 		w, err := zw.CreateHeader(header)
 		if err != nil {
@@ -287,7 +302,11 @@ func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, 
 			continue
 		}
 		header.Name = filepath.ToSlash(rel)
-		header.Method = zip.Deflate
+		if isPrecompressed(header.Name) {
+			header.Method = zip.Store
+		} else {
+			header.Method = zip.Deflate
+		}
 
 		w, err := zw.CreateHeader(header)
 		if err != nil {
