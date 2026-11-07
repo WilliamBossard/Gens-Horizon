@@ -16,3 +16,4 @@ func TestCheckConnectivity(t *testing.T) {
 		t.Logf("CheckConnectivity succeeded in %v", elapsed)
 	}
 }
+
