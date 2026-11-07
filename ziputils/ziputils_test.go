@@ -66,3 +66,55 @@ func TestZipAndExtractRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDeltaZipAndApplyDelta(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "horizon_delta_test_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "source")
+	_ = os.MkdirAll(sourceDir, 0755)
+	_ = os.WriteFile(filepath.Join(sourceDir, "options.txt"), []byte("fov:100"), 0644)
+	_ = os.WriteFile(filepath.Join(sourceDir, "newfile.txt"), []byte("new content"), 0644)
+
+	targetDir := filepath.Join(tmpDir, "target")
+	_ = os.MkdirAll(targetDir, 0755)
+	_ = os.WriteFile(filepath.Join(targetDir, "options.txt"), []byte("fov:70"), 0644)
+	_ = os.WriteFile(filepath.Join(targetDir, "to_delete.txt"), []byte("obsolete"), 0644)
+
+	deltaZip := filepath.Join(tmpDir, "delta.zip")
+	filesToZip := []string{"options.txt", "newfile.txt"}
+	deletedFiles := []string{"to_delete.txt"}
+
+	if err := CreateDeltaZip(sourceDir, filesToZip, deletedFiles, deltaZip, nil); err != nil {
+		t.Fatalf("CreateDeltaZip failed: %v", err)
+	}
+
+	if err := ApplyDelta(deltaZip, targetDir, nil); err != nil {
+		t.Fatalf("ApplyDelta failed: %v", err)
+	}
+
+	// 1. options.txt must be updated to fov:100
+	optData, err := os.ReadFile(filepath.Join(targetDir, "options.txt"))
+	if err != nil || string(optData) != "fov:100" {
+		t.Errorf("expected options.txt to be updated, got '%s'", string(optData))
+	}
+
+	// 2. newfile.txt must exist
+	newData, err := os.ReadFile(filepath.Join(targetDir, "newfile.txt"))
+	if err != nil || string(newData) != "new content" {
+		t.Errorf("expected newfile.txt to exist, got error: %v", err)
+	}
+
+	// 3. to_delete.txt must be deleted
+	if _, err := os.Stat(filepath.Join(targetDir, "to_delete.txt")); !os.IsNotExist(err) {
+		t.Errorf("expected to_delete.txt to be removed")
+	}
+
+	// 4. __delta__.json must NOT be extracted to disk
+	if _, err := os.Stat(filepath.Join(targetDir, "__delta__.json")); !os.IsNotExist(err) {
+		t.Errorf("__delta__.json should not have been extracted to target disk")
+	}
+}
+

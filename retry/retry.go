@@ -3,7 +3,7 @@ package retry
 import (
 	"context"
 	"math/rand"
-	"net/http"
+	"net"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
@@ -93,18 +93,34 @@ func Do(ctx context.Context, opts Options, fn func() error) error {
 	return nil
 }
 
+// CheckConnectivity effectue une résolution DNS concurrente ultra-rapide (similaire à Node.js dns.lookup)
 func CheckConnectivity() bool {
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("https://www.google.com/generate_204")
-	if err == nil && resp.StatusCode == 204 {
-		_ = resp.Body.Close()
-		return true
+	hosts := []string{"google.com", "cloudflare.com", "microsoft.com"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	success := make(chan struct{}, 1)
+	done := make(chan struct{}, len(hosts))
+
+	for _, host := range hosts {
+		go func(h string) {
+			ips, err := net.DefaultResolver.LookupHost(ctx, h)
+			if err == nil && len(ips) > 0 {
+				select {
+				case success <- struct{}{}:
+				default:
+				}
+			}
+			done <- struct{}{}
+		}(host)
 	}
-	// Fallback Cloudflare
-	resp2, err2 := client.Get("https://1.1.1.1")
-	if err2 == nil {
-		_ = resp2.Body.Close()
-		return true
+
+	for i := 0; i < len(hosts); i++ {
+		select {
+		case <-success:
+			return true
+		case <-done:
+		}
 	}
 	return false
 }

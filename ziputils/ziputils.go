@@ -2,12 +2,14 @@ package ziputils
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/scanner"
 )
@@ -203,8 +205,13 @@ func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct 
 	return err
 }
 
-// CreateDeltaZip crÃ©e une archive contenant uniquement les fichiers spÃ©cifiÃ©s (ajoutÃ©s / modifiÃ©s)
-func CreateDeltaZip(sourceFolder string, files []string, destZipPath string, onProgress func(pct int)) error {
+type DeltaMetadata struct {
+	DeletedFiles []string `json:"deletedFiles"`
+	CreatedAt    string   `json:"createdAt"`
+}
+
+// CreateDeltaZip crée une archive contenant uniquement les fichiers spécifiés (ajoutés / modifiés) ainsi que __delta__.json
+func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, destZipPath string, onProgress func(pct int)) error {
 	var totalBytes int64
 	for _, rel := range files {
 		fullPath := filepath.Join(sourceFolder, filepath.FromSlash(rel))
@@ -221,6 +228,20 @@ func CreateDeltaZip(sourceFolder string, files []string, destZipPath string, onP
 
 	zw := zip.NewWriter(outFile)
 	defer zw.Close()
+
+	// 1. Écriture du fichier __delta__.json pour la traçabilité des suppressions
+	if deletedFiles == nil {
+		deletedFiles = []string{}
+	}
+	meta := DeltaMetadata{
+		DeletedFiles: deletedFiles,
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	if metaBytes, err := json.MarshalIndent(meta, "", "  "); err == nil {
+		if w, err := zw.Create("__delta__.json"); err == nil {
+			_, _ = w.Write(metaBytes)
+		}
+	}
 
 	var processedBytes int64
 	lastPct := -1
@@ -279,17 +300,95 @@ func CreateDeltaZip(sourceFolder string, files []string, destZipPath string, onP
 	return nil
 }
 
-// ApplyDelta extrait les fichiers modifiÃ©s et supprime les fichiers supprimÃ©s
-func ApplyDelta(deltaZipPath string, targetFolder string, deletedFiles []string, onProgress func(pct int)) error {
-	// 1. Extraction des fichiers du delta
-	if err := ExtractZip(deltaZipPath, targetFolder, onProgress); err != nil {
-		return err
+// ApplyDelta extrait les fichiers modifiés et supprime les fichiers supprimés indiqués dans __delta__.json
+func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct int)) error {
+	zr, err := zip.OpenReader(deltaZipPath)
+	if err != nil {
+		return fmt.Errorf("archive delta corrompue : %w", err)
+	}
+	defer zr.Close()
+
+	cleanTarget := filepath.Clean(targetFolder)
+	var deletedFiles []string
+	total := len(zr.File)
+	count := 0
+
+	for _, zf := range zr.File {
+		// Interception de __delta__.json pour récupérer la liste des suppressions sans l'extraire sur le disque
+		if zf.Name == "__delta__.json" {
+			rc, err := zf.Open()
+			if err == nil {
+				data, err := io.ReadAll(rc)
+				_ = rc.Close()
+				if err == nil {
+					var meta DeltaMetadata
+					if err := json.Unmarshal(data, &meta); err == nil {
+						deletedFiles = meta.DeletedFiles
+					}
+				}
+			}
+			count++
+			continue
+		}
+
+		destPath := filepath.Join(cleanTarget, zf.Name)
+		cleanDest := filepath.Clean(destPath)
+
+		// Protection anti Zip-Slip
+		if !strings.HasPrefix(cleanDest, cleanTarget+string(filepath.Separator)) && cleanDest != cleanTarget {
+			continue
+		}
+
+		if zf.FileInfo().IsDir() {
+			if err := os.MkdirAll(cleanDest, 0755); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(cleanDest), 0755); err != nil {
+			return err
+		}
+
+		rc, err := zf.Open()
+		if err != nil {
+			return err
+		}
+
+		outFile, err := os.OpenFile(cleanDest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, zf.Mode())
+		if err != nil {
+			_ = rc.Close()
+			return err
+		}
+
+		_, err = io.Copy(outFile, rc)
+		_ = outFile.Close()
+		_ = rc.Close()
+		if err != nil {
+			return err
+		}
+
+		count++
+		if onProgress != nil && total > 0 {
+			pct := (count * 100) / total
+			if pct > 99 {
+				pct = 99
+			}
+			onProgress(pct)
+		}
 	}
 
-	// 2. Suppression des fichiers marquÃ©s supprimÃ©s
+	// Suppression des fichiers marqués supprimés
 	for _, rel := range deletedFiles {
-		fullPath := filepath.Join(targetFolder, filepath.FromSlash(rel))
-		_ = os.Remove(fullPath)
+		absPath := filepath.Join(cleanTarget, filepath.FromSlash(rel))
+		cleanAbs := filepath.Clean(absPath)
+		if strings.HasPrefix(cleanAbs, cleanTarget+string(filepath.Separator)) {
+			_ = os.Remove(cleanAbs)
+		}
+	}
+
+	if onProgress != nil {
+		onProgress(100)
 	}
 
 	return nil

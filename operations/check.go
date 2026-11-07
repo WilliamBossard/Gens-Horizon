@@ -69,7 +69,7 @@ func Check(args []string) {
 		}
 	}
 
-	var updates []string
+	updates := make([]string, 0)
 	instDir := paths.GetInstancesFolder()
 
 	for _, instName := range cloudInstances {

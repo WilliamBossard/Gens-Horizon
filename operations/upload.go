@@ -137,10 +137,21 @@ func Upload(args []string) {
 			cleanupThreshold = 10
 		}
 
-		needsFullBackup := !hasBase || !hasManifest || len(existingDeltas) >= cleanupThreshold
+		var remoteManifest scanner.Manifest
+		hasRemoteManifest := false
+		if hasManifest {
+			err = p.DownloadJSON(manifestFile.ID, &remoteManifest)
+			if err == nil {
+				hasRemoteManifest = true
+			} else {
+				ipc.Logf("[upload] Erreur téléchargement remote manifest, fallback full : %v", err)
+			}
+		}
+
+		needsFullBackup := !hasBase || !hasRemoteManifest || len(existingDeltas) >= cleanupThreshold
 
 		if needsFullBackup {
-			ipc.Logf("[upload] CrÃ©ation d'une sauvegarde complÃ¨te pour %s (deltas=%d, max=%d)", inst, len(existingDeltas), cleanupThreshold)
+			ipc.Logf("[upload] Création d'une sauvegarde complète pour %s (deltas=%d, max=%d)", inst, len(existingDeltas), cleanupThreshold)
 			tempZip := filepath.Join(dataDir, fmt.Sprintf("temp_full_%s_%d.zip", safeInst, time.Now().UnixMilli()))
 
 			ipc.SendProgress("COMPRESSING", 0, inst)
@@ -195,26 +206,33 @@ func Upload(args []string) {
 			}
 			_, _ = p.UploadJSON(metaName, metaData, metaExistingID)
 
-			// Nettoyage des anciens deltas consolidÃ©s
+			// Nettoyage des anciens deltas consolidés
 			for _, deltaFile := range existingDeltas {
 				_ = p.DeleteFile(deltaFile.ID)
 				delete(cloudIndex, deltaFile.Name)
 			}
-		} else {
-			// Sauvegarde diffÃ©rentielle (Delta Sync)
-			var remoteManifest scanner.Manifest
-			err = p.DownloadJSON(manifestFile.ID, &remoteManifest)
-			if err != nil {
-				ipc.Logf("[upload] Erreur tÃ©lÃ©chargement remote manifest, fallback full : %v", err)
-				needsFullBackup = true
+
+			// Sauvegarde du manifest en local
+			if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
+				_ = osWriteFileAtomic(localManifestFile, b, 0644)
 			}
 
+			updateLastSync(dataDir, safeInst)
+
+			ipc.Send(map[string]any{
+				"type":     "SUCCESS",
+				"instance": inst,
+				"mode":     "FULL",
+				"message":  "Sauvegarde complète terminée.",
+			})
+		} else {
+			// Sauvegarde différentielle (Delta Sync)
 			diff := scanner.CompareManifests(remoteManifest, newManifest)
 			if !diff.HasChanges {
 				ipc.Send(ipc.BaseMessage{
 					Type:     "SUCCESS",
 					Instance: inst,
-					Message:  "Instance dÃ©jÃ  Ã  jour sur le Cloud.",
+					Message:  "Instance déjà à jour sur le Cloud.",
 				})
 				updateLastSync(dataDir, safeInst)
 				continue
@@ -226,7 +244,7 @@ func Upload(args []string) {
 			tempDelta := filepath.Join(dataDir, fmt.Sprintf("temp_delta_%s_%d.zip", safeInst, time.Now().UnixMilli()))
 
 			ipc.SendProgress("COMPRESSING", 0, inst)
-			err = ziputils.CreateDeltaZip(localInstFolder, filesToZip, tempDelta, func(pct int) {
+			err = ziputils.CreateDeltaZip(localInstFolder, filesToZip, diff.Deleted, tempDelta, func(pct int) {
 				ipc.SendProgress("COMPRESSING", pct, inst)
 			})
 			if err != nil {
@@ -251,7 +269,7 @@ func Upload(args []string) {
 				ModifiedTime: time.Now(),
 			}
 
-			// Mise Ã  jour du manifest
+			// Mise à jour du manifest
 			newMID, err := p.UploadJSON(manifestName, newManifest, manifestFile.ID)
 			if err == nil {
 				cloudIndex[manifestName] = providers.CloudFile{
@@ -261,27 +279,30 @@ func Upload(args []string) {
 				}
 			}
 
-			// Mise Ã  jour metadata
+			// Mise à jour metadata
 			metaData := extractInstanceMetadata(localInstFolder, inst)
 			metaExistingID := ""
 			if mf, ok := cloudIndex[metaName]; ok {
 				metaExistingID = mf.ID
 			}
 			_, _ = p.UploadJSON(metaName, metaData, metaExistingID)
+
+			// Sauvegarde du manifest en local
+			if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
+				_ = osWriteFileAtomic(localManifestFile, b, 0644)
+			}
+
+			updateLastSync(dataDir, safeInst)
+
+			summary := fmt.Sprintf("+%d ajouté(s), ~%d modifié(s), -%d supprimé(s)", len(diff.Added), len(diff.Modified), len(diff.Deleted))
+			ipc.Send(map[string]any{
+				"type":     "SUCCESS",
+				"instance": inst,
+				"mode":     "SMART",
+				"summary":  summary,
+				"message":  "Synchronisation différentielle terminée.",
+			})
 		}
-
-		// Sauvegarde du manifest en local
-		if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
-			_ = osWriteFileAtomic(localManifestFile, b, 0644)
-		}
-
-		updateLastSync(dataDir, safeInst)
-
-		ipc.Send(ipc.BaseMessage{
-			Type:     "SUCCESS",
-			Instance: inst,
-			Message:  "Synchronisation Cloud terminÃ©e.",
-		})
 	}
 }
 

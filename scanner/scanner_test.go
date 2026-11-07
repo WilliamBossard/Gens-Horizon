@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,6 +68,43 @@ func TestGenerateManifestIgnoresDirs(t *testing.T) {
 	}
 	if _, ok := manifest["assets/sound.ogg"]; ok {
 		t.Errorf("assets/sound.ogg should have been ignored")
+	}
+}
+
+func TestUnmarshalNodeManifestFloatMtime(t *testing.T) {
+	rawJSON := `{
+		"command_history.txt": {
+			"hash": "abc123def456",
+			"mtime": 1790268044168.8877,
+			"size": 3254
+		},
+		"servers.dat": {
+			"hash": "def456abc123",
+			"mtime": "1790268055000",
+			"size": 1024
+		}
+	}`
+	var m Manifest
+	err := json.Unmarshal([]byte(rawJSON), &m)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal manifest with float mtime: %v", err)
+	}
+	if entry, ok := m["command_history.txt"]; !ok {
+		t.Fatal("Missing command_history.txt")
+	} else {
+		if entry.Mtime.Int64() != 1790268044168 {
+			t.Fatalf("Expected 1790268044168, got %d", entry.Mtime.Int64())
+		}
+		if entry.Size.Int64() != 3254 {
+			t.Fatalf("Expected 3254, got %d", entry.Size.Int64())
+		}
+	}
+	if entry, ok := m["servers.dat"]; !ok {
+		t.Fatal("Missing servers.dat")
+	} else {
+		if entry.Mtime.Int64() != 1790268055000 {
+			t.Fatalf("Expected 1790268055000, got %d", entry.Mtime.Int64())
+		}
 	}
 }
 

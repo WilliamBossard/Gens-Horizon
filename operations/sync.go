@@ -198,7 +198,9 @@ func Sync(args []string) {
 			}
 
 			if err := ziputils.VerifyZipIntegrity(tempDelta); err == nil {
-				_ = ziputils.ExtractZip(tempDelta, localPath, nil)
+				_ = ziputils.ApplyDelta(tempDelta, localPath, func(pct int) {
+					ipc.SendDeltaProgress("APPLYING_DELTA", pct, inst, d.file.Name)
+				})
 			}
 			_ = os.Remove(tempDelta)
 		}

@@ -21,6 +21,7 @@ type ProgressMessage struct {
 	Step     string `json:"step"`
 	Value    int    `json:"value"`
 	Instance string `json:"instance,omitempty"`
+	Delta    string `json:"delta,omitempty"`
 }
 
 type CheckResultMessage struct {
@@ -86,6 +87,16 @@ func SendProgress(step string, value int, instance string) {
 		Step:     step,
 		Value:    value,
 		Instance: instance,
+	})
+}
+
+func SendDeltaProgress(step string, value int, instance string, delta string) {
+	Send(ProgressMessage{
+		Type:     "PROGRESS",
+		Step:     step,
+		Value:    value,
+		Instance: instance,
+		Delta:    delta,
 	})
 }
 

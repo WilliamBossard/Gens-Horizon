@@ -3,9 +3,12 @@ package scanner
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
@@ -28,10 +31,44 @@ var IgnoredDirs = map[string]bool{
 	"session.lock":  true,
 }
 
+// FlexibleInt64 gère la désérialisation JSON d'entiers, de nombres à virgule flottante (mtimeMs hérité de Node.js) ou de chaînes
+type FlexibleInt64 int64
+
+func (f *FlexibleInt64) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "null" || s == "" {
+		*f = 0
+		return nil
+	}
+	s = strings.Trim(s, "\"")
+
+	// Essai en tant qu'entier
+	if val, err := strconv.ParseInt(s, 10, 64); err == nil {
+		*f = FlexibleInt64(val)
+		return nil
+	}
+
+	// Essai en tant que float64 (ex: 1790268044168.8877 issu de stats.mtimeMs dans Node.js)
+	if fval, err := strconv.ParseFloat(s, 64); err == nil {
+		*f = FlexibleInt64(int64(fval))
+		return nil
+	}
+
+	return fmt.Errorf("impossible de convertir %s en FlexibleInt64", string(b))
+}
+
+func (f FlexibleInt64) MarshalJSON() ([]byte, error) {
+	return strconv.AppendInt(nil, int64(f), 10), nil
+}
+
+func (f FlexibleInt64) Int64() int64 {
+	return int64(f)
+}
+
 type FileEntry struct {
-	Hash  string `json:"hash"`
-	Mtime int64  `json:"mtime"` // Milliseconds
-	Size  int64  `json:"size"`
+	Hash  string        `json:"hash"`
+	Mtime FlexibleInt64 `json:"mtime"` // Milliseconds
+	Size  FlexibleInt64 `json:"size"`
 }
 
 type Manifest map[string]FileEntry
@@ -105,7 +142,7 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 
 		if oldManifest != nil {
 			if cached, ok := oldManifest[rel]; ok {
-				if cached.Mtime == mtimeMs && cached.Size == size {
+				if cached.Mtime.Int64() == mtimeMs && cached.Size.Int64() == size {
 					manifestMu.Lock()
 					manifest[rel] = cached
 					manifestMu.Unlock()
@@ -166,8 +203,8 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 				manifestMu.Lock()
 				manifest[t.relPath] = FileEntry{
 					Hash:  hash,
-					Mtime: t.mtimeMs,
-					Size:  t.size,
+					Mtime: FlexibleInt64(t.mtimeMs),
+					Size:  FlexibleInt64(t.size),
 				}
 				manifestMu.Unlock()
 			}
