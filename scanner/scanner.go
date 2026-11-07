@@ -15,20 +15,54 @@ import (
 )
 
 var IgnoredDirs = map[string]bool{
-	"versions":      true,
-	"libraries":     true,
-	"assets":        true,
-	"logs":          true,
-	"crash-reports": true,
-	"cache":         true,
-	"webcache":      true,
-	"temp":          true,
-	"screenshots":   true,
-	"backups":       true,
-	".git":          true,
-	"node_modules":  true,
-	".mixin.out":    true,
-	"session.lock":  true,
+	"versions":                  true,
+	"libraries":                 true,
+	"assets":                    true,
+	"logs":                      true,
+	"crash-reports":             true,
+	"cache":                     true,
+	"webcache":                  true,
+	"temp":                      true,
+	"screenshots":               true,
+	"backups":                   true,
+	".git":                      true,
+	"node_modules":              true,
+	".mixin.out":                true,
+	"session.lock":              true,
+	".spotlight-v100":           true,
+	".trashes":                  true,
+	".fseventsd":                true,
+	"$recycle.bin":              true,
+	"system volume information": true,
+}
+
+var IgnoredFilesExact = map[string]bool{
+	".ds_store":    true,
+	"thumbs.db":    true,
+	"desktop.ini":  true,
+	"ehthumbs.db":  true,
+	"session.lock": true,
+}
+
+// IsIgnoredFile détermine si un fichier doit être exclu du scan (pollution OS ou fichier temporaire)
+func IsIgnoredFile(name string) bool {
+	lower := strings.ToLower(name)
+	if IgnoredFilesExact[lower] {
+		return true
+	}
+	// Métadonnées AppleDouble sur macOS (ex: ._icon.png)
+	if strings.HasPrefix(lower, "._") {
+		return true
+	}
+	// Fichiers temporaires de téléchargement ou de verrou
+	if strings.HasSuffix(lower, ".tmp") ||
+		strings.HasSuffix(lower, ".part") ||
+		strings.HasSuffix(lower, ".crdownload") ||
+		strings.HasSuffix(lower, ".download") ||
+		strings.HasSuffix(lower, ".lck") {
+		return true
+	}
+	return false
 }
 
 // FlexibleInt64 gère la désérialisation JSON d'entiers, de nombres à virgule flottante (mtimeMs hérité de Node.js) ou de chaînes
@@ -128,14 +162,15 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 		}
 
 		name := d.Name()
+		lowerName := strings.ToLower(name)
 		if d.IsDir() {
-			if currentPath != targetDir && IgnoredDirs[name] {
+			if currentPath != targetDir && (IgnoredDirs[name] || IgnoredDirs[lowerName]) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		if IgnoredDirs[name] {
+		if IgnoredDirs[name] || IgnoredDirs[lowerName] || IsIgnoredFile(name) {
 			return nil
 		}
 

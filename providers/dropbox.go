@@ -220,7 +220,7 @@ func (d *DropboxProvider) DownloadFile(fileID string, destPath string, onProgres
 	dlClient := NewPooledClient(10 * time.Minute)
 	arg, _ := json.Marshal(map[string]string{"path": fileID})
 
-	return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+	return downloadSmart(destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
 		tok, err := d.getAccessToken()
 		if err != nil {
 			return nil, err
@@ -232,8 +232,10 @@ func (d *DropboxProvider) DownloadFile(fileID string, destPath string, onProgres
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
 		req.Header.Set("Dropbox-API-Arg", string(arg))
-		if offset > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		if end >= start {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+		} else if start > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
 		}
 
 		return dlClient.Do(req)

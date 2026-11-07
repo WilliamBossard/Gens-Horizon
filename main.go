@@ -40,7 +40,7 @@ func main() {
 	if len(args) == 0 {
 		ipc.Send(ipc.BaseMessage{
 			Type:    "ERROR",
-			Message: "Commande manquante. Utiliser : --login, --check, --sync, --upload, --quota, --rollback, --delete",
+			Message: "Commande manquante. Utiliser : --login, --check, --sync, --upload, --quota, --rollback, --clean, --delete",
 		})
 		return
 	}
@@ -57,6 +57,8 @@ func main() {
 		operations.Quota(args)
 	} else if containsCommand(args, "--rollback", "rollback") {
 		operations.Rollback(args)
+	} else if containsCommand(args, "--clean", "clean") {
+		operations.Clean(args)
 	} else if containsCommand(args, "--delete", "delete") {
 		operations.Sync(args)
 	} else if containsCommand(args, "--version", "-v") {
@@ -67,7 +69,7 @@ func main() {
 	} else {
 		ipc.Send(ipc.BaseMessage{
 			Type:    "ERROR",
-			Message: "Commande manquante ou non reconnue. Utiliser : --login, --check, --sync, --upload, --quota, --rollback, --delete",
+			Message: "Commande manquante ou non reconnue. Utiliser : --login, --check, --sync, --upload, --quota, --rollback, --clean, --delete",
 		})
 	}
 }

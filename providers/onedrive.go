@@ -194,7 +194,7 @@ func (o *OneDriveProvider) DownloadFile(fileID string, destPath string, onProgre
 	dlClient := NewPooledClient(10 * time.Minute)
 	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/content", fileID)
 
-	return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+	return downloadSmart(destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
 		tok, err := o.getAccessToken()
 		if err != nil {
 			return nil, err
@@ -205,8 +205,10 @@ func (o *OneDriveProvider) DownloadFile(fileID string, destPath string, onProgre
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
-		if offset > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		if end >= start {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+		} else if start > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
 		}
 
 		return dlClient.Do(req)

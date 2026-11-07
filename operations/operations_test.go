@@ -139,4 +139,24 @@ func TestExtractInstanceMetadata(t *testing.T) {
 	}
 }
 
+func TestFormatByteSize(t *testing.T) {
+	cases := []struct {
+		bytes    int64
+		expected string
+	}{
+		{500, "500 o"},
+		{1024, "1.0 Ko"},
+		{1536, "1.5 Ko"},
+		{10 * 1024 * 1024, "10.0 Mo"},
+		{1500 * 1024 * 1024, "1.5 Go"},
+	}
+
+	for _, c := range cases {
+		got := formatByteSize(c.bytes)
+		if got != c.expected {
+			t.Errorf("formatByteSize(%d) = %s, expected %s", c.bytes, got, c.expected)
+		}
+	}
+}
+
 

@@ -211,7 +211,7 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 	dlClient := NewPooledClient(10 * time.Minute)
 	confirmAbuse := false
 
-	return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+	return downloadSmart(destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
 		tok, err := g.getAccessToken()
 		if err != nil {
 			return nil, err
@@ -222,8 +222,10 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
-		if offset > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		if end >= start {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+		} else if start > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
 		}
 
 		resp, err := dlClient.Do(req)
@@ -239,8 +241,10 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 			newTok, _ := g.getAccessToken()
 			req, _ = http.NewRequest(http.MethodGet, buildURL(confirmAbuse), nil)
 			req.Header.Set("Authorization", "Bearer "+newTok)
-			if offset > 0 {
-				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+			if end >= start {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+			} else if start > 0 {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
 			}
 			resp, err = dlClient.Do(req)
 			if err != nil {
@@ -254,8 +258,10 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 			confirmAbuse = true
 			req, _ = http.NewRequest(http.MethodGet, buildURL(true), nil)
 			req.Header.Set("Authorization", "Bearer "+tok)
-			if offset > 0 {
-				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+			if end >= start {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+			} else if start > 0 {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
 			}
 			resp, err = dlClient.Do(req)
 			if err != nil {

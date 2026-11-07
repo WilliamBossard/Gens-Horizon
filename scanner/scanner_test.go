@@ -52,6 +52,18 @@ func TestGenerateManifestIgnoresDirs(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(tmpDir, "assets"), 0755)
 	_ = os.WriteFile(filepath.Join(tmpDir, "assets", "sound.ogg"), []byte("sound"), 0644)
 
+	// Fichiers et dossiers de pollution OS et temporaires
+	_ = os.WriteFile(filepath.Join(tmpDir, ".DS_Store"), []byte("mac junk"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "Thumbs.db"), []byte("win junk"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "desktop.ini"), []byte("win config"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "config", "._mod.cfg"), []byte("apple double"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "archive.part"), []byte("partial download"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "update.tmp"), []byte("temp file"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "saves", "world"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "saves", "world", "session.lock"), []byte("lock"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".Spotlight-V100"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".Spotlight-V100", "index.db"), []byte("index"), 0644)
+
 	manifest, err := GenerateManifest(tmpDir, nil)
 	if err != nil {
 		t.Fatalf("GenerateManifest failed: %v", err)
@@ -68,6 +80,23 @@ func TestGenerateManifestIgnoresDirs(t *testing.T) {
 	}
 	if _, ok := manifest["assets/sound.ogg"]; ok {
 		t.Errorf("assets/sound.ogg should have been ignored")
+	}
+
+	// Vérification de l'exclusion des fichiers de pollution OS et temporaires
+	unwanted := []string{
+		".DS_Store",
+		"Thumbs.db",
+		"desktop.ini",
+		"config/._mod.cfg",
+		"archive.part",
+		"update.tmp",
+		"saves/world/session.lock",
+		".Spotlight-V100/index.db",
+	}
+	for _, u := range unwanted {
+		if _, ok := manifest[u]; ok {
+			t.Errorf("pollution file %s should have been ignored by scanner", u)
+		}
 	}
 }
 
