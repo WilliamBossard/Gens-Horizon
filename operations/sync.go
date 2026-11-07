@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
@@ -115,13 +116,7 @@ func Sync(args []string) {
 			_ = os.MkdirAll(localPath, 0755)
 		}
 
-		// CrÃ©ation d'un rollback local en cas d'instance existante
-		var rollbackPath string
-		if !isNewInstance {
-			rollbackPath = createRollbackSnapshot(localPath)
-		}
-
-		// TÃ©lÃ©chargement et extraction du Backup de Base si nouvelle instance
+		// Lecture du timestamp de dernière synchro locale
 		var lastSyncTime int64
 		if rawTime, ok := syncInfo[safeInst]; ok {
 			if t, err := time.Parse(time.RFC3339, rawTime); err == nil {
@@ -131,6 +126,41 @@ func Sync(args []string) {
 
 		baseCloudTime := baseFile.ModifiedTime.UnixMilli()
 		needsBaseExtract := isNewInstance || baseCloudTime > lastSyncTime
+
+		// Application chronologique des Deltas plus récents que le base/sync
+		prefixDelta := fmt.Sprintf("%s%s_", PrefixDelta, safeInst)
+		type deltaEntry struct {
+			file      providers.CloudFile
+			timestamp int64
+		}
+		var deltas []deltaEntry
+
+		for name, f := range cloudIndex {
+			if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
+				rawTs := strings.TrimSuffix(strings.TrimPrefix(name, prefixDelta), ".zip")
+				if ts, err := strconv.ParseInt(rawTs, 10, 64); err == nil {
+					if ts > lastSyncTime || needsBaseExtract {
+						deltas = append(deltas, deltaEntry{file: f, timestamp: ts})
+					}
+				}
+			}
+		}
+
+		// Optimisation performance : Si aucun changement, terminer immédiatement sans copie disque
+		if !needsBaseExtract && len(deltas) == 0 {
+			ipc.Send(ipc.BaseMessage{
+				Type:     "SUCCESS",
+				Instance: inst,
+				Message:  "Instance déjà à jour.",
+			})
+			continue
+		}
+
+		// Création d'un rollback local UNIQUEMENT si des modifications vont être appliquées
+		var rollbackPath string
+		if !isNewInstance {
+			rollbackPath = createRollbackSnapshot(localPath)
+		}
 
 		if needsBaseExtract {
 			tempBase := filepath.Join(dataDir, fmt.Sprintf("temp_base_%s_%d.zip", safeInst, time.Now().UnixMilli()))
@@ -159,25 +189,6 @@ func Sync(args []string) {
 			if err != nil {
 				ipc.SendError("EXTRACT_FAILED", err.Error(), inst)
 				continue
-			}
-		}
-
-		// Application chronologique des Deltas plus rÃ©cents que le base/sync
-		prefixDelta := fmt.Sprintf("%s%s_", PrefixDelta, safeInst)
-		type deltaEntry struct {
-			file      providers.CloudFile
-			timestamp int64
-		}
-		var deltas []deltaEntry
-
-		for name, f := range cloudIndex {
-			if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
-				rawTs := strings.TrimSuffix(strings.TrimPrefix(name, prefixDelta), ".zip")
-				if ts, err := strconv.ParseInt(rawTs, 10, 64); err == nil {
-					if ts > lastSyncTime || needsBaseExtract {
-						deltas = append(deltas, deltaEntry{file: f, timestamp: ts})
-					}
-				}
 			}
 		}
 
@@ -244,6 +255,66 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 		}
 	}
 
+	type metaResult struct {
+		RealName string  `json:"realName"`
+		IconData *string `json:"iconData"`
+		Loader   *string `json:"loader"`
+	}
+
+	// Récupération concurrente des métadonnées avec mise en cache locale sur disque (comme la version Node.js)
+	metaCache := make(map[string]metaResult)
+	var metaMu sync.Mutex
+	var metaWg sync.WaitGroup
+	metaSem := make(chan struct{}, 6)
+
+	for _, instName := range list {
+		metaName := PrefixMeta + instName + ".json"
+		mf, ok := cloudIndex[metaName]
+		if !ok {
+			continue
+		}
+
+		localMetaPath := filepath.Join(dataDir, fmt.Sprintf("meta_%s.json", instName))
+		cloudTime := mf.ModifiedTime
+
+		needsDownload := true
+		if stat, err := os.Stat(localMetaPath); err == nil {
+			if stat.ModTime().UnixMilli() >= cloudTime.UnixMilli() {
+				if data, err := os.ReadFile(localMetaPath); err == nil {
+					var meta metaResult
+					if err := json.Unmarshal(data, &meta); err == nil {
+						metaMu.Lock()
+						metaCache[instName] = meta
+						metaMu.Unlock()
+						needsDownload = false
+					}
+				}
+			}
+		}
+
+		if needsDownload {
+			metaWg.Add(1)
+			metaSem <- struct{}{}
+			go func(instName string, fID string, localPath string, cloudModTime time.Time) {
+				defer metaWg.Done()
+				defer func() { <-metaSem }()
+
+				var meta metaResult
+				if err := p.DownloadJSON(fID, &meta); err == nil {
+					metaMu.Lock()
+					metaCache[instName] = meta
+					metaMu.Unlock()
+
+					if b, err := json.MarshalIndent(meta, "", "  "); err == nil {
+						_ = osWriteFileAtomic(localPath, b, 0644)
+						_ = os.Chtimes(localPath, cloudModTime, cloudModTime)
+					}
+				}
+			}(instName, mf.ID, localMetaPath, cloudTime)
+		}
+	}
+	metaWg.Wait()
+
 	var richList []ipc.RichInstanceInfo
 	for _, instName := range list {
 		baseName := PrefixBackup + instName + ".zip"
@@ -262,20 +333,12 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 		realName := instName
 		var iconData *string
 		var loader *string
-		metaName := PrefixMeta + instName + ".json"
-		if mf, ok := cloudIndex[metaName]; ok {
-			var meta struct {
-				RealName string  `json:"realName"`
-				IconData *string `json:"iconData"`
-				Loader   *string `json:"loader"`
+		if m, ok := metaCache[instName]; ok {
+			if m.RealName != "" {
+				realName = m.RealName
 			}
-			if err := p.DownloadJSON(mf.ID, &meta); err == nil {
-				if meta.RealName != "" {
-					realName = meta.RealName
-				}
-				iconData = meta.IconData
-				loader = meta.Loader
-			}
+			iconData = m.IconData
+			loader = m.Loader
 		}
 
 		lastBackupStr := baseFile.ModifiedTime.Format(time.RFC3339)

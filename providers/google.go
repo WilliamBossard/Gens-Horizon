@@ -138,7 +138,6 @@ func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 			"spaces":   {"appDataFolder"},
 			"fields":   {"nextPageToken, files(id, name, modifiedTime, size)"},
 			"pageSize": {"1000"},
-			"orderBy":  {"modifiedTime desc"},
 		}
 		if pageToken != "" {
 			params.Set("pageToken", pageToken)
