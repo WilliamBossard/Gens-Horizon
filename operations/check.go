@@ -51,7 +51,7 @@ func Check(args []string) {
 	}
 
 	// Lecture de last_sync.json
-	syncInfoPath := filepath.Join(paths.GetHorizonDataDir(), "last_sync.json")
+	syncInfoPath := paths.GetLastSyncPath()
 	syncInfo := make(map[string]string)
 	if data, err := os.ReadFile(syncInfoPath); err == nil {
 		_ = json.Unmarshal(data, &syncInfo)

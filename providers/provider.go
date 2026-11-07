@@ -31,18 +31,16 @@ type Provider interface {
 }
 
 func GetTokenPath(providerName string) string {
-	base := paths.GetHorizonDataDir()
-	specific := filepath.Join(base, fmt.Sprintf("token_%s.json", providerName))
-	if _, err := os.Stat(specific); err == nil {
-		return specific
-	}
+	fileName := fmt.Sprintf("token_%s.json", providerName)
+	newPath := filepath.Join(paths.GetAuthDir(), fileName)
+	legacy1 := filepath.Join(paths.GetHorizonDataDir(), fileName)
+	legacy2 := filepath.Join(paths.GetLegacyBinDir(), fileName)
 	if providerName == "google" {
-		legacy := filepath.Join(base, "token.json")
-		if _, err := os.Stat(legacy); err == nil {
-			return legacy
-		}
+		legacy3 := filepath.Join(paths.GetHorizonDataDir(), "token.json")
+		legacy4 := filepath.Join(paths.GetLegacyBinDir(), "token.json")
+		return paths.ResolveWithFallback(newPath, legacy1, legacy2, legacy3, legacy4)
 	}
-	return specific
+	return paths.ResolveWithFallback(newPath, legacy1, legacy2)
 }
 
 // GetProvider instancie le provider sélectionné avec son token déchiffré

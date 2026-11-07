@@ -109,7 +109,7 @@ func Rollback(args []string) {
 
 	// Régénération du manifest local
 	newManifest, _ := scanner.GenerateManifest(targetPath, nil)
-	localManifestFile := filepath.Join(paths.GetHorizonDataDir(), fmt.Sprintf("manifest_%s.json", safeInst))
+	localManifestFile := paths.GetManifestPath(safeInst)
 	if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
 		_ = osWriteFileAtomic(localManifestFile, b, 0644)
 	}

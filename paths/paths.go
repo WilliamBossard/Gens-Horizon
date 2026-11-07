@@ -2,6 +2,7 @@ package paths
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -87,9 +88,91 @@ func ScanInstances() ([]string, error) {
 	return instances, nil
 }
 
-// GetSettingsPath renvoie le chemin vers horizon_settings.json
+// GetLegacyBinDir renvoie l'ancien dossier 'bin' à côté de 'Horizon' s'il existe
+func GetLegacyBinDir() string {
+	dataDir := GetHorizonDataDir()
+	if strings.EqualFold(filepath.Base(dataDir), "Horizon") {
+		return filepath.Join(filepath.Dir(dataDir), "bin")
+	}
+	return dataDir
+}
+
+// GetAuthDir renvoie le sous-dossier auth/ (stockage sécurisé des tokens et clés)
+func GetAuthDir() string {
+	dir := filepath.Join(GetHorizonDataDir(), "auth")
+	_ = os.MkdirAll(dir, 0700)
+	return dir
+}
+
+// GetMetadataDir renvoie le sous-dossier metadata/ (métadonnées des instances)
+func GetMetadataDir() string {
+	dir := filepath.Join(GetHorizonDataDir(), "metadata")
+	_ = os.MkdirAll(dir, 0755)
+	return dir
+}
+
+// GetManifestsDir renvoie le sous-dossier manifests/ (signatures locales)
+func GetManifestsDir() string {
+	dir := filepath.Join(GetHorizonDataDir(), "manifests")
+	_ = os.MkdirAll(dir, 0755)
+	return dir
+}
+
+// GetCacheDir renvoie le sous-dossier cache/ (caches UI)
+func GetCacheDir() string {
+	dir := filepath.Join(GetHorizonDataDir(), "cache")
+	_ = os.MkdirAll(dir, 0755)
+	return dir
+}
+
+// ResolveWithFallback vérifie si newPath existe. Si non, teste les legacyPaths et migre automatiquement.
+func ResolveWithFallback(newPath string, legacyPaths ...string) string {
+	if _, err := os.Stat(newPath); err == nil {
+		return newPath
+	}
+	for _, lp := range legacyPaths {
+		if lp == "" || lp == newPath {
+			continue
+		}
+		if data, err := os.ReadFile(lp); err == nil {
+			_ = os.MkdirAll(filepath.Dir(newPath), 0755)
+			_ = os.WriteFile(newPath, data, 0644)
+			return newPath
+		}
+	}
+	return newPath
+}
+
+// GetSettingsPath renvoie le chemin vers horizon_settings.json avec rétrocompatibilité
 func GetSettingsPath() string {
-	return filepath.Join(GetHorizonDataDir(), "horizon_settings.json")
+	newPath := filepath.Join(GetHorizonDataDir(), "horizon_settings.json")
+	legacy := filepath.Join(GetLegacyBinDir(), "horizon_settings.json")
+	return ResolveWithFallback(newPath, legacy)
+}
+
+// GetLastSyncPath renvoie le chemin vers last_sync.json avec rétrocompatibilité
+func GetLastSyncPath() string {
+	newPath := filepath.Join(GetHorizonDataDir(), "last_sync.json")
+	legacy := filepath.Join(GetLegacyBinDir(), "last_sync.json")
+	return ResolveWithFallback(newPath, legacy)
+}
+
+// GetMetaPath renvoie le chemin vers meta_<inst>.json avec rétrocompatibilité
+func GetMetaPath(safeInst string) string {
+	fileName := fmt.Sprintf("meta_%s.json", safeInst)
+	newPath := filepath.Join(GetMetadataDir(), fileName)
+	legacy1 := filepath.Join(GetHorizonDataDir(), fileName)
+	legacy2 := filepath.Join(GetLegacyBinDir(), fileName)
+	return ResolveWithFallback(newPath, legacy1, legacy2)
+}
+
+// GetManifestPath renvoie le chemin vers manifest_<inst>.json avec rétrocompatibilité
+func GetManifestPath(safeInst string) string {
+	fileName := fmt.Sprintf("manifest_%s.json", safeInst)
+	newPath := filepath.Join(GetManifestsDir(), fileName)
+	legacy1 := filepath.Join(GetHorizonDataDir(), fileName)
+	legacy2 := filepath.Join(GetLegacyBinDir(), fileName)
+	return ResolveWithFallback(newPath, legacy1, legacy2)
 }
 
 // LoadSettings charge ou initialise horizon_settings.json
@@ -114,29 +197,44 @@ func LoadSettings() config.Settings {
 }
 
 // CleanupOrphanedTemps supprime les fichiers temporaires orphelins (temp_*.zip, *.tmp)
-// laissés dans le dossier de données après une coupure ou un crash.
-// Seuls les fichiers vieux de plus de 10 minutes sont supprimés pour ne pas impacter une opération concurrente.
+// dans tous les sous-dossiers Horizon et dans l'ancien bin pour ne rien laisser traîner.
 func CleanupOrphanedTemps(dataDir string) {
-	entries, err := os.ReadDir(dataDir)
-	if err != nil {
-		return
+	dirsToClean := []string{
+		dataDir,
+		GetAuthDir(),
+		GetMetadataDir(),
+		GetManifestsDir(),
+		GetCacheDir(),
+		GetLegacyBinDir(),
 	}
 	threshold := time.Now().Add(-10 * time.Minute)
-	for _, entry := range entries {
-		if entry.IsDir() {
+	seen := make(map[string]bool)
+
+	for _, d := range dirsToClean {
+		if d == "" || seen[d] {
 			continue
 		}
-		name := entry.Name()
-		isTemp := strings.HasPrefix(name, "temp_") || strings.HasSuffix(name, ".tmp")
-		if !isTemp {
-			continue
-		}
-		info, err := entry.Info()
+		seen[d] = true
+		entries, err := os.ReadDir(d)
 		if err != nil {
 			continue
 		}
-		if info.ModTime().Before(threshold) {
-			_ = os.Remove(filepath.Join(dataDir, name))
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			isTemp := strings.HasPrefix(name, "temp_") || strings.HasSuffix(name, ".tmp")
+			if !isTemp {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if info.ModTime().Before(threshold) {
+				_ = os.Remove(filepath.Join(d, name))
+			}
 		}
 	}
 }

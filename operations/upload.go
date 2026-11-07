@@ -101,7 +101,7 @@ func Upload(args []string) {
 		ipc.SendProgress("SCANNING", 0, inst)
 
 		// 1. Lecture du manifest local existant
-		localManifestFile := filepath.Join(dataDir, fmt.Sprintf("manifest_%s.json", safeInst))
+		localManifestFile := paths.GetManifestPath(safeInst)
 		var oldLocalManifest scanner.Manifest
 		if data, err := os.ReadFile(localManifestFile); err == nil {
 			_ = json.Unmarshal(data, &oldLocalManifest)
@@ -305,7 +305,7 @@ func Upload(args []string) {
 }
 
 func updateLastSync(dataDir string, safeInst string) {
-	syncInfoPath := filepath.Join(dataDir, "last_sync.json")
+	syncInfoPath := paths.GetLastSyncPath()
 	syncInfo := make(map[string]string)
 	if data, err := os.ReadFile(syncInfoPath); err == nil {
 		_ = json.Unmarshal(data, &syncInfo)

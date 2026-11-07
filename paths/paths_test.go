@@ -48,3 +48,30 @@ func TestCleanupOrphanedTemps(t *testing.T) {
 		t.Errorf("freshTempZip (<10min) should have been preserved, got error: %v", err)
 	}
 }
+
+func TestResolveWithFallback(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "horizon_fallback_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	legacyPath := filepath.Join(tempDir, "legacy_file.json")
+	newPath := filepath.Join(tempDir, "subfolder", "target_file.json")
+
+	_ = os.WriteFile(legacyPath, []byte(`{"migrated":true}`), 0644)
+
+	res := ResolveWithFallback(newPath, legacyPath)
+	if res != newPath {
+		t.Errorf("expected res to be %s, got %s", newPath, res)
+	}
+
+	data, err := os.ReadFile(newPath)
+	if err != nil {
+		t.Fatalf("failed to read migrated file: %v", err)
+	}
+	if string(data) != `{"migrated":true}` {
+		t.Errorf("content mismatch, got: %s", string(data))
+	}
+}
+

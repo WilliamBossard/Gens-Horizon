@@ -78,7 +78,7 @@ func Sync(args []string) {
 	}
 
 	// 3. Synchronisation Cloud vers Local
-	syncInfoPath := filepath.Join(dataDir, "last_sync.json")
+	syncInfoPath := paths.GetLastSyncPath()
 	syncInfo := make(map[string]string)
 	if data, err := os.ReadFile(syncInfoPath); err == nil {
 		_ = json.Unmarshal(data, &syncInfo)
@@ -221,7 +221,7 @@ func Sync(args []string) {
 		if mf, ok := cloudIndex[manifestName]; ok {
 			var remoteM scanner.Manifest
 			if err := p.DownloadJSON(mf.ID, &remoteM); err == nil {
-				localManifestFile := filepath.Join(dataDir, fmt.Sprintf("manifest_%s.json", safeInst))
+				localManifestFile := paths.GetManifestPath(safeInst)
 				if b, err := json.MarshalIndent(remoteM, "", "  "); err == nil {
 					_ = osWriteFileAtomic(localManifestFile, b, 0644)
 				}
@@ -279,7 +279,7 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 			continue
 		}
 
-		localMetaPath := filepath.Join(dataDir, fmt.Sprintf("meta_%s.json", instName))
+		localMetaPath := paths.GetMetaPath(instName)
 		cloudTime := mf.ModifiedTime
 
 		needsDownload := true
@@ -379,10 +379,12 @@ func handleDelete(targetInst string, cloudIndex map[string]providers.CloudFile, 
 	}
 
 	// Suppression locale
+	_ = os.Remove(paths.GetManifestPath(safeInst))
 	_ = os.Remove(filepath.Join(dataDir, fmt.Sprintf("manifest_%s.json", safeInst)))
+	_ = os.Remove(paths.GetMetaPath(safeInst))
 	_ = os.Remove(filepath.Join(dataDir, fmt.Sprintf("meta_%s.json", safeInst)))
 
-	syncInfoPath := filepath.Join(dataDir, "last_sync.json")
+	syncInfoPath := paths.GetLastSyncPath()
 	var syncInfo map[string]string
 	if data, err := os.ReadFile(syncInfoPath); err == nil {
 		if json.Unmarshal(data, &syncInfo) == nil {

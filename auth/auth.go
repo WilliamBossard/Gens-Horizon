@@ -31,11 +31,17 @@ var (
 )
 
 func getMachineIDFile() string {
-	return filepath.Join(paths.GetHorizonDataDir(), ".machine_id")
+	newPath := filepath.Join(paths.GetAuthDir(), ".machine_id")
+	legacy1 := filepath.Join(paths.GetHorizonDataDir(), ".machine_id")
+	legacy2 := filepath.Join(paths.GetLegacyBinDir(), ".machine_id")
+	return paths.ResolveWithFallback(newPath, legacy1, legacy2)
 }
 
 func getSaltFile() string {
-	return filepath.Join(paths.GetHorizonDataDir(), "salt.key")
+	newPath := filepath.Join(paths.GetAuthDir(), "salt.key")
+	legacy1 := filepath.Join(paths.GetHorizonDataDir(), "salt.key")
+	legacy2 := filepath.Join(paths.GetLegacyBinDir(), "salt.key")
+	return paths.ResolveWithFallback(newPath, legacy1, legacy2)
 }
 
 func initAuthData() error {
