@@ -217,7 +217,7 @@ func Upload(args []string) {
 				_ = osWriteFileAtomic(localManifestFile, b, 0644)
 			}
 
-			updateLastSync(dataDir, safeInst)
+			updateLastSync(safeInst)
 
 			ipc.Send(map[string]any{
 				"type":     "SUCCESS",
@@ -234,7 +234,7 @@ func Upload(args []string) {
 					Message:   "Instance is already up to date on Cloud.",
 					ErrorCode: "UP_TO_DATE_CLOUD",
 				})
-				updateLastSync(dataDir, safeInst)
+				updateLastSync(safeInst)
 				continue
 			}
 
@@ -292,7 +292,7 @@ func Upload(args []string) {
 				_ = osWriteFileAtomic(localManifestFile, b, 0644)
 			}
 
-			updateLastSync(dataDir, safeInst)
+			updateLastSync(safeInst)
 
 			summary := fmt.Sprintf("+%d ajouté(s), ~%d modifié(s), -%d supprimé(s)", len(diff.Added), len(diff.Modified), len(diff.Deleted))
 			ipc.Send(map[string]any{
@@ -305,7 +305,7 @@ func Upload(args []string) {
 	}
 }
 
-func updateLastSync(dataDir string, safeInst string) {
+func updateLastSync(safeInst string) {
 	syncInfoPath := paths.GetLastSyncPath()
 	syncInfo := make(map[string]string)
 	if data, err := os.ReadFile(syncInfoPath); err == nil {

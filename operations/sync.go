@@ -61,7 +61,7 @@ func Sync(args []string) {
 
 	// 1. Traitement de --list
 	if isList {
-		handleCloudList(cloudIndex, p, dataDir)
+		handleCloudList(cloudIndex, p)
 		return
 	}
 
@@ -229,7 +229,7 @@ func Sync(args []string) {
 			}
 		}
 
-		updateLastSync(dataDir, safeInst)
+		updateLastSync(safeInst)
 
 		if rollbackPath != "" {
 			cleanupRollback(rollbackPath)
@@ -249,7 +249,7 @@ func Sync(args []string) {
 	}
 }
 
-func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Provider, dataDir string) {
+func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Provider) {
 	var list []string
 	seen := make(map[string]bool)
 	for name := range cloudIndex {
