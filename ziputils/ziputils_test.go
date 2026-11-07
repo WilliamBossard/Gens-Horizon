@@ -180,7 +180,7 @@ func TestParallelExtraction(t *testing.T) {
 	for i := 0; i < numFiles; i++ {
 		sub := filepath.Join(sourceDir, fmt.Sprintf("sub_%d", i%5))
 		_ = os.MkdirAll(sub, 0755)
-		_ = os.WriteFile(filepath.Join(sub, fmt.Sprintf("file_%d.txt", i)), []byte(fmt.Sprintf("content_%d", i)), 0644)
+		_ = os.WriteFile(filepath.Join(sub, fmt.Sprintf("file_%d.txt", i)), fmt.Appendf(nil, "content_%d", i), 0644)
 	}
 
 	zipPath := filepath.Join(tmpDir, "parallel.zip")
