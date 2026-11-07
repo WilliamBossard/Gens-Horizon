@@ -2,6 +2,7 @@ package ziputils
 
 import (
 	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -135,4 +136,33 @@ func TestDeltaZipAndApplyDelta(t *testing.T) {
 		t.Errorf("__delta__.json should not have been extracted to target disk")
 	}
 }
+
+func TestStreamingZip(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "horizon_stream_test_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "source")
+	_ = os.MkdirAll(sourceDir, 0755)
+	_ = os.WriteFile(filepath.Join(sourceDir, "test.txt"), []byte("streaming test"), 0644)
+
+	var fullBuf bytes.Buffer
+	if err := WriteFullZip(sourceDir, &fullBuf, nil); err != nil {
+		t.Fatalf("WriteFullZip failed: %v", err)
+	}
+	if fullBuf.Len() == 0 {
+		t.Fatalf("expected non-empty fullBuf")
+	}
+
+	var deltaBuf bytes.Buffer
+	if err := WriteDeltaZip(sourceDir, []string{"test.txt"}, nil, &deltaBuf, nil); err != nil {
+		t.Fatalf("WriteDeltaZip failed: %v", err)
+	}
+	if deltaBuf.Len() == 0 {
+		t.Fatalf("expected non-empty deltaBuf")
+	}
+}
+
 

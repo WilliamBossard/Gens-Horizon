@@ -20,3 +20,4 @@ func TestAcquireAndReleaseLock(t *testing.T) {
 	}
 	ReleaseLock()
 }
+

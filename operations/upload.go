@@ -86,7 +86,6 @@ func Upload(args []string) {
 		return
 	}
 
-	dataDir := paths.GetHorizonDataDir()
 	instDir := paths.GetInstancesFolder()
 
 	for _, inst := range instances {
@@ -189,7 +188,7 @@ func Upload(args []string) {
 
 		if needsFullBackup {
 			ipc.Logf("[upload] Création d'une sauvegarde complète pour %s (deltas=%d, max=%d)", inst, len(existingDeltas), cleanupThreshold)
-			tempZip := filepath.Join(dataDir, fmt.Sprintf("temp_full_%s_%d.zip", safeInst, time.Now().UnixMilli()))
+			tempZip := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_full_%s_%d.zip", safeInst, time.Now().UnixMilli()))
 
 			ipc.SendProgress("COMPRESSING", 0, inst)
 			err = ziputils.CreateFullZip(localInstFolder, tempZip, func(pct int) {
@@ -289,7 +288,7 @@ func Upload(args []string) {
 			ipc.Logf("[upload] Delta sync pour %s : +%d, ~%d, -%d fichiers", inst, len(diff.Added), len(diff.Modified), len(diff.Deleted))
 
 			filesToZip := append(diff.Added, diff.Modified...)
-			tempDelta := filepath.Join(dataDir, fmt.Sprintf("temp_delta_%s_%d.zip", safeInst, time.Now().UnixMilli()))
+			tempDelta := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_delta_%s_%d.zip", safeInst, time.Now().UnixMilli()))
 
 			ipc.SendProgress("COMPRESSING", 0, inst)
 			err = ziputils.CreateDeltaZip(localInstFolder, filesToZip, diff.Deleted, tempDelta, func(pct int) {

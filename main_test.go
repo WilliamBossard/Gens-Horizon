@@ -11,3 +11,4 @@ func TestContainsCommand(t *testing.T) {
 		t.Errorf("did not expect containsCommand to match --sync")
 	}
 }
+

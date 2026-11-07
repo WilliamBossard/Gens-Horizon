@@ -14,3 +14,4 @@ func TestDefaultSettings(t *testing.T) {
 		t.Errorf("expected positive MaxRetries, got %d", s.MaxRetries)
 	}
 }
+

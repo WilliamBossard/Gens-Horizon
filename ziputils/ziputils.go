@@ -2,6 +2,7 @@ package ziputils
 
 import (
 	"archive/zip"
+	"bufio"
 	"compress/flate"
 	"encoding/json"
 	"errors"
@@ -128,8 +129,8 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 	return nil
 }
 
-// CreateFullZip compresse l'intégralité d'un dossier d'instance en ignorant les dossiers exclus
-func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct int)) error {
+// WriteFullZip compresse l'intégralité d'un dossier d'instance directement dans un io.Writer
+func WriteFullZip(sourceFolder string, out io.Writer, onProgress func(pct int)) error {
 	// Calcul de la taille totale pour la progression via WalkDir rapide
 	var totalBytes int64
 	_ = filepath.WalkDir(sourceFolder, func(p string, d os.DirEntry, err error) error {
@@ -150,13 +151,7 @@ func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct 
 		return nil
 	})
 
-	outFile, err := os.Create(destZipPath)
-	if err != nil {
-		return err
-	}
-	defer outFile.Close()
-
-	zw := zip.NewWriter(outFile)
+	zw := zip.NewWriter(out)
 	defer zw.Close()
 
 	// Optimisation : compression niveau 1 (BestSpeed) pour accélérer par 3 à 5x les sauvegardes
@@ -167,7 +162,7 @@ func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct 
 	var processedBytes int64
 	lastPct := -1
 
-	err = filepath.WalkDir(sourceFolder, func(p string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(sourceFolder, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -246,13 +241,28 @@ func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct 
 	return err
 }
 
+// CreateFullZip compresse l'intégralité d'un dossier d'instance dans un fichier avec tampon de 256 Ko
+func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct int)) error {
+	outFile, err := os.Create(destZipPath)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	bufWriter := bufio.NewWriterSize(outFile, 256*1024)
+	if err := WriteFullZip(sourceFolder, bufWriter, onProgress); err != nil {
+		return err
+	}
+	return bufWriter.Flush()
+}
+
 type DeltaMetadata struct {
 	DeletedFiles []string `json:"deletedFiles"`
 	CreatedAt    string   `json:"createdAt"`
 }
 
-// CreateDeltaZip crée une archive contenant uniquement les fichiers spécifiés (ajoutés / modifiés) ainsi que __delta__.json
-func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, destZipPath string, onProgress func(pct int)) error {
+// WriteDeltaZip écrit une archive différentielle directement dans un io.Writer
+func WriteDeltaZip(sourceFolder string, files []string, deletedFiles []string, out io.Writer, onProgress func(pct int)) error {
 	var totalBytes int64
 	for _, rel := range files {
 		fullPath := filepath.Join(sourceFolder, filepath.FromSlash(rel))
@@ -261,13 +271,7 @@ func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, 
 		}
 	}
 
-	outFile, err := os.Create(destZipPath)
-	if err != nil {
-		return err
-	}
-	defer outFile.Close()
-
-	zw := zip.NewWriter(outFile)
+	zw := zip.NewWriter(out)
 	defer zw.Close()
 
 	// Optimisation : compression niveau 1 (BestSpeed) pour des deltas ultra-rapides
@@ -352,6 +356,21 @@ func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, 
 	}
 
 	return nil
+}
+
+// CreateDeltaZip crée une archive contenant uniquement les fichiers spécifiés avec tampon de 256 Ko
+func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, destZipPath string, onProgress func(pct int)) error {
+	outFile, err := os.Create(destZipPath)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	bufWriter := bufio.NewWriterSize(outFile, 256*1024)
+	if err := WriteDeltaZip(sourceFolder, files, deletedFiles, bufWriter, onProgress); err != nil {
+		return err
+	}
+	return bufWriter.Flush()
 }
 
 // ApplyDelta extrait les fichiers modifiés et supprime les fichiers supprimés indiqués dans __delta__.json

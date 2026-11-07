@@ -196,11 +196,12 @@ func LoadSettings() config.Settings {
 	return loaded
 }
 
-// CleanupOrphanedTemps supprime les fichiers temporaires orphelins (temp_*.zip, *.tmp)
-// dans tous les sous-dossiers Horizon et dans l'ancien bin pour ne rien laisser traîner.
+// CleanupOrphanedTemps supprime les fichiers temporaires orphelins (horizon_*.zip, temp_*.zip, *.tmp)
+// dans tous les sous-dossiers Horizon, dans os.TempDir() et dans l'ancien bin pour ne rien laisser traîner.
 func CleanupOrphanedTemps(dataDir string) {
 	dirsToClean := []string{
 		dataDir,
+		os.TempDir(),
 		GetAuthDir(),
 		GetMetadataDir(),
 		GetManifestsDir(),
@@ -224,10 +225,19 @@ func CleanupOrphanedTemps(dataDir string) {
 				continue
 			}
 			name := entry.Name()
-			isTemp := strings.HasPrefix(name, "temp_") || strings.HasSuffix(name, ".tmp")
-			if !isTemp {
-				continue
+			isHorizonTemp := strings.HasPrefix(name, "horizon_") && strings.HasSuffix(name, ".zip")
+			isOldTemp := strings.HasPrefix(name, "temp_") || strings.HasSuffix(name, ".tmp")
+
+			if d == os.TempDir() {
+				if !isHorizonTemp {
+					continue
+				}
+			} else {
+				if !isOldTemp && !isHorizonTemp {
+					continue
+				}
 			}
+
 			info, err := entry.Info()
 			if err != nil {
 				continue

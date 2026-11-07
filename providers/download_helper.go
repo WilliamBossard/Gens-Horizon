@@ -111,3 +111,4 @@ func downloadWithResume(
 	_ = os.Remove(destPath)
 	return fmt.Errorf("échec téléchargement après %d tentatives", maxAttempts)
 }
+

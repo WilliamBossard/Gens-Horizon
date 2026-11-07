@@ -164,7 +164,7 @@ func Sync(args []string) {
 		}
 
 		if needsBaseExtract {
-			tempBase := filepath.Join(dataDir, fmt.Sprintf("temp_base_%s_%d.zip", safeInst, time.Now().UnixMilli()))
+			tempBase := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_base_%s_%d.zip", safeInst, time.Now().UnixMilli()))
 			ipc.SendProgress("DOWNLOADING", 0, inst)
 
 			err = p.DownloadFile(baseFile.ID, tempBase, func(pct int) {
@@ -213,7 +213,7 @@ func Sync(args []string) {
 				go func(idx int, item deltaEntry) {
 					defer dlWg.Done()
 					defer func() { <-dlSem }()
-					tempDelta := filepath.Join(dataDir, fmt.Sprintf("temp_delta_%s_%d.zip", safeInst, item.timestamp))
+					tempDelta := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_delta_%s_%d.zip", safeInst, item.timestamp))
 					if dErr := p.DownloadFile(item.file.ID, tempDelta, nil, item.file.Size); dErr != nil {
 						_ = os.Remove(tempDelta)
 						ipc.Logf("[sync] Échec téléchargement delta %s : %v", item.file.Name, dErr)

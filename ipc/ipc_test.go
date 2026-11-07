@@ -24,3 +24,4 @@ func TestProgressMessageSerialization(t *testing.T) {
 		t.Errorf("decoded mismatch: %+v", decoded)
 	}
 }
+
