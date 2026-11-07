@@ -316,10 +316,12 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 				if data, err := os.ReadFile(localMetaPath); err == nil {
 					var meta metaResult
 					if err := json.Unmarshal(data, &meta); err == nil {
-						metaMu.Lock()
-						metaCache[instName] = meta
-						metaMu.Unlock()
-						needsDownload = false
+						if meta.IconData != nil && *meta.IconData != "" {
+							metaMu.Lock()
+							metaCache[instName] = meta
+							metaMu.Unlock()
+							needsDownload = false
+						}
 					}
 				}
 			}
@@ -372,6 +374,25 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 			}
 			iconData = m.IconData
 			loader = m.Loader
+		}
+
+		// Fallback intelligent : si l'icône est absente de la métadonnée cloud mais que l'instance existe localement sur le disque
+		if iconData == nil || *iconData == "" {
+			instDir := paths.GetInstancesFolder()
+			safeKey := paths.GetCanonicalName(instName)
+			localInstFolder := filepath.Join(instDir, safeKey)
+			if _, err := os.Stat(localInstFolder); os.IsNotExist(err) {
+				localInstFolder = filepath.Join(instDir, instName)
+			}
+			if _, err := os.Stat(localInstFolder); err == nil {
+				localMeta := extractInstanceMetadata(localInstFolder, instName)
+				if b64, ok := localMeta["iconData"].(string); ok && b64 != "" {
+					iconData = &b64
+				}
+				if ldr, ok := localMeta["loader"].(string); ok && ldr != "" && (loader == nil || *loader == "") {
+					loader = &ldr
+				}
+			}
 		}
 
 		lastBackupStr := baseFile.ModifiedTime.Format(time.RFC3339)

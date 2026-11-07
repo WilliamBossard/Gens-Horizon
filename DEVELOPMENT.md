@@ -5,11 +5,13 @@ This document thoroughly describes the architecture, synchronization model, cryp
 ---
 
 ## 1. Overview & Global Architecture
+
 Gens-Horizon is a standalone CLI engine written in **Go (Golang)**, designed to run in the background. It is responsible for the bidirectional synchronization of game instances with Cloud providers (Google Drive, Dropbox, OneDrive).
 
 It manages file versioning via a **"Delta Sync"** (differential synchronization) approach and **"Incremental Backups"**, guaranteeing blazing speed and drastic savings in bandwidth and storage.
 
 ### Core Architecture & Packages
+
 - **`main.go`**: Main CLI router. Dispatches subcommands (`--sync`, `--login`, `--rollback`, `--check`, `--upload`, `--quota`). It listens on `os.Stdin` for graceful `SHUTDOWN` commands sent by `Gens-Launcher`.
 - **`ipc/`**: Encapsulates the JSON stream over `os.Stdout`. All diagnostic or debug logs are redirected to `os.Stderr` to protect the IPC JSON stream.
 - **`providers/`**: Implements the Factory pattern (`GetProvider()`). Providers (`google.go`, `dropbox.go`, `onedrive.go`) share a common Go interface for OAuth2 tokens, quotas, and upload/download.
@@ -29,9 +31,11 @@ It manages file versioning via a **"Delta Sync"** (differential synchronization)
 ---
 
 ## 2. Communication Protocol (IPC JSON)
+
 The Horizon engine runs as a child process of the Launcher. It communicates asynchronously via standard input/output streams (`stdout` and `stdin`).
 
 All data emitted on `stdout` is strictly formatted in pure JSON lines. Example:
+
 ```json
 {
   "type": "PROGRESS",
@@ -40,6 +44,7 @@ All data emitted on `stdout` is strictly formatted in pure JSON lines. Example:
   "instance": "Aventure"
 }
 ```
+
 *Note: All diagnostics or error messages are sent to `os.Stderr` to prevent JSON parsing corruption on the Launcher side.*
 
 Common message types include: `PROGRESS`, `INFO`, `SUCCESS`, `ERROR`, `ROLLBACK_LIST`, `CHECK_RESULT`, `CLOUD_LIST`, `QUOTA`, `OFFLINE`.
@@ -73,7 +78,9 @@ The application follows NIST recommendations and applies "Defense in Depth":
 ## 4. Tests and Quality
 
 Tests are run using standard Go tooling:
+
 ```bash
 go test -v ./...
 ```
+
 Tests verify symmetric cryptography integrity, lock management, multi-threaded scanner performance, and safe zip decompression.

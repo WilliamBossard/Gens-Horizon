@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -241,6 +242,9 @@ func Upload(args []string) {
 				metaExistingID = mf.ID
 			}
 			_, _ = p.UploadJSON(metaName, metaData, metaExistingID)
+			if b, err := json.MarshalIndent(metaData, "", "  "); err == nil {
+				_ = osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644)
+			}
 
 			// Nettoyage parallèle des anciens deltas consolidés (concurrence max: 4)
 			if len(existingDeltas) > 0 {
@@ -333,6 +337,9 @@ func Upload(args []string) {
 				metaExistingID = mf.ID
 			}
 			_, _ = p.UploadJSON(metaName, metaData, metaExistingID)
+			if b, err := json.MarshalIndent(metaData, "", "  "); err == nil {
+				_ = osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644)
+			}
 
 			// Sauvegarde du manifest en local
 			if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
@@ -364,31 +371,109 @@ func updateLastSync(safeInst string) {
 	}
 }
 
+func readFileBase64(filePath string) (string, string, error) {
+	bytes, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", "", err
+	}
+	ext := strings.ToLower(filepath.Ext(filePath))
+	mime := "image/png"
+	switch ext {
+	case ".jpg", ".jpeg":
+		mime = "image/jpeg"
+	case ".webp":
+		mime = "image/webp"
+	case ".gif":
+		mime = "image/gif"
+	case ".bmp":
+		mime = "image/bmp"
+	case ".svg":
+		mime = "image/svg+xml"
+	}
+	return base64.StdEncoding.EncodeToString(bytes), mime, nil
+}
+
 func extractInstanceMetadata(instFolder string, instName string) map[string]any {
 	meta := map[string]any{
 		"realName": instName,
-		"loader":   nil,
+		"loader":   "vanilla",
 		"iconData": nil,
 	}
 
+	var iconField string
+	var loaderField string
+	var nameField string
+
+	// 1. Lire instance.json ou fallback gens/launcher_config.json
 	instJsonPath := filepath.Join(instFolder, "instance.json")
-	if data, err := os.ReadFile(instJsonPath); err == nil {
+	var data []byte
+	var err error
+	if data, err = os.ReadFile(instJsonPath); err != nil {
+		configPath := filepath.Join(instFolder, "gens", "launcher_config.json")
+		data, err = os.ReadFile(configPath)
+	}
+
+	if err == nil {
 		var instData struct {
 			Name     string `json:"name"`
 			Loader   string `json:"loader"`
+			Icon     string `json:"icon"`
 			IconData string `json:"iconData"`
 		}
 		if err := json.Unmarshal(data, &instData); err == nil {
-			if instData.Name != "" {
-				meta["realName"] = instData.Name
-			}
-			if instData.Loader != "" {
-				meta["loader"] = instData.Loader
-			}
-			if instData.IconData != "" {
-				meta["iconData"] = instData.IconData
+			nameField = instData.Name
+			loaderField = instData.Loader
+			if instData.Icon != "" {
+				iconField = instData.Icon
+			} else if instData.IconData != "" {
+				iconField = instData.IconData
 			}
 		}
 	}
+
+	if nameField != "" {
+		meta["realName"] = nameField
+	}
+	if loaderField != "" {
+		meta["loader"] = loaderField
+	}
+
+	// 2. Traitement de l'icône personnalisée
+	var finalIconData string
+
+	if strings.HasPrefix(iconField, "data:") {
+		finalIconData = iconField
+	} else if strings.HasPrefix(iconField, "file://") {
+		// Nettoyage de l'URL file://
+		filePath := strings.TrimPrefix(iconField, "file://")
+		if strings.HasPrefix(filePath, "/") && len(filePath) > 2 && filePath[2] == ':' {
+			filePath = filePath[1:] // Pour Windows : /C:/path -> C:/path
+		}
+		filePath = filepath.FromSlash(filePath)
+		if info, err := os.Stat(filePath); err == nil && !info.IsDir() && info.Size() < 2*1024*1024 {
+			if b64, mime, err := readFileBase64(filePath); err == nil {
+				finalIconData = fmt.Sprintf("data:%s;base64,%s", mime, b64)
+			}
+		}
+	}
+
+	// 3. Fallback : scanner les fichiers d'icônes physiques dans instFolder
+	if finalIconData == "" {
+		exts := []string{".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+		for _, ext := range exts {
+			candidate := filepath.Join(instFolder, "icon"+ext)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Size() < 2*1024*1024 {
+				if b64, mime, err := readFileBase64(candidate); err == nil {
+					finalIconData = fmt.Sprintf("data:%s;base64,%s", mime, b64)
+					break
+				}
+			}
+		}
+	}
+
+	if finalIconData != "" {
+		meta["iconData"] = finalIconData
+	}
+
 	return meta
 }
