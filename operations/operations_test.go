@@ -18,6 +18,33 @@ func TestParseTargetInstance(t *testing.T) {
 	}
 }
 
+func TestHasFlag(t *testing.T) {
+	args := []string{"--upload", "--force"}
+	if !hasFlag(args, "--force") {
+		t.Errorf("expected hasFlag to detect --force")
+	}
+	if hasFlag(args, "--dry-run") {
+		t.Errorf("did not expect hasFlag to detect --dry-run")
+	}
+}
+
+func TestUpdateLastSync(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "horizon_lastsync_test_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	_ = os.Setenv("HORIZON_DATA_DIR", tmpDir)
+	defer os.Unsetenv("HORIZON_DATA_DIR")
+
+	updateLastSync("GensBien")
+	syncPath := filepath.Join(tmpDir, "last_sync.json")
+	if _, err := os.Stat(syncPath); err != nil {
+		t.Fatalf("expected last_sync.json to exist: %v", err)
+	}
+}
+
 func TestHardlinkRollbackIsolation(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "horizon_rollback_test_*")
 	if err != nil {
@@ -58,3 +85,4 @@ func TestHardlinkRollbackIsolation(t *testing.T) {
 		t.Errorf("rollback file was mutated! expected 'original_value', got '%s'", string(rbContent))
 	}
 }
+

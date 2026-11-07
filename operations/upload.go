@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
@@ -138,6 +139,41 @@ func Upload(args []string) {
 			cleanupThreshold = 10
 		}
 
+		// Vérification conflit : une version plus récente existe-t-elle sur le Cloud ?
+		if !hasFlag(args, "--force") && (hasBase || hasManifest) {
+			var lastSyncTime int64
+			syncInfoPath := paths.GetLastSyncPath()
+			if data, err := os.ReadFile(syncInfoPath); err == nil {
+				var syncInfo map[string]string
+				if json.Unmarshal(data, &syncInfo) == nil {
+					if rawTime, ok := syncInfo[safeInst]; ok {
+						if t, err := time.Parse(time.RFC3339, rawTime); err == nil {
+							lastSyncTime = t.UnixMilli()
+						}
+					}
+				}
+			}
+
+			var cloudLatestTime int64
+			if hasBase {
+				cloudLatestTime = baseFile.ModifiedTime.UnixMilli()
+			}
+			if hasManifest && manifestFile.ModifiedTime.UnixMilli() > cloudLatestTime {
+				cloudLatestTime = manifestFile.ModifiedTime.UnixMilli()
+			}
+			for _, d := range existingDeltas {
+				if d.ModifiedTime.UnixMilli() > cloudLatestTime {
+					cloudLatestTime = d.ModifiedTime.UnixMilli()
+				}
+			}
+
+			// Si le cloud a été modifié après notre dernière synchro locale (+ marge de 2s)
+			if lastSyncTime > 0 && cloudLatestTime > lastSyncTime+2000 {
+				ipc.SendError("CONFLICT_DETECTED", "A newer version exists on Cloud. Synchronize first or use --force to overwrite.", inst)
+				continue
+			}
+		}
+
 		var remoteManifest scanner.Manifest
 		hasRemoteManifest := false
 		if hasManifest {
@@ -207,10 +243,21 @@ func Upload(args []string) {
 			}
 			_, _ = p.UploadJSON(metaName, metaData, metaExistingID)
 
-			// Nettoyage des anciens deltas consolidés
-			for _, deltaFile := range existingDeltas {
-				_ = p.DeleteFile(deltaFile.ID)
-				delete(cloudIndex, deltaFile.Name)
+			// Nettoyage parallèle des anciens deltas consolidés (concurrence max: 4)
+			if len(existingDeltas) > 0 {
+				var delWg sync.WaitGroup
+				delSem := make(chan struct{}, 4)
+				for _, deltaFile := range existingDeltas {
+					delWg.Add(1)
+					delSem <- struct{}{}
+					go func(df providers.CloudFile) {
+						defer delWg.Done()
+						defer func() { <-delSem }()
+						_ = p.DeleteFile(df.ID)
+					}(deltaFile)
+					delete(cloudIndex, deltaFile.Name)
+				}
+				delWg.Wait()
 			}
 
 			// Sauvegarde du manifest en local
