@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    name: Verify on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Run Tests with Race Detector (Linux)
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 -v ./...
+
+      - name: Run Tests (Windows)
+        if: runner.os == 'Windows'
+        run: go test -count=1 -v ./...

@@ -1,10 +1,15 @@
 package providers
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,9 +18,93 @@ import (
 // MinMultiRangeSize définit la taille minimale pour déclencher un téléchargement parallèle multi-segments (30 Mo)
 const MinMultiRangeSize = int64(30 * 1024 * 1024)
 
+func parseContentRangeStart(hdr string) (int64, bool) {
+	trimmed := strings.TrimSpace(hdr)
+	if !strings.HasPrefix(strings.ToLower(trimmed), "bytes ") {
+		return 0, false
+	}
+	rangePart := strings.TrimSpace(trimmed[6:])
+	dashIdx := strings.IndexByte(rangePart, '-')
+	if dashIdx <= 0 {
+		return 0, false
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(rangePart[:dashIdx]), 10, 64)
+	if err != nil || start < 0 {
+		return 0, false
+	}
+	return start, true
+}
+
+// downloadIdleTimeout définit le délai d'inactivité maximal toléré entre deux lectures sur un flux HTTP
+var downloadIdleTimeout = 60 * time.Second
+
+type idleTimeoutReadCloser struct {
+	rc       io.ReadCloser
+	timeout  time.Duration
+	timedOut atomic.Bool
+	timer    *time.Timer
+}
+
+func newIdleTimeoutReader(rc io.ReadCloser, timeout time.Duration) *idleTimeoutReadCloser {
+	itr := &idleTimeoutReadCloser{rc: rc, timeout: timeout}
+	if timeout > 0 {
+		t := time.AfterFunc(24*time.Hour, func() {
+			itr.timedOut.Store(true)
+			_ = itr.rc.Close()
+		})
+		t.Stop()
+		itr.timer = t
+	}
+	return itr
+}
+
+func (itr *idleTimeoutReadCloser) Read(p []byte) (int, error) {
+	if itr.timeout <= 0 || itr.timer == nil {
+		return itr.rc.Read(p)
+	}
+	itr.timer.Reset(itr.timeout)
+	n, err := itr.rc.Read(p)
+	itr.timer.Stop()
+	if err != nil && itr.timedOut.Load() {
+		return n, fmt.Errorf("download stalled (no data for %s): %w", itr.timeout, err)
+	}
+	return n, err
+}
+
+func (itr *idleTimeoutReadCloser) Close() error {
+	if itr.timer != nil {
+		itr.timer.Stop()
+	}
+	return itr.rc.Close()
+}
+
+func createTempDownloadFile(destPath string) (*os.File, string, error) {
+	f, err := os.CreateTemp(filepath.Dir(destPath), filepath.Base(destPath)+".part.*")
+	if err != nil {
+		return nil, "", err
+	}
+	return f, f.Name(), nil
+}
+
+func finalizeTempDownloadFile(out *os.File, tmpPath string, destPath string) error {
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = os.Chmod(tmpPath, 0644)
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
 // RangeRequestFunc est la signature de la fonction construisant une requête HTTP pour une plage [start, end].
 // Si end < 0, la plage est [start, fin_du_fichier].
 type RangeRequestFunc func(start int64, end int64) (*http.Response, error)
+
+// errMultiRangeFallback signale qu'un serveur ne respecte plus Range sur un segment et impose un fallback flux unique.
+var errMultiRangeFallback = errors.New("multirange unsupported on subsequent chunk")
 
 // downloadSmart choisit intelligemment entre le téléchargement parallèle multi-segments et le flux unique avec reprise
 func downloadSmart(
@@ -30,7 +119,13 @@ func downloadSmart(
 		})
 	}
 
-	return downloadMultiRange(destPath, totalSize, onProgress, makeRequest)
+	err := downloadMultiRange(destPath, totalSize, onProgress, makeRequest)
+	if errors.Is(err, errMultiRangeFallback) {
+		return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+			return makeRequest(offset, -1)
+		})
+	}
+	return err
 }
 
 // downloadMultiRange télécharge un gros fichier en N segments parallèles avec écriture concurrente via WriteAt
@@ -74,17 +169,22 @@ func downloadMultiRange(
 		})
 	}
 
-	// Préparation du fichier cible
-	out, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	// Préparation du fichier temporaire cible (évite tout fichier partiel visible à destPath)
+	out, tmpPath, err := createTempDownloadFile(destPath)
 	if err != nil {
 		_ = resp0.Body.Close()
 		return err
 	}
-	defer out.Close()
+	tmpClosed := false
+	defer func() {
+		if !tmpClosed {
+			_ = out.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	if err := out.Truncate(totalSize); err != nil {
 		_ = resp0.Body.Close()
-		_ = os.Remove(destPath)
 		return err
 	}
 
@@ -124,107 +224,135 @@ func downloadMultiRange(
 		chunks[i] = chunkRange{id: i, start: start, end: end}
 	}
 
-	var g sync.WaitGroup
-	errChan := make(chan error, numWorkers)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Worker 0 consomme resp0 déjà ouvert
-	g.Add(1)
-	go func() {
-		defer g.Done()
-		defer resp0.Body.Close()
+	streamChunk := func(c chunkRange, initialResp *http.Response) error {
+		const maxRetries = 3
+		var chunkErr error
+		currentOffset := c.start
+		pendingResp := initialResp
 
-		buf := make([]byte, 128*1024)
-		currentOffset := chunks[0].start
-		for {
-			n, rErr := resp0.Body.Read(buf)
-			if n > 0 {
-				if _, wErr := out.WriteAt(buf[:n], currentOffset); wErr != nil {
-					errChan <- fmt.Errorf("chunk 0 write error: %w", wErr)
-					return
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if ctx.Err() != nil {
+				if pendingResp != nil {
+					_ = pendingResp.Body.Close()
 				}
-				currentOffset += int64(n)
-				reportProgress(n)
+				return ctx.Err()
 			}
-			if rErr != nil {
-				if rErr == io.EOF {
-					break
-				}
-				errChan <- fmt.Errorf("chunk 0 read error: %w", rErr)
-				return
-			}
-		}
-	}()
-
-	// Workers 1 à numWorkers-1
-	for i := 1; i < numWorkers; i++ {
-		chunk := chunks[i]
-		g.Add(1)
-		go func(c chunkRange) {
-			defer g.Done()
-
-			const maxRetries = 3
-			var chunkErr error
-			currentOffset := c.start
-
-			for attempt := 0; attempt < maxRetries; attempt++ {
+			resp := pendingResp
+			pendingResp = nil
+			if resp == nil {
 				if attempt > 0 {
-					time.Sleep(time.Duration(attempt*1000) * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(time.Duration(attempt*1000) * time.Millisecond):
+					}
 				}
-
-				resp, err := makeRequest(currentOffset, c.end)
+				r, err := makeRequest(currentOffset, c.end)
 				if err != nil {
 					chunkErr = err
 					continue
 				}
-
-				if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-					b, _ := io.ReadAll(resp.Body)
-					_ = resp.Body.Close()
-					chunkErr = fmt.Errorf("chunk %d HTTP %d: %s", c.id, resp.StatusCode, string(b))
+				// Les requêtes Range de segments DOIVENT recevoir 206 Partial Content
+				// (un 200 OK sur un segment > 0 indique l'absence de support Range : bascule sur flux unique).
+				if r.StatusCode == http.StatusOK && c.id > 0 {
+					_ = r.Body.Close()
+					return errMultiRangeFallback
+				}
+				if r.StatusCode != http.StatusPartialContent {
+					b, _ := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+					_ = r.Body.Close()
+					chunkErr = fmt.Errorf("chunk %d HTTP %d (expected 206): %s", c.id, r.StatusCode, string(b))
 					continue
 				}
+				resp = r
+			}
 
-				buf := make([]byte, 128*1024)
-				var streamErr error
-				for {
-					n, rErr := resp.Body.Read(buf)
-					if n > 0 {
-						if _, wErr := out.WriteAt(buf[:n], currentOffset); wErr != nil {
-							_ = resp.Body.Close()
-							errChan <- fmt.Errorf("chunk %d write error: %w", c.id, wErr)
-							return
-						}
-						currentOffset += int64(n)
-						reportProgress(n)
-					}
-					if rErr != nil {
-						if rErr != io.EOF {
-							streamErr = rErr
-						}
-						break
-					}
+			buf := make([]byte, 128*1024)
+			bodyReader := newIdleTimeoutReader(resp.Body, downloadIdleTimeout)
+			var streamErr error
+			for {
+				if ctx.Err() != nil {
+					streamErr = ctx.Err()
+					break
 				}
-				_ = resp.Body.Close()
+				n, rErr := bodyReader.Read(buf)
+				if n > 0 {
+					if currentOffset+int64(n) > c.end+1 {
+						_ = bodyReader.Close()
+						return fmt.Errorf("chunk %d overflow: serveur a renvoyé plus d'octets que la plage [%d..%d]", c.id, c.start, c.end)
+					}
+					if _, wErr := out.WriteAt(buf[:n], currentOffset); wErr != nil {
+						_ = bodyReader.Close()
+						return fmt.Errorf("chunk %d write error: %w", c.id, wErr)
+					}
+					currentOffset += int64(n)
+					reportProgress(n)
+				}
+				if rErr != nil {
+					if rErr != io.EOF {
+						streamErr = rErr
+					}
+					break
+				}
+			}
+			_ = bodyReader.Close()
 
-				if streamErr == nil && currentOffset > c.end {
-					return
-				}
+			if streamErr == nil && currentOffset == c.end+1 {
+				return nil
+			}
+			if streamErr != nil {
 				chunkErr = streamErr
+			} else {
+				chunkErr = fmt.Errorf("chunk %d incomplete EOF (%d/%d)", c.id, currentOffset, c.end+1)
 			}
+		}
 
-			if chunkErr != nil {
-				errChan <- fmt.Errorf("chunk %d failed after %d attempts: %w", c.id, maxRetries, chunkErr)
+		if pendingResp != nil {
+			_ = pendingResp.Body.Close()
+		}
+		return fmt.Errorf("chunk %d failed after %d attempts: %w", c.id, maxRetries, chunkErr)
+	}
+
+	var g sync.WaitGroup
+	var fallbackToSingle atomic.Bool
+	errChan := make(chan error, numWorkers)
+
+	for i := 0; i < numWorkers; i++ {
+		chunk := chunks[i]
+		var initial *http.Response
+		if i == 0 {
+			initial = resp0
+		}
+		g.Add(1)
+		go func(c chunkRange, initResp *http.Response) {
+			defer g.Done()
+			if err := streamChunk(c, initResp); err != nil {
+				if errors.Is(err, errMultiRangeFallback) {
+					fallbackToSingle.Store(true)
+				}
+				cancel()
+				errChan <- err
 			}
-		}(chunk)
+		}(chunk, initial)
 	}
 
 	g.Wait()
 	close(errChan)
 
+	if fallbackToSingle.Load() {
+		return errMultiRangeFallback
+	}
+
 	if firstErr := <-errChan; firstErr != nil {
-		_ = out.Close()
-		_ = os.Remove(destPath)
 		return firstErr
+	}
+
+	tmpClosed = true
+	if err := finalizeTempDownloadFile(out, tmpPath, destPath); err != nil {
+		return err
 	}
 
 	if onProgress != nil {
@@ -235,23 +363,29 @@ func downloadMultiRange(
 
 // streamSingleResponse consomme une réponse HTTP complète en flux unique
 func streamSingleResponse(resp *http.Response, destPath string, totalSize int64, onProgress func(pct int)) error {
-	defer resp.Body.Close()
-	out, err := os.Create(destPath)
+	bodyReader := newIdleTimeoutReader(resp.Body, downloadIdleTimeout)
+	defer bodyReader.Close()
+
+	out, tmpPath, err := createTempDownloadFile(destPath)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = out.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	var downloaded int64
 	lastPct := -1
 	buf := make([]byte, 128*1024)
 
 	for {
-		n, rErr := resp.Body.Read(buf)
+		n, rErr := bodyReader.Read(buf)
 		if n > 0 {
 			if _, wErr := out.Write(buf[:n]); wErr != nil {
-				_ = out.Close()
-				_ = os.Remove(destPath)
 				return wErr
 			}
 			downloaded += int64(n)
@@ -270,10 +404,15 @@ func streamSingleResponse(resp *http.Response, destPath string, totalSize int64,
 			if rErr == io.EOF {
 				break
 			}
-			_ = out.Close()
-			_ = os.Remove(destPath)
 			return rErr
 		}
+	}
+	if totalSize > 0 && downloaded != totalSize {
+		return fmt.Errorf("download incomplete EOF (%d/%d bytes)", downloaded, totalSize)
+	}
+	closed = true
+	if err := finalizeTempDownloadFile(out, tmpPath, destPath); err != nil {
+		return err
 	}
 	if onProgress != nil {
 		onProgress(100)
@@ -288,11 +427,17 @@ func downloadWithResume(
 	onProgress func(pct int),
 	makeRequest func(offset int64) (*http.Response, error),
 ) error {
-	out, err := os.Create(destPath)
+	out, tmpPath, err := createTempDownloadFile(destPath)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = out.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	var downloaded int64
 	lastPct := -1
@@ -307,8 +452,6 @@ func downloadWithResume(
 		resp, reqErr := makeRequest(downloaded)
 		if reqErr != nil {
 			if attempt == maxAttempts-1 {
-				_ = out.Close()
-				_ = os.Remove(destPath)
 				return reqErr
 			}
 			continue
@@ -320,27 +463,39 @@ func downloadWithResume(
 				_ = out.Truncate(0)
 				downloaded = 0
 			}
+		} else if downloaded > 0 && resp.StatusCode == http.StatusPartialContent {
+			if startByte, ok := parseContentRangeStart(resp.Header.Get("Content-Range")); ok && startByte != downloaded {
+				if startByte == 0 {
+					if _, sErr := out.Seek(0, io.SeekStart); sErr == nil {
+						_ = out.Truncate(0)
+						downloaded = 0
+					}
+				} else {
+					_ = resp.Body.Close()
+					if attempt == maxAttempts-1 {
+						return fmt.Errorf("download HTTP 206 Content-Range mismatch: got start %d, expected %d", startByte, downloaded)
+					}
+					continue
+				}
+			}
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			b, _ := io.ReadAll(resp.Body)
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			_ = resp.Body.Close()
 			if attempt == maxAttempts-1 || (resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests) {
-				_ = out.Close()
-				_ = os.Remove(destPath)
 				return fmt.Errorf("download HTTP %d : %s", resp.StatusCode, string(b))
 			}
 			continue
 		}
 
+		bodyReader := newIdleTimeoutReader(resp.Body, downloadIdleTimeout)
 		var streamErr error
 		for {
-			n, rErr := resp.Body.Read(buf)
+			n, rErr := bodyReader.Read(buf)
 			if n > 0 {
 				if _, wErr := out.Write(buf[:n]); wErr != nil {
-					_ = resp.Body.Close()
-					_ = out.Close()
-					_ = os.Remove(destPath)
+					_ = bodyReader.Close()
 					return wErr
 				}
 				downloaded += int64(n)
@@ -364,9 +519,17 @@ func downloadWithResume(
 				break
 			}
 		}
-		_ = resp.Body.Close()
+		_ = bodyReader.Close()
+
+		if streamErr == nil && totalSize > 0 && downloaded != totalSize {
+			streamErr = fmt.Errorf("download incomplete EOF (%d/%d bytes)", downloaded, totalSize)
+		}
 
 		if streamErr == nil {
+			closed = true
+			if err := finalizeTempDownloadFile(out, tmpPath, destPath); err != nil {
+				return err
+			}
 			if onProgress != nil {
 				onProgress(100)
 			}
@@ -374,13 +537,9 @@ func downloadWithResume(
 		}
 
 		if attempt == maxAttempts-1 {
-			_ = out.Close()
-			_ = os.Remove(destPath)
 			return streamErr
 		}
 	}
 
-	_ = out.Close()
-	_ = os.Remove(destPath)
 	return fmt.Errorf("échec téléchargement après %d tentatives", maxAttempts)
 }

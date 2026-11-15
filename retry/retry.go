@@ -71,7 +71,10 @@ func Do(ctx context.Context, opts Options, fn func() error) error {
 		}
 
 		// Backoff exponentiel avec jitter (+- 20%)
-		jitter := time.Duration(rand.Int63n(int64(delay / 5)))
+		var jitter time.Duration
+		if jitterRange := int64(delay / 5); jitterRange > 0 {
+			jitter = time.Duration(rand.Int63n(jitterRange))
+		}
 		actualDelay := delay + jitter
 		if actualDelay > opts.MaxDelay {
 			actualDelay = opts.MaxDelay

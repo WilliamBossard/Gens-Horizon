@@ -2,7 +2,9 @@ package operations
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -101,7 +103,17 @@ func Sync(args []string) {
 	}
 
 	for _, inst := range instancesToSync {
-		safeInst := paths.GetCanonicalName(inst)
+		safeInst, nameErr := paths.SanitizeInstanceName(paths.GetCanonicalName(inst))
+		if nameErr != nil {
+			ipc.SendError("INVALID_INSTANCE_NAME", nameErr.Error(), inst)
+			continue
+		}
+		localPath, pathErr := paths.SafeJoinUnder(instDir, safeInst)
+		if pathErr != nil {
+			ipc.SendError("INVALID_INSTANCE_PATH", pathErr.Error(), inst)
+			continue
+		}
+
 		baseBackupName := fmt.Sprintf("%s%s.zip", PrefixBackup, safeInst)
 		baseFile, hasBase := cloudIndex[baseBackupName]
 		if !hasBase {
@@ -109,17 +121,16 @@ func Sync(args []string) {
 			continue
 		}
 
-		localPath := filepath.Join(instDir, safeInst)
 		isNewInstance := false
 		if _, err := os.Stat(localPath); os.IsNotExist(err) {
 			isNewInstance = true
 			_ = os.MkdirAll(localPath, 0755)
 		}
 
-		// Lecture du timestamp de dernière synchro locale
+		// Lecture du timestamp de dernière synchro locale (horodatage serveur RFC3339Nano)
 		var lastSyncTime int64
 		if rawTime, ok := syncInfo[safeInst]; ok {
-			if t, err := time.Parse(time.RFC3339, rawTime); err == nil {
+			if t, err := time.Parse(time.RFC3339Nano, rawTime); err == nil {
 				lastSyncTime = t.UnixMilli()
 			}
 		}
@@ -127,24 +138,8 @@ func Sync(args []string) {
 		baseCloudTime := baseFile.ModifiedTime.UnixMilli()
 		needsBaseExtract := isNewInstance || baseCloudTime > lastSyncTime
 
-		// Application chronologique des Deltas plus récents que le base/sync
-		prefixDelta := fmt.Sprintf("%s%s_", PrefixDelta, safeInst)
-		type deltaEntry struct {
-			file      providers.CloudFile
-			timestamp int64
-		}
-		var deltas []deltaEntry
-
-		for name, f := range cloudIndex {
-			if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
-				rawTs := strings.TrimSuffix(strings.TrimPrefix(name, prefixDelta), ".zip")
-				if ts, err := strconv.ParseInt(rawTs, 10, 64); err == nil {
-					if ts > lastSyncTime || needsBaseExtract {
-						deltas = append(deltas, deltaEntry{file: f, timestamp: ts})
-					}
-				}
-			}
-		}
+		// Application chronologique des Deltas plus récents que le dernier sync serveur
+		deltas := selectSyncDeltas(cloudIndex, safeInst, baseFile, lastSyncTime, needsBaseExtract)
 
 		// Optimisation performance : Si aucun changement, terminer immédiatement sans copie disque
 		if !needsBaseExtract && len(deltas) == 0 {
@@ -157,10 +152,28 @@ func Sync(args []string) {
 			continue
 		}
 
-		// Création d'un rollback local UNIQUEMENT si des modifications vont être appliquées
+		// Rollback paresseux : créé uniquement après téléchargement et validation des archives
 		var rollbackPath string
-		if !isNewInstance {
-			rollbackPath = createRollbackSnapshot(localPath)
+		ensureRollback := func() {
+			if !isNewInstance && rollbackPath == "" {
+				rollbackPath = createRollbackSnapshot(localPath)
+				pruneOldRollbacks(instDir, 3, safeInst+"_rollback_", filepath.Base(localPath)+"_rollback_")
+			}
+		}
+
+		restoreOnSyncFailure := func() {
+			if isNewInstance {
+				_ = os.RemoveAll(localPath)
+				return
+			}
+			if rollbackPath != "" {
+				if rErr := swapRestoreSnapshot(rollbackPath, localPath); rErr != nil {
+					ipc.Logf("[sync] AVERTISSEMENT : échec restauration automatique rollback %s : %v", rollbackPath, rErr)
+				} else {
+					ipc.Logf("[sync] Rollback restauré automatiquement suite à l'échec de synchro : %s", inst)
+					cleanupRollback(rollbackPath)
+				}
+			}
 		}
 
 		if needsBaseExtract {
@@ -172,14 +185,32 @@ func Sync(args []string) {
 			}, baseFile.Size)
 			if err != nil {
 				_ = os.Remove(tempBase)
+				if isNewInstance {
+					_ = os.RemoveAll(localPath)
+				} else if rollbackPath != "" {
+					cleanupRollback(rollbackPath)
+				}
 				ipc.SendError("DOWNLOAD_FAILED", err.Error(), inst)
 				continue
 			}
 
 			if err := ziputils.VerifyZipIntegrity(tempBase); err != nil {
 				_ = os.Remove(tempBase)
+				if isNewInstance {
+					_ = os.RemoveAll(localPath)
+				}
 				ipc.SendError("CORRUPT_ARCHIVE", err.Error(), inst)
 				continue
+			}
+
+			ensureRollback()
+			if !isNewInstance {
+				if cErr := cleanNonIgnoredEntries(localPath); cErr != nil {
+					_ = os.Remove(tempBase)
+					restoreOnSyncFailure()
+					ipc.SendError("CLEAN_FAILED", cErr.Error(), inst)
+					continue
+				}
 			}
 
 			ipc.SendProgress("EXTRACTING", 0, inst)
@@ -188,6 +219,7 @@ func Sync(args []string) {
 			})
 			_ = os.Remove(tempBase)
 			if err != nil {
+				restoreOnSyncFailure()
 				ipc.SendError("EXTRACT_FAILED", err.Error(), inst)
 				continue
 			}
@@ -202,6 +234,7 @@ func Sync(args []string) {
 		type downloadedDelta struct {
 			tempPath string
 			valid    bool
+			errMsg   string
 		}
 		dlResults := make([]downloadedDelta, len(deltas))
 		if len(deltas) > 0 {
@@ -210,18 +243,20 @@ func Sync(args []string) {
 			for i, d := range deltas {
 				dlWg.Add(1)
 				dlSem <- struct{}{}
-				go func(idx int, item deltaEntry) {
+				go func(idx int, item syncDeltaEntry) {
 					defer dlWg.Done()
 					defer func() { <-dlSem }()
 					tempDelta := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_delta_%s_%d.zip", safeInst, item.timestamp))
 					if dErr := p.DownloadFile(item.file.ID, tempDelta, nil, item.file.Size); dErr != nil {
 						_ = os.Remove(tempDelta)
 						ipc.Logf("[sync] Échec téléchargement delta %s : %v", item.file.Name, dErr)
+						dlResults[idx] = downloadedDelta{errMsg: dErr.Error()}
 						return
 					}
 					if vErr := ziputils.VerifyZipIntegrity(tempDelta); vErr != nil {
 						_ = os.Remove(tempDelta)
 						ipc.Logf("[sync] Archive delta corrompue %s : %v", item.file.Name, vErr)
+						dlResults[idx] = downloadedDelta{errMsg: vErr.Error()}
 						return
 					}
 					dlResults[idx] = downloadedDelta{tempPath: tempDelta, valid: true}
@@ -230,32 +265,74 @@ func Sync(args []string) {
 			dlWg.Wait()
 		}
 
+		cleanupDeltaTemps := func() {
+			for _, r := range dlResults {
+				if r.tempPath != "" {
+					_ = os.Remove(r.tempPath)
+				}
+			}
+		}
+
+		deltaFailed := ""
+		for i, r := range dlResults {
+			if !r.valid {
+				deltaFailed = fmt.Sprintf("Delta %s invalide ou introuvable : %s", deltas[i].file.Name, r.errMsg)
+				break
+			}
+		}
+		if deltaFailed != "" {
+			cleanupDeltaTemps()
+			if needsBaseExtract {
+				restoreOnSyncFailure()
+			} else if rollbackPath != "" {
+				cleanupRollback(rollbackPath)
+			}
+			ipc.SendError("DELTA_DOWNLOAD_FAILED", deltaFailed, inst)
+			continue
+		}
+
+		if len(deltas) > 0 {
+			ensureRollback()
+		}
 		// Application séquentielle stricte dans l'ordre chronologique
+		applyFailed := ""
 		for i, d := range deltas {
 			res := dlResults[i]
-			if !res.valid {
-				continue
-			}
 			ipc.Logf("[sync] Application du delta cloud : %s (taille: %d octets)", d.file.Name, d.file.Size)
-			_ = ziputils.ApplyDelta(res.tempPath, localPath, func(pct int) {
+			if aErr := ziputils.ApplyDelta(res.tempPath, localPath, func(pct int) {
 				ipc.SendDeltaProgress("APPLYING_DELTA", pct, inst, d.file.Name)
-			})
-			_ = os.Remove(res.tempPath)
+			}); aErr != nil {
+				applyFailed = fmt.Sprintf("Échec application delta %s : %v", d.file.Name, aErr)
+				break
+			}
+		}
+		cleanupDeltaTemps()
+		if applyFailed != "" {
+			restoreOnSyncFailure()
+			ipc.SendError("DELTA_APPLY_FAILED", applyFailed, inst)
+			continue
 		}
 
 		// Téléchargement du manifest distant pour synchroniser la référence locale
 		manifestName := fmt.Sprintf("%s%s.json", PrefixManifest, safeInst)
 		if mf, ok := cloudIndex[manifestName]; ok {
 			var remoteM scanner.Manifest
-			if err := p.DownloadJSON(mf.ID, &remoteM); err == nil {
-				localManifestFile := paths.GetManifestPath(safeInst)
-				if b, err := json.MarshalIndent(remoteM, "", "  "); err == nil {
-					_ = osWriteFileAtomic(localManifestFile, b, 0644)
+			if err := p.DownloadJSON(mf.ID, &remoteM); err != nil {
+				restoreOnSyncFailure()
+				ipc.SendError("MANIFEST_DOWNLOAD_FAILED", fmt.Sprintf("Échec téléchargement manifest cloud : %v", err), inst)
+				continue
+			}
+			localManifestFile := paths.GetManifestPath(safeInst)
+			if b, err := json.MarshalIndent(remoteM, "", "  "); err == nil {
+				if wErr := osWriteFileAtomic(localManifestFile, b, 0644); wErr != nil {
+					restoreOnSyncFailure()
+					ipc.SendError("MANIFEST_SAVE_FAILED", wErr.Error(), inst)
+					continue
 				}
 			}
 		}
 
-		updateLastSync(safeInst)
+		updateLastSyncWithTime(safeInst, maxServerTimeForInstance(cloudIndex, safeInst))
 
 		if rollbackPath != "" {
 			cleanupRollback(rollbackPath)
@@ -300,7 +377,11 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 	var metaWg sync.WaitGroup
 	metaSem := make(chan struct{}, 6)
 
-	for _, instName := range list {
+	for _, rawInstName := range list {
+		instName, err := paths.SanitizeInstanceName(rawInstName)
+		if err != nil {
+			continue
+		}
 		metaName := PrefixMeta + instName + ".json"
 		mf, ok := cloudIndex[metaName]
 		if !ok {
@@ -415,18 +496,31 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 }
 
 func handleDelete(targetInst string, cloudIndex map[string]providers.CloudFile, p providers.Provider, dataDir string) {
-	safeInst := paths.GetCanonicalName(targetInst)
+	safeInst, err := paths.SanitizeInstanceName(paths.GetCanonicalName(targetInst))
+	if err != nil {
+		ipc.SendError("INVALID_INSTANCE_NAME", err.Error(), targetInst)
+		return
+	}
 	baseBackupName := fmt.Sprintf("%s%s.zip", PrefixBackup, safeInst)
 	manifestName := fmt.Sprintf("%s%s.json", PrefixManifest, safeInst)
 	metaName := fmt.Sprintf("%s%s.json", PrefixMeta, safeInst)
 	prefixDelta := fmt.Sprintf("%s%s_", PrefixDelta, safeInst)
 
+	var deleteErrs []string
 	for name, f := range cloudIndex {
 		if name == baseBackupName || name == manifestName || name == metaName || strings.HasPrefix(name, prefixDelta) {
-			_ = p.DeleteFile(f.ID)
+			if delErr := p.DeleteFile(f.ID); delErr != nil && !errors.Is(delErr, providers.ErrNotFound) {
+				ipc.Logf("[sync] Échec suppression Cloud '%s' (%s) : %v", name, f.ID, delErr)
+				deleteErrs = append(deleteErrs, fmt.Sprintf("%s: %v", name, delErr))
+			}
 		}
 	}
 	providers.InvalidateCloudIndexCache()
+
+	if len(deleteErrs) > 0 {
+		ipc.SendError("DELETE_FAILED", fmt.Sprintf("Failed to delete from Cloud: %s", strings.Join(deleteErrs, "; ")), targetInst)
+		return
+	}
 
 	// Suppression locale
 	_ = os.Remove(paths.GetManifestPath(safeInst))
@@ -459,7 +553,7 @@ func createRollbackSnapshot(localPath string) string {
 	timestamp := time.Now().UnixMilli()
 	rollbackFolder := filepath.Join(instDir, fmt.Sprintf("%s_rollback_%d", folderName, timestamp))
 
-	if err := copyDir(localPath, rollbackFolder); err != nil {
+	if err := copyDir(localPath, rollbackFolder, true); err != nil {
 		ipc.Logf("[sync] Impossible de créer le snapshot rollback : %v", err)
 		return ""
 	}
@@ -472,8 +566,177 @@ func cleanupRollback(rollbackPath string) {
 	_ = os.RemoveAll(rollbackPath)
 }
 
-func copyDir(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+func swapRestoreSnapshot(snapshotDir, targetPath string) error {
+	stagingPath := fmt.Sprintf("%s.restore_tmp_%d", targetPath, time.Now().UnixMilli())
+	if err := copyDir(snapshotDir, stagingPath, false); err != nil {
+		_ = os.RemoveAll(stagingPath)
+		return err
+	}
+
+	backupOldPath := fmt.Sprintf("%s.restore_old_%d", targetPath, time.Now().UnixMilli())
+	hasExisting := false
+	if _, err := os.Stat(targetPath); err == nil {
+		hasExisting = true
+		if err := os.Rename(targetPath, backupOldPath); err != nil {
+			_ = os.RemoveAll(stagingPath)
+			ipc.Logf("[sync] Rename direct impossible (%v), tentative de restauration sélective in-place", err)
+			return restoreInPlace(snapshotDir, targetPath)
+		}
+	}
+
+	if err := os.Rename(stagingPath, targetPath); err != nil {
+		if hasExisting {
+			_ = os.Rename(backupOldPath, targetPath)
+		}
+		_ = os.RemoveAll(stagingPath)
+		return err
+	}
+	if hasExisting {
+		preserveIgnoredEntries(backupOldPath, targetPath)
+		_ = os.RemoveAll(backupOldPath)
+	}
+	return nil
+}
+
+// preserveIgnoredEntries transfère les dossiers/fichiers exclus de la synchro (logs, screenshots, versions, etc.)
+// depuis l'ancien dossier restauré vers targetPath avant suppression du backup temporaire.
+func preserveIgnoredEntries(backupOldPath, targetPath string) {
+	_ = filepath.WalkDir(backupOldPath, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(backupOldPath, path)
+		if err != nil || rel == "." {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		lower := strings.ToLower(d.Name())
+		isIgnoredDir := d.IsDir() && scanner.IgnoredDirs[lower]
+		isIgnoredFile := !d.IsDir() && (scanner.IgnoredDirs[lower] || scanner.IsIgnoredFile(d.Name()))
+		if !isIgnoredDir && !isIgnoredFile {
+			return nil
+		}
+
+		dest := filepath.Join(targetPath, rel)
+		if _, statErr := os.Lstat(dest); statErr == nil || !os.IsNotExist(statErr) {
+			if isIgnoredDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if mkErr := os.MkdirAll(filepath.Dir(dest), 0755); mkErr != nil {
+			if isIgnoredDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if renameErr := os.Rename(path, dest); renameErr != nil {
+			if isIgnoredDir {
+				_ = copyDir(path, dest, false)
+			} else if info, infoErr := d.Info(); infoErr == nil {
+				_ = copySingleFile(path, dest, info.Mode())
+			}
+		}
+		if isIgnoredDir {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+}
+
+// restoreInPlace restaure les fichiers du snapshot directement dans targetPath sans renommer le dossier racine
+// (utile sous Windows lorsque logs/ ou un fichier tiers empêche os.Rename sur la racine).
+func restoreInPlace(snapshotDir, targetPath string) error {
+	snapshotSet := make(map[string]bool)
+	err := filepath.WalkDir(snapshotDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(snapshotDir, path)
+		if err != nil || rel == "." {
+			return err
+		}
+		snapshotSet[rel] = true
+		dest := filepath.Join(targetPath, rel)
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if d.IsDir() {
+			return os.MkdirAll(dest, info.Mode())
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return err
+		}
+		_ = os.Remove(dest)
+		if err := os.Link(path, dest); err == nil {
+			return nil
+		}
+		return copySingleFile(path, dest, info.Mode())
+	})
+	if err != nil {
+		return err
+	}
+
+	// Supprime les fichiers ajoutés pendant la synchro échouée (hors dossiers/fichiers ignorés)
+	var extraPaths []string
+	_ = filepath.WalkDir(targetPath, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(targetPath, path)
+		if err != nil || rel == "." {
+			return nil
+		}
+		lower := strings.ToLower(d.Name())
+		if d.IsDir() && scanner.IgnoredDirs[lower] {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() && scanner.IsIgnoredFile(d.Name()) {
+			return nil
+		}
+		if !snapshotSet[rel] {
+			extraPaths = append(extraPaths, path)
+		}
+		return nil
+	})
+	for i := len(extraPaths) - 1; i >= 0; i-- {
+		_ = os.Remove(extraPaths[i])
+	}
+	return nil
+}
+
+var rollbackCopyBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
+
+func copySingleFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	bufPtr := rollbackCopyBufPool.Get().(*[]byte)
+	_, copyErr := io.CopyBuffer(out, in, *bufPtr)
+	rollbackCopyBufPool.Put(bufPtr)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+func copyDir(src, dst string, skipIgnored bool) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -481,8 +744,21 @@ func copyDir(src, dst string) error {
 		if err != nil {
 			return err
 		}
+		if skipIgnored && rel != "." {
+			lower := strings.ToLower(d.Name())
+			if d.IsDir() && scanner.IgnoredDirs[lower] {
+				return filepath.SkipDir
+			}
+			if !d.IsDir() && scanner.IsIgnoredFile(d.Name()) {
+				return nil
+			}
+		}
 		target := filepath.Join(dst, rel)
-		if info.IsDir() {
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if d.IsDir() {
 			return os.MkdirAll(target, info.Mode())
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
@@ -492,41 +768,56 @@ func copyDir(src, dst string) error {
 		if err := os.Link(path, target); err == nil {
 			return nil
 		}
-		in, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer in.Close()
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
-		if err != nil {
-			return err
-		}
-		defer out.Close()
-		_, err = ioCopy(out, in)
-		return err
+		return copySingleFile(path, target, info.Mode())
 	})
 }
 
-func ioCopy(dst *os.File, src *os.File) (int64, error) {
-	buf := make([]byte, 64*1024)
-	var total int64
-	for {
-		n, rErr := src.Read(buf)
-		if n > 0 {
-			wN, wErr := dst.Write(buf[:n])
-			total += int64(wN)
-			if wErr != nil {
-				return total, wErr
-			}
+func cleanNonIgnoredEntries(localPath string) error {
+	entries, err := os.ReadDir(localPath)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		lower := strings.ToLower(entry.Name())
+		if scanner.IgnoredDirs[lower] || (!entry.IsDir() && scanner.IsIgnoredFile(entry.Name())) {
+			continue
 		}
-		if rErr != nil {
-			if rErr == os.ErrClosed || rErr.Error() == "EOF" {
-				break
-			}
-			return total, rErr
+		if err := os.RemoveAll(filepath.Join(localPath, entry.Name())); err != nil {
+			return err
 		}
 	}
-	return total, nil
+	return nil
+}
+
+type syncDeltaEntry struct {
+	file      providers.CloudFile
+	timestamp int64
+}
+
+func selectSyncDeltas(
+	cloudIndex map[string]providers.CloudFile,
+	safeInst string,
+	baseFile providers.CloudFile,
+	lastSyncTime int64,
+	needsBaseExtract bool,
+) []syncDeltaEntry {
+	prefixDelta := fmt.Sprintf("%s%s_", PrefixDelta, safeInst)
+	var deltas []syncDeltaEntry
+	for name, f := range cloudIndex {
+		if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
+			rawTs := strings.TrimSuffix(strings.TrimPrefix(name, prefixDelta), ".zip")
+			orderTs, err := strconv.ParseInt(rawTs, 10, 64)
+			if err != nil {
+				orderTs = f.ModifiedTime.UnixMilli()
+			}
+			serverModMs := f.ModifiedTime.UnixMilli()
+			isOlderThanBase := !baseFile.ModifiedTime.IsZero() && !f.ModifiedTime.IsZero() && f.ModifiedTime.Before(baseFile.ModifiedTime)
+			if (serverModMs > lastSyncTime && !isOlderThanBase) || (needsBaseExtract && !isOlderThanBase) {
+				deltas = append(deltas, syncDeltaEntry{file: f, timestamp: orderTs})
+			}
+		}
+	}
+	return deltas
 }
 
 func hasFlag(args []string, flag string) bool {

@@ -10,5 +10,11 @@ func TestContainsCommand(t *testing.T) {
 	if containsCommand(args, "--sync", "sync") {
 		t.Errorf("did not expect containsCommand to match --sync")
 	}
+	if !containsCommand([]string{"--status"}, "--status", "status") {
+		t.Errorf("expected containsCommand to match --status")
+	}
+	if !containsCommand([]string{"--help"}, "--help", "-h") {
+		t.Errorf("expected containsCommand to match --help")
+	}
 }
 

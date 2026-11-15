@@ -159,4 +159,70 @@ func TestFormatByteSize(t *testing.T) {
 	}
 }
 
+func TestIsValidImageDataURI(t *testing.T) {
+	if !isValidImageDataURI("data:image/png;base64,iVBORw0KGgo=") {
+		t.Errorf("expected valid png base64 data URI")
+	}
+	if !isValidImageDataURI("data:image/svg+xml;charset=UTF-8,%3Csvg%3E%3C/svg%3E") {
+		t.Errorf("expected valid safe svg data URI")
+	}
+	bad := []string{
+		"data:text/html,<script>alert(1)</script>",
+		`data:image/png;base64,AAAA" onerror="alert(1)`,
+		"data:image/svg+xml;charset=utf-8,%3Csvg%3E%3Cscript%3Ealert(1)%3C/script%3E%3C/svg%3E",
+		"data:image/svg+xml;charset=utf-8,%3Csvg onload=alert(1)%3E",
+	}
+	for _, uri := range bad {
+		if isValidImageDataURI(uri) {
+			t.Errorf("expected data URI to be rejected: %s", uri)
+		}
+	}
+}
+
+func TestCleanNonIgnoredEntriesPreservesIgnoredDirs(t *testing.T) {
+	tmp := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmp, "mods"), 0755)
+	_ = os.WriteFile(filepath.Join(tmp, "mods", "old.jar"), []byte("x"), 0644)
+	_ = os.WriteFile(filepath.Join(tmp, "options.txt"), []byte("y"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmp, "versions", "1.20.1"), 0755)
+	_ = os.WriteFile(filepath.Join(tmp, "versions", "1.20.1", "1.20.1.json"), []byte("{}"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmp, "backups"), 0755)
+	_ = os.WriteFile(filepath.Join(tmp, "backups", "save.zip"), []byte("z"), 0644)
+
+	if err := cleanNonIgnoredEntries(tmp); err != nil {
+		t.Fatalf("cleanNonIgnoredEntries failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "mods")); !os.IsNotExist(err) {
+		t.Errorf("expected mods/ to be removed")
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "options.txt")); !os.IsNotExist(err) {
+		t.Errorf("expected options.txt to be removed")
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "versions", "1.20.1", "1.20.1.json")); err != nil {
+		t.Errorf("expected versions/ to be preserved: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "backups", "save.zip")); err != nil {
+		t.Errorf("expected backups/ to be preserved: %v", err)
+	}
+}
+
+func TestPruneOldRollbacks(t *testing.T) {
+	tmp := t.TempDir()
+	for _, ts := range []string{"1000", "2000", "3000", "4000", "5000"} {
+		_ = os.MkdirAll(filepath.Join(tmp, "pack_rollback_"+ts), 0755)
+	}
+	pruneOldRollbacks(tmp, 3, "pack_rollback_")
+
+	for _, kept := range []string{"3000", "4000", "5000"} {
+		if _, err := os.Stat(filepath.Join(tmp, "pack_rollback_"+kept)); err != nil {
+			t.Errorf("expected rollback %s to be kept: %v", kept, err)
+		}
+	}
+	for _, pruned := range []string{"1000", "2000"} {
+		if _, err := os.Stat(filepath.Join(tmp, "pack_rollback_"+pruned)); !os.IsNotExist(err) {
+			t.Errorf("expected rollback %s to be pruned", pruned)
+		}
+	}
+}
+
 

@@ -40,12 +40,33 @@ func main() {
 	if len(args) == 0 {
 		ipc.Send(ipc.BaseMessage{
 			Type:    "ERROR",
-			Message: "Commande manquante. Utiliser : --login, --check, --sync, --upload, --quota, --rollback, --clean, --delete",
+			Message: "Missing command. Available commands: --login, --check, --sync, --upload, --quota, --rollback, --clean, --delete, --status, --help, --version",
 		})
 		return
 	}
 
-	if containsCommand(args, "--login", "login") {
+	if containsCommand(args, "--help", "-h") {
+		ipc.Send(map[string]any{
+			"type":       "HELP",
+			"appVersion": config.AppVersion,
+			"usage":      "Horizon <command> [instance] [flags]",
+			"commands": []map[string]string{
+				{"command": "--login", "description": "Authenticate with the configured cloud provider"},
+				{"command": "--check", "description": "Check for remote cloud updates"},
+				{"command": "--sync", "description": "Synchronize cloud instances to local storage"},
+				{"command": "--upload", "description": "Upload local instance changes to the cloud"},
+				{"command": "--quota", "description": "Retrieve cloud storage quota and per-instance usage"},
+				{"command": "--rollback", "description": "List or restore local rollback snapshots"},
+				{"command": "--clean", "description": "Clean obsolete cloud deltas and temporary artifacts"},
+				{"command": "--delete", "description": "Delete a remote cloud backup"},
+				{"command": "--status", "description": "Display local configuration, lock, and authentication status"},
+				{"command": "--version", "description": "Display the Horizon module version"},
+				{"command": "--help", "description": "Display available CLI commands"},
+			},
+		})
+	} else if containsCommand(args, "--status", "status") {
+		operations.Status(args)
+	} else if containsCommand(args, "--login", "login") {
 		operations.Login(args)
 	} else if containsCommand(args, "--check", "check") {
 		operations.Check(args)
@@ -69,7 +90,7 @@ func main() {
 	} else {
 		ipc.Send(ipc.BaseMessage{
 			Type:    "ERROR",
-			Message: "Commande manquante ou non reconnue. Utiliser : --login, --check, --sync, --upload, --quota, --rollback, --clean, --delete",
+			Message: "Unknown command. Available commands: --login, --check, --sync, --upload, --quota, --rollback, --clean, --delete, --status, --help, --version",
 		})
 	}
 }

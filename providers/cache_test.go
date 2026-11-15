@@ -122,5 +122,32 @@ func TestCloudIndexCacheLifecycle(t *testing.T) {
 	if _, okAfter := GetCachedCloudIndex("google", 45*time.Second); okAfter {
 		t.Errorf("expected cache miss after InvalidateCloudIndexCache")
 	}
+
+	// Cache d'index vide (ne doit pas forcer un re-list inutile)
+	SaveCachedCloudIndex("google", nil)
+	cachedEmpty, okEmpty := GetCachedCloudIndex("google", 45*time.Second)
+	if !okEmpty || len(cachedEmpty) != 0 {
+		t.Errorf("expected empty cache hit, got ok=%v len=%d", okEmpty, len(cachedEmpty))
+	}
+
+	// Cache non nettoyé (cleaned=false, ex. quota avec doublons) ne doit PAS court-circuiter GetCleanedCloudIndex
+	now := time.Now().UTC()
+	dups := []CloudFile{
+		{ID: "old-1", Name: "GensHorizon_Backup_Pack.zip", Size: 100, ModifiedTime: now.Add(-time.Minute)},
+		{ID: "new-2", Name: "GensHorizon_Backup_Pack.zip", Size: 200, ModifiedTime: now},
+	}
+	SaveCloudIndexCache("google", dups, false)
+	if _, okCleaned := GetCleanedCloudIndex("google", 45*time.Second); okCleaned {
+		t.Errorf("expected uncleaned cache to be skipped by GetCleanedCloudIndex")
+	}
+	deduped := DeduplicateCloudFiles(dups)
+	if len(deduped) != 1 || deduped[0].ID != "new-2" {
+		t.Errorf("expected DeduplicateCloudFiles to keep newest ID new-2, got %+v", deduped)
+	}
+	SaveCloudIndexCache("google", dups, true)
+	cleaned, okCleaned := GetCleanedCloudIndex("google", 45*time.Second)
+	if !okCleaned || len(cleaned) != 1 || cleaned[0].ID != "new-2" {
+		t.Errorf("expected cleaned cache with 1 newest entry new-2, got ok=%v files=%+v", okCleaned, cleaned)
+	}
 }
 

@@ -3,8 +3,6 @@ package operations
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -79,13 +77,11 @@ func Check(args []string) {
 
 		var latestDeltaTime int64
 		prefixDelta := PrefixDelta + instName + "_"
-		for name := range cloudIndex {
+		for name, f := range cloudIndex {
 			if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
-				rawTs := strings.TrimSuffix(strings.TrimPrefix(name, prefixDelta), ".zip")
-				if ts, err := strconv.ParseInt(rawTs, 10, 64); err == nil {
-					if ts > latestDeltaTime {
-						latestDeltaTime = ts
-					}
+				ts := f.ModifiedTime.UnixMilli()
+				if ts > latestDeltaTime {
+					latestDeltaTime = ts
 				}
 			}
 		}
@@ -95,15 +91,21 @@ func Check(args []string) {
 			effectiveCloudTime = latestDeltaTime
 		}
 
-		safeKey := paths.GetCanonicalName(instName)
+		safeKey, nameErr := paths.SanitizeInstanceName(paths.GetCanonicalName(instName))
+		if nameErr != nil {
+			continue
+		}
 		var lastSyncTime int64
 		if rawTime, ok := syncInfo[safeKey]; ok {
-			if t, err := time.Parse(time.RFC3339, rawTime); err == nil {
+			if t, err := time.Parse(time.RFC3339Nano, rawTime); err == nil {
 				lastSyncTime = t.UnixMilli()
 			}
 		}
 
-		localPath := filepath.Join(instDir, safeKey)
+		localPath, pathErr := paths.SafeJoinUnder(instDir, safeKey)
+		if pathErr != nil {
+			continue
+		}
 		localExists := false
 		if _, err := os.Stat(localPath); err == nil {
 			localExists = true

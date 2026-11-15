@@ -54,13 +54,18 @@ func Quota(args []string) {
 			cloudFiles = cached
 			return
 		}
-		_ = retry.Do(context.Background(), retryOpts, func() error {
+		listErr := retry.Do(context.Background(), retryOpts, func() error {
 			var lErr error
 			cloudFiles, lErr = p.ListFiles("GensHorizon_")
 			return lErr
 		})
-		if len(cloudFiles) > 0 {
-			providers.SaveCachedCloudIndex(p.Name(), cloudFiles)
+		if listErr == nil {
+			deduped := providers.DeduplicateCloudFiles(cloudFiles)
+			if len(deduped) == len(cloudFiles) {
+				providers.SaveCloudIndexCache(p.Name(), deduped, true)
+			} else {
+				providers.SaveCloudIndexCache(p.Name(), cloudFiles, false)
+			}
 		}
 	}()
 

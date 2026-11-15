@@ -87,3 +87,42 @@ func TestResolveWithFallback(t *testing.T) {
 	}
 }
 
+func TestCleanupOrphanedTempsRemovesPidAndStaleFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	oldTime := time.Now().Add(-15 * time.Minute)
+
+	oldPidTmp := filepath.Join(tempDir, "token.json.tmp.99999")
+	oldStaleLock := filepath.Join(tempDir, "horizon.lock.stale.99999.0")
+	_ = os.WriteFile(oldPidTmp, []byte("junk"), 0644)
+	_ = os.WriteFile(oldStaleLock, []byte("junk"), 0644)
+	_ = os.Chtimes(oldPidTmp, oldTime, oldTime)
+	_ = os.Chtimes(oldStaleLock, oldTime, oldTime)
+
+	CleanupOrphanedTemps(tempDir)
+
+	if _, err := os.Stat(oldPidTmp); !os.IsNotExist(err) {
+		t.Errorf("oldPidTmp should have been deleted")
+	}
+	if _, err := os.Stat(oldStaleLock); !os.IsNotExist(err) {
+		t.Errorf("oldStaleLock should have been deleted")
+	}
+}
+
+func TestLoadSettingsPreservesDefaultsOnPartialJSON(t *testing.T) {
+	tempDir := t.TempDir()
+	_ = os.Setenv("HORIZON_DATA_DIR", tempDir)
+	defer os.Unsetenv("HORIZON_DATA_DIR")
+
+	settingsPath := GetSettingsPath()
+	_ = os.MkdirAll(filepath.Dir(settingsPath), 0755)
+	_ = os.WriteFile(settingsPath, []byte(`{"provider":"dropbox"}`), 0644)
+
+	got := LoadSettings()
+	if got.Provider != "dropbox" {
+		t.Errorf("expected provider dropbox, got %s", got.Provider)
+	}
+	if got.MaxRetries <= 0 || got.DeltaCleanupThreshold <= 0 {
+		t.Errorf("expected defaults to be preserved for omitted fields, got %+v", got)
+	}
+}
+

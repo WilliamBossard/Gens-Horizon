@@ -10,7 +10,7 @@ import (
 
 // GetCloudIndexAndCleanDuplicates récupère la liste des fichiers cloud (avec cache éphémère 45s) et purge automatiquement les doublons obsolètes
 func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix string) (map[string]CloudFile, error) {
-	if cachedFiles, ok := GetCachedCloudIndex(p.Name(), DefaultCloudIndexTTL); ok {
+	if cachedFiles, ok := GetCleanedCloudIndex(p.Name(), DefaultCloudIndexTTL); ok {
 		cloudIndex := make(map[string]CloudFile, len(cachedFiles))
 		for _, f := range cachedFiles {
 			cloudIndex[f.Name] = f
@@ -68,10 +68,13 @@ func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix s
 				defer func() { <-sem }()
 				delOpts := opts
 				delOpts.Label = "deleteDuplicate(" + file.Name + ")"
-				_ = retry.Do(context.Background(), delOpts, func() error {
+				if delErr := retry.Do(context.Background(), delOpts, func() error {
 					return p.DeleteFile(file.ID)
-				})
-				ipc.Logf("%s Doublon purgé du Cloud : %s (%s)", logPrefix, file.Name, file.ID)
+				}); delErr != nil {
+					ipc.Logf("%s Échec purge doublon Cloud %s (%s) : %v", logPrefix, file.Name, file.ID, delErr)
+				} else {
+					ipc.Logf("%s Doublon purgé du Cloud : %s (%s)", logPrefix, file.Name, file.ID)
+				}
 			}(item)
 		}
 		wg.Wait()
@@ -82,7 +85,7 @@ func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix s
 	for _, f := range cloudIndex {
 		cleanList = append(cleanList, f)
 	}
-	SaveCachedCloudIndex(p.Name(), cleanList)
+	SaveCloudIndexCache(p.Name(), cleanList, true)
 
 	return cloudIndex, nil
 }

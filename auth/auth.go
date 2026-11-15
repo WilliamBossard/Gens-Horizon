@@ -3,6 +3,8 @@ package auth
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -20,7 +22,6 @@ import (
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
 	"github.com/WilliamBossard/Gens-Horizon/paths"
-	"golang.org/x/crypto/pbkdf2"
 )
 
 var (
@@ -34,7 +35,12 @@ func getMachineIDFile() string {
 	newPath := filepath.Join(paths.GetAuthDir(), ".machine_id")
 	legacy1 := filepath.Join(paths.GetHorizonDataDir(), ".machine_id")
 	legacy2 := filepath.Join(paths.GetLegacyBinDir(), ".machine_id")
-	return paths.ResolveWithFallback(newPath, legacy1, legacy2)
+	var candidates []string
+	candidates = append(candidates, newPath, legacy1, legacy2)
+	if cfgDir, err := os.UserConfigDir(); err == nil && cfgDir != "" {
+		candidates = append(candidates, filepath.Join(cfgDir, "GensHorizon", ".machine_id"))
+	}
+	return paths.ResolveWithFallback(candidates[0], candidates[1:]...)
 }
 
 func getSaltFile() string {
@@ -52,41 +58,109 @@ func initAuthData() error {
 	dataDir := paths.GetHorizonDataDir()
 	_ = os.MkdirAll(dataDir, 0755)
 
+	_ = os.MkdirAll(paths.GetAuthDir(), 0700)
+
 	mIDFile := getMachineIDFile()
 	sFile := getSaltFile()
 
-	// 1. Initialisation de .machine_id
+	// 1. Initialisation de .machine_id (écriture atomique + 0600)
 	if data, err := os.ReadFile(mIDFile); err == nil && len(strings.TrimSpace(string(data))) > 0 {
 		machineID = strings.TrimSpace(string(data))
 	} else {
 		buf := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, buf); err == nil {
 			machineID = hex.EncodeToString(buf)
-			if err := os.WriteFile(mIDFile, []byte(machineID), 0600); err != nil {
-				ipc.Logf("[Auth] AVERTISSEMENT : Écriture de .machine_id échouée (%v). Utilisation du fallback matériel.", err)
-				machineID = generateHardwareFallbackID()
+			if err := writeAtomicFile(mIDFile, []byte(machineID), 0600); err != nil {
+				savedFallback := false
+				if cfgDir, cErr := os.UserConfigDir(); cErr == nil && cfgDir != "" {
+					secDir := filepath.Join(cfgDir, "GensHorizon")
+					if mkErr := os.MkdirAll(secDir, 0700); mkErr == nil {
+						if wErr := writeAtomicFile(filepath.Join(secDir, ".machine_id"), []byte(machineID), 0600); wErr == nil {
+							savedFallback = true
+						}
+					}
+				}
+				if !savedFallback {
+					ipc.Logf("[Auth] AVERTISSEMENT : Écriture de .machine_id échouée (%v). Utilisation du fallback matériel.", err)
+					machineID = generateHardwareFallbackID()
+				}
 			}
 		} else {
 			machineID = generateHardwareFallbackID()
 		}
 	}
 
-	// 2. Initialisation de salt.key
+	// 2. Initialisation de salt.key (scellement DPAPI Windows ou Trousseau OS macOS/Linux + compatibilité héritée)
+	const dpapiPrefix = "DPAPIv1:"
+	const keyringPrefix = "KEYRINGv1:"
 	if data, err := os.ReadFile(sFile); err == nil && len(data) >= 16 {
-		salt = data
+		if len(data) > len(dpapiPrefix) && string(data[:len(dpapiPrefix)]) == dpapiPrefix {
+			unsealed, err := dpapiUnprotect(data[len(dpapiPrefix):])
+			if err != nil || len(unsealed) < 16 {
+				return fmt.Errorf("impossible de désceller salt.key via DPAPI : %w", err)
+			}
+			salt = unsealed
+		} else if len(data) > len(keyringPrefix) && string(data[:len(keyringPrefix)]) == keyringPrefix {
+			unsealed, err := osKeyringUnprotect(data[len(keyringPrefix):])
+			if err != nil || len(unsealed) < 16 {
+				return fmt.Errorf("impossible de récupérer salt.key depuis le trousseau OS : %w", err)
+			}
+			salt = unsealed
+		} else {
+			salt = data
+			// Migration transparente du salt en clair vers DPAPI (Windows) ou Trousseau OS (macOS/Linux)
+			if dpapiAvailable() {
+				if sealed, err := dpapiProtect(salt); err == nil {
+					payload := append([]byte(dpapiPrefix), sealed...)
+					_ = writeAtomicFile(sFile, payload, 0600)
+				}
+			} else if osKeyringAvailable() {
+				if refID, err := osKeyringProtect(salt); err == nil {
+					payload := append([]byte(keyringPrefix), refID...)
+					_ = writeAtomicFile(sFile, payload, 0600)
+				}
+			}
+		}
 	} else {
 		salt = make([]byte, 16)
 		if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 			return fmt.Errorf("impossible de générer un salt aléatoire : %w", err)
 		}
-		if err := os.WriteFile(sFile, salt, 0600); err != nil {
+		toWrite := salt
+		if dpapiAvailable() {
+			if sealed, err := dpapiProtect(salt); err == nil {
+				toWrite = append([]byte(dpapiPrefix), sealed...)
+			}
+		} else if osKeyringAvailable() {
+			if refID, err := osKeyringProtect(salt); err == nil {
+				toWrite = append([]byte(keyringPrefix), refID...)
+			}
+		} else {
+			ipc.Logf("[auth] AVERTISSEMENT : aucun trousseau OS disponible (DPAPI/keyring), salt.key stocké avec permissions 0600 uniquement.")
+		}
+		if err := writeAtomicFile(sFile, toWrite, 0600); err != nil {
 			return fmt.Errorf("impossible d'écrire le salt de sécurité (salt.key) : %w", err)
 		}
 	}
 
-	// 3. Dérivation PBKDF2 (600 000 itérations, SHA-256, clé 32 octets)
-	secretKey = pbkdf2.Key([]byte(machineID), salt, 600000, 32, sha256.New)
+	// 3. Dérivation rapide HKDF-SHA256 sur machineID 256-bit (le format legacy PBKDF2-600k reste déchiffré paresseusement pour migration)
+	derivedKey, err := hkdf.Key(sha256.New, []byte(machineID), salt, "GensHorizon-Token-v2", 32)
+	if err != nil {
+		return fmt.Errorf("échec dérivation clé HKDF : %w", err)
+	}
+	secretKey = derivedKey
 	return nil
+}
+
+func deriveLegacyPBKDF2Key() ([]byte, error) {
+	authMu.Lock()
+	mID := machineID
+	s := salt
+	authMu.Unlock()
+	if mID == "" || len(s) == 0 {
+		return nil, nil
+	}
+	return pbkdf2.Key(sha256.New, mID, s, 600000, 32)
 }
 
 func generateHardwareFallbackID() string {
@@ -126,8 +200,8 @@ func GetSecretKey() ([]byte, error) {
 	return secretKey, nil
 }
 
-// Encrypt chiffre du texte en AES-256-GCM selon le format standard Horizon:
-// hex(iv) + ":" + hex(authTag) + ":" + hex(ciphertext)
+// Encrypt chiffre du texte en AES-256-GCM selon le format v2 Horizon (HKDF-SHA256):
+// "v2:" + hex(iv) + ":" + hex(authTag) + ":" + hex(ciphertext)
 func Encrypt(text string) (string, error) {
 	key, err := GetSecretKey()
 	if err != nil {
@@ -153,10 +227,43 @@ func Encrypt(text string) (string, error) {
 	ciphertext := sealed[:len(sealed)-tagSize]
 	authTag := sealed[len(sealed)-tagSize:]
 
-	return hex.EncodeToString(iv) + ":" + hex.EncodeToString(authTag) + ":" + hex.EncodeToString(ciphertext), nil
+	return "v2:" + hex.EncodeToString(iv) + ":" + hex.EncodeToString(authTag) + ":" + hex.EncodeToString(ciphertext), nil
 }
 
-// Decrypt déchiffre une chaîne chiffrée en AES-256-GCM ou l'ancien format AES-CBC
+func openGCM(key []byte, ivHex, tagHex, ctHex string) (string, error) {
+	iv, err := hex.DecodeString(ivHex)
+	if err != nil {
+		return "", errors.New("IV hex invalide")
+	}
+	authTag, err := hex.DecodeString(tagHex)
+	if err != nil {
+		return "", errors.New("AuthTag hex invalide")
+	}
+	ciphertext, err := hex.DecodeString(ctHex)
+	if err != nil {
+		return "", errors.New("Ciphertext hex invalide")
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(iv) != gcm.NonceSize() {
+		return "", errors.New("taille IV GCM invalide")
+	}
+	ciphertextWithTag := append(ciphertext, authTag...)
+	plaintext, err := gcm.Open(nil, iv, ciphertextWithTag, nil)
+	if err != nil {
+		return "", fmt.Errorf("échec de déchiffrement GCM (tag invalide ou clé incorrecte) : %w", err)
+	}
+	return string(plaintext), nil
+}
+
+// Decrypt déchiffre une chaîne chiffrée en AES-256-GCM (v2 HKDF ou v1 legacy PBKDF2) ou l'ancien format AES-CBC
 func Decrypt(encryptedText string) (string, bool, error) {
 	key, err := GetSecretKey()
 	if err != nil {
@@ -164,37 +271,24 @@ func Decrypt(encryptedText string) (string, bool, error) {
 	}
 	parts := strings.Split(strings.TrimSpace(encryptedText), ":")
 
-	if len(parts) == 3 {
-		// Format AES-256-GCM (iv:authTag:ciphertext)
-		iv, err := hex.DecodeString(parts[0])
-		if err != nil {
-			return "", false, errors.New("IV hex invalide")
-		}
-		authTag, err := hex.DecodeString(parts[1])
-		if err != nil {
-			return "", false, errors.New("AuthTag hex invalide")
-		}
-		ciphertext, err := hex.DecodeString(parts[2])
-		if err != nil {
-			return "", false, errors.New("Ciphertext hex invalide")
-		}
-
-		block, err := aes.NewCipher(key)
+	if len(parts) == 4 && parts[0] == "v2" {
+		plaintext, err := openGCM(key, parts[1], parts[2], parts[3])
 		if err != nil {
 			return "", false, err
 		}
-		gcm, err := cipher.NewGCM(block)
+		return plaintext, false, nil
+	} else if len(parts) == 3 {
+		// Format legacy AES-256-GCM (PBKDF2-600k ou clé directe de test) -> migration vers v2
+		if legacyKey, lErr := deriveLegacyPBKDF2Key(); lErr == nil && len(legacyKey) > 0 {
+			if plaintext, err := openGCM(legacyKey, parts[0], parts[1], parts[2]); err == nil {
+				return plaintext, true, nil
+			}
+		}
+		plaintext, err := openGCM(key, parts[0], parts[1], parts[2])
 		if err != nil {
 			return "", false, err
 		}
-
-		// Reconstitution : ciphertext + tag
-		ciphertextWithTag := append(ciphertext, authTag...)
-		plaintext, err := gcm.Open(nil, iv, ciphertextWithTag, nil)
-		if err != nil {
-			return "", false, fmt.Errorf("échec de déchiffrement GCM (tag invalide ou clé incorrecte) : %w", err)
-		}
-		return string(plaintext), false, nil
+		return plaintext, true, nil
 	} else if len(parts) >= 2 {
 		// Format legacy AES-256-CBC (iv:ciphertext)
 		iv, err := hex.DecodeString(parts[0])
@@ -206,9 +300,17 @@ func Decrypt(encryptedText string) (string, bool, error) {
 			return "", false, errors.New("Ciphertext CBC hex invalide")
 		}
 
-		block, err := aes.NewCipher(key)
+		cbcKey := key
+		if legacyKey, lErr := deriveLegacyPBKDF2Key(); lErr == nil && len(legacyKey) > 0 {
+			cbcKey = legacyKey
+		}
+
+		block, err := aes.NewCipher(cbcKey)
 		if err != nil {
 			return "", false, err
+		}
+		if len(iv) != aes.BlockSize {
+			return "", false, errors.New("taille IV CBC invalide")
 		}
 		if len(ciphertext)%aes.BlockSize != 0 {
 			return "", false, errors.New("taille de bloc CBC invalide")
@@ -295,11 +397,22 @@ func EncryptToken(filePath string, tokenData any) error {
 	}
 
 	// Écriture atomique via fichier temporaire
-	tmpFile := filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, []byte(encrypted), 0600); err != nil {
+	return writeAtomicFile(filePath, []byte(encrypted), 0600)
+}
+
+func writeAtomicFile(filePath string, data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
 		return err
 	}
-	return os.Rename(tmpFile, filePath)
+	tmpFile := fmt.Sprintf("%s.tmp.%d", filePath, os.Getpid())
+	if err := os.WriteFile(tmpFile, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpFile, filePath); err != nil {
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	return nil
 }
 
 // TokenData représente la structure standard d'un jeton OAuth2

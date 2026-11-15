@@ -3,9 +3,12 @@ package operations
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -13,14 +16,25 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
+	"github.com/WilliamBossard/Gens-Horizon/lock"
 	"github.com/WilliamBossard/Gens-Horizon/paths"
 	"github.com/WilliamBossard/Gens-Horizon/providers"
 )
+
+func createPKCEPair() (verifier string, challenge string) {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	verifier = base64.RawURLEncoding.EncodeToString(b)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge
+}
 
 func createOAuthState() string {
 	b := make([]byte, 16)
@@ -29,6 +43,10 @@ func createOAuthState() string {
 }
 
 func openBrowser(targetURL string) error {
+	parsed, err := url.Parse(targetURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return fmt.Errorf("URL OAuth refusée (HTTPS requis) : %s", targetURL)
+	}
 	switch runtime.GOOS {
 	case "windows":
 		return exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL).Start()
@@ -49,6 +67,7 @@ func Login(args []string) {
 		return
 	}
 
+	codeVerifier, codeChallenge := createPKCEPair()
 	state := createOAuthState()
 	u, err := url.Parse(cfg.RedirectURI)
 	if err != nil {
@@ -66,28 +85,33 @@ func Login(args []string) {
 		ipc.SendError("PORT_IN_USE", fmt.Sprintf("Le port local %s est déjà utilisé : %v", port, err), "")
 		return
 	}
+	defer listener.Close()
 
 	authURL := ""
 	switch providerName {
 	case "google":
 		params := url.Values{
-			"client_id":             {cfg.ClientID},
-			"redirect_uri":          {cfg.RedirectURI},
-			"response_type":         {"code"},
-			"scope":                 {"https://www.googleapis.com/auth/drive.appdata"},
-			"access_type":           {"offline"},
-			"prompt":                {"consent"},
-			"state":                 {state},
+			"client_id":              {cfg.ClientID},
+			"redirect_uri":           {cfg.RedirectURI},
+			"response_type":          {"code"},
+			"scope":                  {"https://www.googleapis.com/auth/drive.appdata"},
+			"access_type":            {"offline"},
+			"prompt":                 {"consent"},
+			"state":                  {state},
 			"include_granted_scopes": {"true"},
+			"code_challenge":         {codeChallenge},
+			"code_challenge_method":  {"S256"},
 		}
 		authURL = cfg.AuthURI + "?" + params.Encode()
 	case "dropbox":
 		params := url.Values{
-			"client_id":          {cfg.ClientID},
-			"redirect_uri":       {cfg.RedirectURI},
-			"response_type":      {"code"},
-			"token_access_type":  {"offline"},
-			"state":              {state},
+			"client_id":             {cfg.ClientID},
+			"redirect_uri":          {cfg.RedirectURI},
+			"response_type":         {"code"},
+			"token_access_type":     {"offline"},
+			"state":                 {state},
+			"code_challenge":        {codeChallenge},
+			"code_challenge_method": {"S256"},
 		}
 		authURL = cfg.AuthURI + "?" + params.Encode()
 	case "onedrive":
@@ -96,66 +120,116 @@ func Login(args []string) {
 			scope = "Files.ReadWrite offline_access User.Read"
 		}
 		params := url.Values{
-			"client_id":     {cfg.ClientID},
-			"redirect_uri":  {cfg.RedirectURI},
-			"response_type": {"code"},
-			"scope":         {scope},
-			"state":         {state},
+			"client_id":             {cfg.ClientID},
+			"redirect_uri":          {cfg.RedirectURI},
+			"response_type":         {"code"},
+			"scope":                 {scope},
+			"state":                 {state},
+			"code_challenge":        {codeChallenge},
+			"code_challenge_method": {"S256"},
 		}
 		authURL = cfg.AuthURI + "?" + params.Encode()
 	}
 
+	parsedAuth, err := url.Parse(cfg.AuthURI)
+	if err != nil || parsedAuth.Scheme != "https" || parsedAuth.Host == "" {
+		ipc.SendError("INVALID_AUTH_URI", "AuthURI OAuth doit utiliser HTTPS.", "")
+		return
+	}
+	parsedToken, err := url.Parse(cfg.TokenURI)
+	if err != nil || parsedToken.Scheme != "https" || parsedToken.Host == "" {
+		ipc.SendError("INVALID_TOKEN_URI", "TokenURI OAuth doit utiliser HTTPS.", "")
+		return
+	}
+
 	ipc.Logf("[login] Ouverture du navigateur vers : %s", authURL)
-	_ = openBrowser(authURL)
+	if bErr := openBrowser(authURL); bErr != nil {
+		_ = listener.Close()
+		ipc.SendError("BROWSER_ERROR", bErr.Error(), "")
+		return
+	}
 
-	server := &http.Server{}
+	mux := http.NewServeMux()
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	done := make(chan struct{})
+	var closeDoneOnce sync.Once
+	signalDone := func() {
+		closeDoneOnce.Do(func() {
+			close(done)
+		})
+	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/favicon.ico" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		q := r.URL.Query()
 		if q.Get("error") != "" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusForbidden)
-			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Connexion annulée</h2><p>%s</p></body></html>", q.Get("error"))
+			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Connexion annulée</h2><p>%s</p></body></html>", html.EscapeString(q.Get("error")))
 			ipc.SendError("AUTH_CANCELLED", "La demande de connexion a été refusée ou annulée.", "")
-			close(done)
+			signalDone()
 			return
 		}
 
 		retState := q.Get("state")
 		if retState != state {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Erreur CSRF</h2><p>Le jeton de session est invalide.</p></body></html>")
-			ipc.SendError("CSRF_ERROR", "Jeton de sécurité state invalide.", "")
-			close(done)
+			ipc.Logf("[login] Requête OAuth ignorée (state invalide)")
 			return
 		}
 
 		code := q.Get("code")
 		if code == "" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(w, "<html><body>Code OAuth manquant</body></html>")
-			close(done)
+			signalDone()
 			return
 		}
 
 		// Échange du code d'autorisation contre des jetons
-		tokenData, err := exchangeCodeForToken(providerName, cfg, code)
+		tokenData, err := exchangeCodeForToken(providerName, cfg, code, codeVerifier)
 		if err != nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Échec de la connexion</h2><p>%v</p></body></html>", err)
+			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Échec de la connexion</h2><p>%s</p></body></html>", html.EscapeString(err.Error()))
 			ipc.SendError("EXCHANGE_ERROR", err.Error(), "")
-			close(done)
+			signalDone()
 			return
+		}
+
+		lockAcquired := false
+		for i := 0; i < 10; i++ {
+			if lock.AcquireLock() {
+				lockAcquired = true
+				break
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+		if lockAcquired {
+			defer lock.ReleaseLock()
+		} else {
+			ipc.Logf("[login] AVERTISSEMENT : horizon.lock occupé lors de la sauvegarde du token, écriture atomique directe.")
 		}
 
 		tokenPath := providers.GetTokenPath(providerName)
 		if err := auth.EncryptToken(tokenPath, tokenData); err != nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, "<html><body>Erreur sauvegarde token : %v</body></html>", err)
+			fmt.Fprintf(w, "<html><body>Erreur sauvegarde token : %s</body></html>", html.EscapeString(err.Error()))
 			ipc.SendError("TOKEN_SAVE_ERROR", err.Error(), "")
-			close(done)
+			signalDone()
 			return
 		}
+		providers.InvalidateCloudIndexCache()
 
 		// Sauvegarde du provider sélectionné dans horizon_settings.json
 		settings.Provider = providerName
@@ -172,7 +246,7 @@ func Login(args []string) {
 			Message:   "Authentication successful! Token saved.",
 			ErrorCode: "AUTH_SUCCESS",
 		})
-		close(done)
+		signalDone()
 	})
 
 	go func() {
@@ -192,8 +266,9 @@ func Login(args []string) {
 	}
 }
 
-func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code string) (auth.TokenData, error) {
+func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code string, codeVerifier string) (auth.TokenData, error) {
 	var tokenData auth.TokenData
+	httpClient := &http.Client{Timeout: 30 * time.Second}
 
 	switch providerName {
 	case "google":
@@ -204,7 +279,10 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 			"redirect_uri":  {cfg.RedirectURI},
 			"grant_type":    {"authorization_code"},
 		}
-		resp, err := http.PostForm(cfg.TokenURI, form)
+		if codeVerifier != "" {
+			form.Set("code_verifier", codeVerifier)
+		}
+		resp, err := httpClient.PostForm(cfg.TokenURI, form)
 		if err != nil {
 			return tokenData, err
 		}
@@ -237,7 +315,10 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 			"redirect_uri":  {cfg.RedirectURI},
 			"grant_type":    {"authorization_code"},
 		}
-		resp, err := http.PostForm(cfg.TokenURI, form)
+		if codeVerifier != "" {
+			form.Set("code_verifier", codeVerifier)
+		}
+		resp, err := httpClient.PostForm(cfg.TokenURI, form)
 		if err != nil {
 			return tokenData, err
 		}
@@ -269,10 +350,13 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 			"redirect_uri": {cfg.RedirectURI},
 			"grant_type":   {"authorization_code"},
 		}
+		if codeVerifier != "" {
+			form.Set("code_verifier", codeVerifier)
+		}
 		if cfg.ClientSecret != "" {
 			form.Set("client_secret", cfg.ClientSecret)
 		}
-		resp, err := http.PostForm(cfg.TokenURI, form)
+		resp, err := httpClient.PostForm(cfg.TokenURI, form)
 		if err != nil {
 			return tokenData, err
 		}
@@ -304,9 +388,16 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 }
 
 func osWriteFileAtomic(filePath string, data []byte, perm uint32) error {
-	tmp := filePath + ".tmp"
+	var rBytes [4]byte
+	_, _ = rand.Read(rBytes[:])
+	tmp := fmt.Sprintf("%s.tmp.%d.%s", filePath, os.Getpid(), hex.EncodeToString(rBytes[:]))
 	if err := os.WriteFile(tmp, data, os.FileMode(perm)); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, filePath)
+	if err := os.Rename(tmp, filePath); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

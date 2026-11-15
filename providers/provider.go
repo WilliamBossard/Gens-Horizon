@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,11 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
 	"github.com/WilliamBossard/Gens-Horizon/paths"
+)
+
+var (
+	ErrNotFound         = errors.New("cloud file not found")
+	ErrListingTruncated = errors.New("cloud file listing truncated")
 )
 
 type CloudFile struct {
@@ -28,6 +34,16 @@ type Provider interface {
 	UploadJSON(name string, data any, existingID string) (string, error)
 	DeleteFile(fileID string) error
 	GetQuota() (usedBytes int64, totalBytes int64, err error)
+}
+
+// FileRenamer est une interface optionnelle pour les providers supportant la promotion atomique de fichiers staging.
+type FileRenamer interface {
+	RenameFile(fileID string, newName string, existingTargetID string) (string, error)
+}
+
+// FileTimestampFetcher est une interface optionnelle pour récupérer le timestamp serveur d'un fichier spécifique sans lister tout le Cloud.
+type FileTimestampFetcher interface {
+	GetFileModifiedTime(fileID string) (time.Time, error)
 }
 
 func GetTokenPath(providerName string) string {

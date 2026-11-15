@@ -12,6 +12,9 @@ const (
 )
 
 func isProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
 		return false

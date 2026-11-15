@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,7 +56,18 @@ func Rollback(args []string) {
 		return
 	}
 
-	safeInst := paths.GetCanonicalName(targetInst)
+	safeInst, nameErr := paths.SanitizeInstanceName(paths.GetCanonicalName(targetInst))
+	if nameErr != nil {
+		ipc.SendError("INVALID_INSTANCE_NAME", nameErr.Error(), targetInst)
+		return
+	}
+
+	if !lock.AcquireLock() {
+		ipc.SendError("ERR_ALREADY_RUNNING", "ERR_ALREADY_RUNNING", targetInst)
+		return
+	}
+	defer lock.ReleaseLock()
+
 	entries, err := os.ReadDir(instDir)
 	if err != nil {
 		ipc.SendError("ROLLBACK_ERROR", err.Error(), targetInst)
@@ -89,20 +101,19 @@ func Rollback(args []string) {
 		return
 	}
 
-	if !lock.AcquireLock() {
-		ipc.SendError("ERR_ALREADY_RUNNING", "ERR_ALREADY_RUNNING", targetInst)
+	targetPath, pathErr := paths.SafeJoinUnder(instDir, safeInst)
+	if pathErr != nil {
+		ipc.SendError("ROLLBACK_ERROR", pathErr.Error(), targetInst)
 		return
 	}
-	defer lock.ReleaseLock()
-
-	targetPath := filepath.Join(instDir, safeInst)
 	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-		targetPath = filepath.Join(instDir, targetInst)
+		if alt, altErr := paths.SafeJoinUnder(instDir, targetInst); altErr == nil {
+			targetPath = alt
+		}
 	}
 
-	// Restauration : vider le dossier actuel et recopier depuis le rollback
-	_ = os.RemoveAll(targetPath)
-	if err := copyDir(bestFolder, targetPath); err != nil {
+	// Restauration atomique via dossier temporaire pour éviter toute perte si la copie échoue
+	if err := swapRestoreSnapshot(bestFolder, targetPath); err != nil {
 		ipc.SendError("RESTORE_FAILED", fmt.Sprintf("Échec de restauration du rollback : %v", err), targetInst)
 		return
 	}
@@ -114,11 +125,61 @@ func Rollback(args []string) {
 		_ = osWriteFileAtomic(localManifestFile, b, 0644)
 	}
 
+	pruneOldRollbacks(instDir, 3, prefix1, prefix2)
+
 	ipc.Send(ipc.BaseMessage{
 		Type:      "SUCCESS",
 		Instance:  targetInst,
 		Message:   "Rollback completed successfully.",
 		ErrorCode: "ROLLBACK_SUCCESS",
 	})
+}
+
+// pruneOldRollbacks conserve au maximum maxKeep snapshots récents pour les préfixes donnés.
+func pruneOldRollbacks(instDir string, maxKeep int, prefixes ...string) {
+	if maxKeep <= 0 {
+		return
+	}
+	entries, err := os.ReadDir(instDir)
+	if err != nil {
+		return
+	}
+	type rbEntry struct {
+		path string
+		ts   int64
+	}
+	var list []rbEntry
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		matched := false
+		for _, p := range prefixes {
+			if p != "" && strings.HasPrefix(name, p) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		idx := strings.LastIndex(name, "_rollback_")
+		if idx == -1 {
+			continue
+		}
+		if ts, err := strconv.ParseInt(name[idx+len("_rollback_"):], 10, 64); err == nil {
+			list = append(list, rbEntry{path: filepath.Join(instDir, name), ts: ts})
+		}
+	}
+	if len(list) <= maxKeep {
+		return
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].ts > list[j].ts
+	})
+	for _, old := range list[maxKeep:] {
+		_ = os.RemoveAll(old.path)
+	}
 }
 

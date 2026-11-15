@@ -66,7 +66,7 @@ func (g *GoogleProvider) refreshToken() error {
 		"grant_type":    {"refresh_token"},
 	}
 
-	resp, err := http.PostForm("https://oauth2.googleapis.com/token", form)
+	resp, err := g.client.PostForm("https://oauth2.googleapis.com/token", form)
 	if err != nil {
 		return fmt.Errorf("erreur requête refresh token : %w", err)
 	}
@@ -99,6 +99,19 @@ func (g *GoogleProvider) refreshToken() error {
 	return nil
 }
 
+func (g *GoogleProvider) refreshTokenIfStale(failedToken string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.tokenData.AccessToken != "" && g.tokenData.AccessToken != failedToken {
+		return g.tokenData.AccessToken, nil
+	}
+	if err := g.refreshToken(); err != nil {
+		return "", err
+	}
+	return g.tokenData.AccessToken, nil
+}
+
 func (g *GoogleProvider) doRequest(req *http.Request) (*http.Response, error) {
 	tok, err := g.getAccessToken()
 	if err != nil {
@@ -113,13 +126,16 @@ func (g *GoogleProvider) doRequest(req *http.Request) (*http.Response, error) {
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		_ = resp.Body.Close()
-		g.mu.Lock()
-		_ = g.refreshToken()
-		g.mu.Unlock()
-
-		newTok, err := g.getAccessToken()
+		newTok, err := g.refreshTokenIfStale(tok)
 		if err != nil {
 			return nil, err
+		}
+		if req.GetBody != nil {
+			newBody, bErr := req.GetBody()
+			if bErr != nil {
+				return nil, bErr
+			}
+			req.Body = newBody
 		}
 		req.Header.Set("Authorization", "Bearer "+newTok)
 		return g.client.Do(req)
@@ -131,7 +147,7 @@ func (g *GoogleProvider) doRequest(req *http.Request) (*http.Response, error) {
 func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 	var files []CloudFile
 	var pageToken string
-	maxPages := 20
+	maxPages := 100
 
 	for page := 0; page < maxPages; page++ {
 		params := url.Values{
@@ -196,20 +212,40 @@ func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 		}
 	}
 
+	if pageToken != "" {
+		return nil, fmt.Errorf("%w : google listFiles exceeded %d pages", ErrListingTruncated, maxPages)
+	}
+
 	return files, nil
 }
 
 func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
+	escapedID := url.PathEscape(fileID)
 	buildURL := func(confirm bool) string {
-		u := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?alt=media", fileID)
+		u := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?alt=media", escapedID)
 		if confirm {
 			u += "&acknowledgeAbuse=true"
 		}
 		return u
 	}
 
-	dlClient := NewPooledClient(10 * time.Minute)
+	dlClient := streamingClient(g.client)
+	var confirmAbuseMu sync.Mutex
 	confirmAbuse := false
+
+	buildRangeReq := func(token string, confirm bool, start, end int64) (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodGet, buildURL(confirm), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		if end >= start {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+		} else if start > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+		}
+		return req, nil
+	}
 
 	return downloadSmart(destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
 		tok, err := g.getAccessToken()
@@ -217,15 +253,13 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 			return nil, err
 		}
 
-		req, err := http.NewRequest(http.MethodGet, buildURL(confirmAbuse), nil)
+		confirmAbuseMu.Lock()
+		useConfirm := confirmAbuse
+		confirmAbuseMu.Unlock()
+
+		req, err := buildRangeReq(tok, useConfirm, start, end)
 		if err != nil {
 			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+tok)
-		if end >= start {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-		} else if start > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
 		}
 
 		resp, err := dlClient.Do(req)
@@ -235,16 +269,14 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 
 		if resp.StatusCode == http.StatusUnauthorized {
 			_ = resp.Body.Close()
-			g.mu.Lock()
-			_ = g.refreshToken()
-			g.mu.Unlock()
-			newTok, _ := g.getAccessToken()
-			req, _ = http.NewRequest(http.MethodGet, buildURL(confirmAbuse), nil)
-			req.Header.Set("Authorization", "Bearer "+newTok)
-			if end >= start {
-				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-			} else if start > 0 {
-				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+			newTok, rErr := g.refreshTokenIfStale(tok)
+			if rErr != nil {
+				return nil, rErr
+			}
+			tok = newTok
+			req, err = buildRangeReq(tok, useConfirm, start, end)
+			if err != nil {
+				return nil, err
 			}
 			resp, err = dlClient.Do(req)
 			if err != nil {
@@ -255,13 +287,13 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 		contentType := resp.Header.Get("Content-Type")
 		if resp.StatusCode == http.StatusOK && (strings.Contains(contentType, "text/html") || (strings.Contains(contentType, "application/json") && !strings.Contains(contentType, "octet"))) {
 			_ = resp.Body.Close()
+			confirmAbuseMu.Lock()
 			confirmAbuse = true
-			req, _ = http.NewRequest(http.MethodGet, buildURL(true), nil)
-			req.Header.Set("Authorization", "Bearer "+tok)
-			if end >= start {
-				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-			} else if start > 0 {
-				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+			confirmAbuseMu.Unlock()
+
+			req, err = buildRangeReq(tok, true, start, end)
+			if err != nil {
+				return nil, err
 			}
 			resp, err = dlClient.Do(req)
 			if err != nil {
@@ -274,7 +306,7 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 }
 
 func (g *GoogleProvider) DownloadJSON(fileID string, target any) error {
-	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?alt=media", fileID)
+	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?alt=media", url.PathEscape(fileID))
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		return err
@@ -305,7 +337,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 	initURL := "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,modifiedTime"
 	if existingID != "" {
 		initMethod = "PATCH"
-		initURL = fmt.Sprintf("https://www.googleapis.com/upload/drive/v3/files/%s?uploadType=resumable&fields=id,name,size,modifiedTime", existingID)
+		initURL = fmt.Sprintf("https://www.googleapis.com/upload/drive/v3/files/%s?uploadType=resumable&fields=id,name,size,modifiedTime", url.PathEscape(existingID))
 	}
 
 	metadata := map[string]any{"name": name}
@@ -339,7 +371,11 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 
 	// Validation de sécurité de l'URL d'upload
 	parsedU, err := url.Parse(uploadURL)
-	if err != nil || (!strings.HasSuffix(parsedU.Hostname(), "googleapis.com") && parsedU.Hostname() != "googleapis.com") {
+	host := ""
+	if parsedU != nil {
+		host = strings.ToLower(parsedU.Hostname())
+	}
+	if err != nil || parsedU.Scheme != "https" || (!strings.HasSuffix(host, ".googleapis.com") && host != "googleapis.com") {
 		return "", fmt.Errorf("[google] sécurité : URL d'upload suspecte %s", uploadURL)
 	}
 
@@ -352,7 +388,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 	}
 	defer file.Close()
 
-	uploadClient := NewPooledClient(5 * time.Minute)
+	uploadClient := clientWithTimeout(g.client, 5*time.Minute)
 
 	if fileSize == 0 {
 		putReq, err := http.NewRequest(http.MethodPut, uploadURL, http.NoBody)
@@ -440,14 +476,9 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 				OnProgress: onProgress,
 			}
 
-			putReq, err := http.NewRequest(http.MethodPut, uploadURL, pr)
-			if err != nil {
-				return "", err
-			}
-			putReq.ContentLength = chunkLen
-			putReq.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+chunkLen-1, fileSize))
-
-			putResp, err := uploadClient.Do(putReq)
+			putResp, cleanup, err := doUploadWithIdleTimeout(uploadClient, http.MethodPut, uploadURL, pr, chunkLen, func(r *http.Request) {
+				r.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+chunkLen-1, fileSize))
+			})
 			if err != nil {
 				lastErr = err
 				continue
@@ -455,6 +486,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 
 			respBytes, _ := io.ReadAll(putResp.Body)
 			_ = putResp.Body.Close()
+			cleanup()
 
 			// 308 Resume Incomplete : chunk validé par Google Drive
 			if putResp.StatusCode == http.StatusPermanentRedirect {
@@ -554,7 +586,7 @@ func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (s
 	reqURL := "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
 	if existingID != "" {
 		method = "PATCH"
-		reqURL = fmt.Sprintf("https://www.googleapis.com/upload/drive/v3/files/%s?uploadType=multipart", existingID)
+		reqURL = fmt.Sprintf("https://www.googleapis.com/upload/drive/v3/files/%s?uploadType=multipart", url.PathEscape(existingID))
 	}
 
 	metadata := map[string]any{"name": name}
@@ -611,7 +643,7 @@ func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (s
 }
 
 func (g *GoogleProvider) DeleteFile(fileID string) error {
-	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s", fileID)
+	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s", url.PathEscape(fileID))
 	req, err := http.NewRequest(http.MethodDelete, reqURL, nil)
 	if err != nil {
 		return err
@@ -622,11 +654,58 @@ func (g *GoogleProvider) DeleteFile(fileID string) error {
 	}
 	_ = resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("[google] deleteFile HTTP %d", resp.StatusCode)
 	}
 	InvalidateCloudIndexCache()
 	return nil
+}
+
+// RenameFile renomme un fichier staging sur Google Drive puis supprime l'éventuelle ancienne version cible.
+func (g *GoogleProvider) RenameFile(fileID string, newName string, existingTargetID string) (string, error) {
+	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?fields=id,name", url.PathEscape(fileID))
+	metaBytes, _ := json.Marshal(map[string]any{"name": newName})
+
+	req, err := http.NewRequest(http.MethodPatch, reqURL, bytes.NewReader(metaBytes))
+	if err != nil {
+		return "", err
+	}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(metaBytes)), nil
+	}
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+
+	resp, err := g.doRequest(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("[google] renameFile HTTP %d : %s", resp.StatusCode, string(respBytes))
+	}
+
+	var res struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(respBytes, &res)
+	promotedID := res.ID
+	if promotedID == "" {
+		promotedID = fileID
+	}
+
+	if existingTargetID != "" && existingTargetID != promotedID {
+		if delErr := g.DeleteFile(existingTargetID); delErr != nil && !errors.Is(delErr, ErrNotFound) {
+			ipc.Logf("[google] avertissement : suppression ancienne cible %s après promotion échouée : %v", existingTargetID, delErr)
+		}
+	}
+
+	InvalidateCloudIndexCache()
+	return promotedID, nil
 }
 
 func (g *GoogleProvider) GetQuota() (int64, int64, error) {
@@ -659,5 +738,38 @@ func (g *GoogleProvider) GetQuota() (int64, int64, error) {
 	used, _ := strconv.ParseInt(res.StorageQuota.Usage, 10, 64)
 	total, _ := strconv.ParseInt(res.StorageQuota.Limit, 10, 64)
 	return used, total, nil
+}
+
+// GetFileModifiedTime récupère le timestamp serveur d'un fichier Google Drive par son ID.
+func (g *GoogleProvider) GetFileModifiedTime(fileID string) (time.Time, error) {
+	if fileID == "" {
+		return time.Time{}, fmt.Errorf("[google] getFileModifiedTime: fileID vide")
+	}
+	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?fields=modifiedTime", url.PathEscape(fileID))
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return time.Time{}, err
+	}
+	resp, err := g.doRequest(req)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return time.Time{}, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return time.Time{}, fmt.Errorf("[google] getFileModifiedTime HTTP %d : %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var res struct {
+		ModifiedTime string `json:"modifiedTime"`
+	}
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return time.Time{}, err
+	}
+	return time.Parse(time.RFC3339, res.ModifiedTime)
 }
 

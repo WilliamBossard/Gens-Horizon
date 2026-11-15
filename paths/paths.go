@@ -125,7 +125,8 @@ func GetCacheDir() string {
 	return dir
 }
 
-// ResolveWithFallback vérifie si newPath existe. Si non, teste les legacyPaths et migre automatiquement.
+// ResolveWithFallback vérifie si newPath existe. Si non, teste les legacyPaths et migre automatiquement
+// en préservant les permissions d'origine du fichier source.
 func ResolveWithFallback(newPath string, legacyPaths ...string) string {
 	if _, err := os.Stat(newPath); err == nil {
 		return newPath
@@ -134,13 +135,64 @@ func ResolveWithFallback(newPath string, legacyPaths ...string) string {
 		if lp == "" || lp == newPath {
 			continue
 		}
+		info, statErr := os.Stat(lp)
+		if statErr != nil {
+			continue
+		}
 		if data, err := os.ReadFile(lp); err == nil {
 			_ = os.MkdirAll(filepath.Dir(newPath), 0755)
-			_ = os.WriteFile(newPath, data, 0644)
-			return newPath
+			perm := info.Mode().Perm()
+			if perm == 0 {
+				perm = 0600
+			}
+			tmp := fmt.Sprintf("%s.tmp.%d", newPath, time.Now().UnixNano())
+			if err := os.WriteFile(tmp, data, perm); err == nil {
+				if err := os.Rename(tmp, newPath); err == nil {
+					return newPath
+				}
+				_ = os.Remove(tmp)
+			}
 		}
 	}
 	return newPath
+}
+
+// SanitizeInstanceName valide qu'un nom d'instance est un segment unique sûr (pas de traversal ni de séparateurs).
+func SanitizeInstanceName(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || trimmed == "." || trimmed == ".." {
+		return "", fmt.Errorf("nom d'instance invalide")
+	}
+	if strings.ContainsAny(trimmed, "/\\\x00") || strings.Contains(trimmed, "..") {
+		return "", fmt.Errorf("nom d'instance contient des caractères interdits : %q", name)
+	}
+	return trimmed, nil
+}
+
+// SafeJoinUnder joint baseDir et relPath en garantissant que le résultat reste strictement sous baseDir.
+func SafeJoinUnder(baseDir, relPath string) (string, error) {
+	if relPath == "" {
+		return "", fmt.Errorf("chemin relatif vide")
+	}
+	absBase, err := filepath.Abs(filepath.Clean(baseDir))
+	if err != nil {
+		return "", err
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("chemin absolu interdit : %q", relPath)
+	}
+	absTarget, err := filepath.Abs(filepath.Join(absBase, filepath.FromSlash(relPath)))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absBase, absTarget)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("évasion de répertoire détectée : %q", relPath)
+	}
+	return absTarget, nil
 }
 
 // GetSettingsPath renvoie le chemin vers horizon_settings.json avec rétrocompatibilité
@@ -189,7 +241,7 @@ func LoadSettings() config.Settings {
 		return defaults
 	}
 
-	var loaded config.Settings
+	loaded := config.DefaultSettings()
 	if err := json.Unmarshal(data, &loaded); err != nil {
 		return defaults
 	}
@@ -225,8 +277,9 @@ func CleanupOrphanedTemps(dataDir string) {
 				continue
 			}
 			name := entry.Name()
-			isHorizonTemp := strings.HasPrefix(name, "horizon_") && strings.HasSuffix(name, ".zip")
-			isOldTemp := strings.HasPrefix(name, "temp_") || strings.HasSuffix(name, ".tmp")
+			lower := strings.ToLower(name)
+			isHorizonTemp := strings.HasPrefix(lower, "horizon_") && strings.HasSuffix(lower, ".zip")
+			isOldTemp := strings.HasPrefix(lower, "temp_") || strings.HasSuffix(lower, ".tmp") || strings.Contains(lower, ".tmp.") || strings.Contains(lower, ".stale.")
 
 			if d == os.TempDir() {
 				if !isHorizonTemp {
@@ -281,4 +334,3 @@ func GetCanonicalName(name string) string {
 	trimmed := strings.TrimSpace(name)
 	return trimmed
 }
-

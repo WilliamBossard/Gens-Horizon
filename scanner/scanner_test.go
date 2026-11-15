@@ -137,3 +137,84 @@ func TestUnmarshalNodeManifestFloatMtime(t *testing.T) {
 	}
 }
 
+func TestGenerateManifestSkipsSymlinks(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "horizon_scanner_symlink_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	outsideDir, err := os.MkdirTemp("", "horizon_scanner_outside_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp outside failed: %v", err)
+	}
+	defer os.RemoveAll(outsideDir)
+
+	secretFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("outside-secret"), 0644); err != nil {
+		t.Fatalf("WriteFile secret failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "normal.txt"), []byte("ok"), 0644); err != nil {
+		t.Fatalf("WriteFile normal failed: %v", err)
+	}
+
+	linkFile := filepath.Join(tmpDir, "linked_secret.txt")
+	if err := os.Symlink(secretFile, linkFile); err != nil {
+		t.Skipf("os.Symlink non autorisé dans cet environnement : %v", err)
+	}
+	linkDir := filepath.Join(tmpDir, "linked_dir")
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Skipf("os.Symlink dir non autorisé : %v", err)
+	}
+
+	m, err := GenerateManifest(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("GenerateManifest failed: %v", err)
+	}
+
+	if _, ok := m["normal.txt"]; !ok {
+		t.Errorf("expected normal.txt in manifest")
+	}
+	if _, ok := m["linked_secret.txt"]; ok {
+		t.Errorf("symlink file linked_secret.txt should be skipped by scanner")
+	}
+	if _, ok := m["linked_dir/secret.txt"]; ok {
+		t.Errorf("symlink dir linked_dir/secret.txt should be skipped by scanner")
+	}
+}
+
+func TestGenerateManifestVerifyAllRecomputesHashes(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "config.txt")
+	if err := os.WriteFile(filePath, []byte("abc"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleManifest := Manifest{
+		"config.txt": FileEntry{
+			Hash:  "stale-wrong-hash",
+			Mtime: FlexibleInt64(info.ModTime().UnixMilli()),
+			Size:  FlexibleInt64(info.Size()),
+		},
+	}
+
+	fastM, err := GenerateManifestWithOptions(tmpDir, staleManifest, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fastM["config.txt"].Hash != "stale-wrong-hash" {
+		t.Fatalf("expected fast mode to reuse cached entry, got %q", fastM["config.txt"].Hash)
+	}
+
+	verifiedM, err := GenerateManifestWithOptions(tmpDir, staleManifest, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifiedM["config.txt"].Hash == "stale-wrong-hash" || verifiedM["config.txt"].Hash == "" {
+		t.Fatalf("expected verifyAll=true to recompute real SHA-256 hash, got %q", verifiedM["config.txt"].Hash)
+	}
+}
+

@@ -57,102 +57,7 @@ func Clean(args []string) {
 		return
 	}
 
-	// 1. Répertoire des bases existantes et horodatages
-	baseFiles := make(map[string]providers.CloudFile) // instanceSlug -> CloudFile
-	for name, file := range cloudIndex {
-		if strings.HasPrefix(name, PrefixBackup) && strings.HasSuffix(name, ".zip") {
-			slug := strings.TrimSuffix(strings.TrimPrefix(name, PrefixBackup), ".zip")
-			baseFiles[slug] = file
-		}
-	}
-
-	// 2. Détection des éléments à nettoyer
-	var itemsToClean []CleanItem
-	var totalFreed int64
-
-	// Instances ayant au moins un fichier valide (base ou delta valide)
-	activeSlugs := make(map[string]bool)
-	for slug := range baseFiles {
-		activeSlugs[slug] = true
-	}
-
-	for name, file := range cloudIndex {
-		// A. Deltas
-		if strings.HasPrefix(name, PrefixDelta) && strings.HasSuffix(name, ".zip") {
-			stripped := strings.TrimSuffix(strings.TrimPrefix(name, PrefixDelta), ".zip")
-			idx := strings.LastIndex(stripped, "_")
-			if idx > 0 {
-				slug := stripped[:idx]
-				rawTs := stripped[idx+1:]
-				deltaTs, parseErr := strconv.ParseInt(rawTs, 10, 64)
-
-				base, hasBase := baseFiles[slug]
-				if !hasBase {
-					// Delta sans archive de base : delta orphelin
-					itemsToClean = append(itemsToClean, CleanItem{
-						ID:     file.ID,
-						Name:   file.Name,
-						Size:   file.Size,
-						Reason: "Delta orphelin (aucune archive de base correspondante)",
-					})
-					totalFreed += file.Size
-				} else if parseErr == nil {
-					// Si le delta a un timestamp antérieur à la base, il a déjà été consolidé
-					baseTs := base.ModifiedTime.UnixMilli()
-					if deltaTs < baseTs {
-						itemsToClean = append(itemsToClean, CleanItem{
-							ID:     file.ID,
-							Name:   file.Name,
-							Size:   file.Size,
-							Reason: "Delta obsolète (déjà consolidé dans l'archive de base)",
-						})
-						totalFreed += file.Size
-					} else {
-						activeSlugs[slug] = true
-					}
-				}
-			}
-		}
-
-		// B. Fichiers temporaires ou corrompus
-		if strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".part") || strings.HasPrefix(name, "tmp_") {
-			itemsToClean = append(itemsToClean, CleanItem{
-				ID:     file.ID,
-				Name:   file.Name,
-				Size:   file.Size,
-				Reason: "Fichier temporaire résiduel",
-			})
-			totalFreed += file.Size
-		}
-	}
-
-	// C. Métadonnées ou manifestes orphelins (instance sans base ni delta actif)
-	for name, file := range cloudIndex {
-		if strings.HasPrefix(name, PrefixMeta) && strings.HasSuffix(name, ".json") {
-			slug := strings.TrimSuffix(strings.TrimPrefix(name, PrefixMeta), ".json")
-			if !activeSlugs[slug] {
-				itemsToClean = append(itemsToClean, CleanItem{
-					ID:     file.ID,
-					Name:   file.Name,
-					Size:   file.Size,
-					Reason: "Métadonnées orphelines (aucune archive de jeu restante)",
-				})
-				totalFreed += file.Size
-			}
-		}
-		if strings.HasPrefix(name, PrefixManifest) && strings.HasSuffix(name, ".json") {
-			slug := strings.TrimSuffix(strings.TrimPrefix(name, PrefixManifest), ".json")
-			if !activeSlugs[slug] {
-				itemsToClean = append(itemsToClean, CleanItem{
-					ID:     file.ID,
-					Name:   file.Name,
-					Size:   file.Size,
-					Reason: "Manifeste orphelin (aucune archive de jeu restante)",
-				})
-				totalFreed += file.Size
-			}
-		}
-	}
+	itemsToClean, totalFreed := collectCleanItems(cloudIndex)
 
 	formattedFreed := formatByteSize(totalFreed)
 
@@ -201,4 +106,110 @@ func formatByteSize(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %co", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func collectCleanItems(cloudIndex map[string]providers.CloudFile) ([]CleanItem, int64) {
+	baseFiles := make(map[string]providers.CloudFile)
+	for name, file := range cloudIndex {
+		if strings.HasPrefix(name, PrefixBackup) && strings.HasSuffix(name, ".zip") {
+			slug := strings.TrimSuffix(strings.TrimPrefix(name, PrefixBackup), ".zip")
+			baseFiles[slug] = file
+		}
+	}
+
+	var itemsToClean []CleanItem
+	var totalFreed int64
+
+	activeSlugs := make(map[string]bool)
+	for slug := range baseFiles {
+		activeSlugs[slug] = true
+	}
+
+	for name, file := range cloudIndex {
+		// A. Deltas
+		if strings.HasPrefix(name, PrefixDelta) && strings.HasSuffix(name, ".zip") {
+			stripped := strings.TrimSuffix(strings.TrimPrefix(name, PrefixDelta), ".zip")
+			idx := strings.LastIndex(stripped, "_")
+			if idx > 0 {
+				slug := stripped[:idx]
+				rawTs := stripped[idx+1:]
+				deltaTs, parseErr := strconv.ParseInt(rawTs, 10, 64)
+
+				base, hasBase := baseFiles[slug]
+				if !hasBase {
+					itemsToClean = append(itemsToClean, CleanItem{
+						ID:     file.ID,
+						Name:   file.Name,
+						Size:   file.Size,
+						Reason: "Delta orphelin (aucune archive de base correspondante)",
+					})
+					totalFreed += file.Size
+				} else if parseErr == nil {
+					// Comparer les horodatages serveur (ModifiedTime) pour éviter la dérive d'horloge client
+					isObsolete := false
+					if !file.ModifiedTime.IsZero() && !base.ModifiedTime.IsZero() {
+						isObsolete = file.ModifiedTime.Before(base.ModifiedTime)
+					} else {
+						isObsolete = deltaTs < base.ModifiedTime.UnixMilli()
+					}
+					if isObsolete {
+						itemsToClean = append(itemsToClean, CleanItem{
+							ID:     file.ID,
+							Name:   file.Name,
+							Size:   file.Size,
+							Reason: "Delta obsolète (déjà consolidé dans l'archive de base)",
+						})
+						totalFreed += file.Size
+					} else {
+						activeSlugs[slug] = true
+					}
+				}
+			}
+		}
+
+		// B. Fichiers temporaires, staging interrompus ou corrompus
+		if strings.HasPrefix(name, "GensHorizon_Staging_") || strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".part") || strings.HasPrefix(name, "tmp_") {
+			reason := "Fichier temporaire résiduel"
+			if strings.HasPrefix(name, "GensHorizon_Staging_") {
+				reason = "Fichier staging résiduel (upload interrompu)"
+			}
+			itemsToClean = append(itemsToClean, CleanItem{
+				ID:     file.ID,
+				Name:   file.Name,
+				Size:   file.Size,
+				Reason: reason,
+			})
+			totalFreed += file.Size
+		}
+	}
+
+	// C. Métadonnées ou manifestes orphelins (instance sans base ni delta actif)
+	for name, file := range cloudIndex {
+		if strings.HasPrefix(name, PrefixMeta) && strings.HasSuffix(name, ".json") {
+			slug := strings.TrimSuffix(strings.TrimPrefix(name, PrefixMeta), ".json")
+			if !activeSlugs[slug] {
+				itemsToClean = append(itemsToClean, CleanItem{
+					ID:     file.ID,
+					Name:   file.Name,
+					Size:   file.Size,
+					Reason: "Métadonnées orphelines (aucune archive de jeu restante)",
+				})
+				totalFreed += file.Size
+			}
+		}
+		if strings.HasPrefix(name, PrefixManifest) && strings.HasSuffix(name, ".json") {
+			slug := strings.TrimSuffix(strings.TrimPrefix(name, PrefixManifest), ".json")
+			if !activeSlugs[slug] {
+				itemsToClean = append(itemsToClean, CleanItem{
+					ID:     file.ID,
+					Name:   file.Name,
+					Size:   file.Size,
+					Reason: "Manifeste orphelin (aucune archive de jeu restante)",
+				})
+				totalFreed += file.Size
+			}
+		}
+	}
+
+	return itemsToClean, totalFreed
 }

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
 )
@@ -147,6 +148,11 @@ type scanTask struct {
 
 // GenerateManifest scanne récursivement targetDir et génère le Manifest avec WalkDir optimisé
 func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) {
+	return GenerateManifestWithOptions(targetDir, oldManifest, false)
+}
+
+// GenerateManifestWithOptions scanne récursivement targetDir ; si verifyAll est true, tous les fichiers sont ré-hachés en SHA-256.
+func GenerateManifestWithOptions(targetDir string, oldManifest Manifest, verifyAll bool) (Manifest, error) {
 	manifest := make(Manifest)
 	var manifestMu sync.Mutex
 
@@ -158,6 +164,11 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 				return nil
 			}
 			ipc.Logf("[scanner] Accès refusé ou erreur : %s (%v)", currentPath, err)
+			return nil
+		}
+
+		if d.Type()&os.ModeSymlink != 0 {
+			ipc.Logf("[scanner] Lien symbolique ignoré par sécurité : %s", currentPath)
 			return nil
 		}
 
@@ -185,16 +196,14 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 		}
 		rel = filepath.ToSlash(rel)
 
-		// Vérification rapide dans le cache du manifest précédent
+		// Vérification rapide dans le cache du manifest précédent (WalkDir est séquentiel)
 		mtimeMs := info.ModTime().UnixMilli()
 		size := info.Size()
 
-		if oldManifest != nil {
+		if !verifyAll && oldManifest != nil {
 			if cached, ok := oldManifest[rel]; ok {
 				if cached.Mtime.Int64() == mtimeMs && cached.Size.Int64() == size {
-					manifestMu.Lock()
 					manifest[rel] = cached
-					manifestMu.Unlock()
 					return nil
 				}
 			}
@@ -230,6 +239,7 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 	close(taskChan)
 
 	var wg sync.WaitGroup
+	var skippedFiles atomic.Int64
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
@@ -237,7 +247,8 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 			for t := range taskChan {
 				hash, err := HashFile(t.fullPath)
 				if err != nil {
-					ipc.Logf("[scanner] Fichier ignoré (%v) : %s", err, t.fullPath)
+					skippedFiles.Add(1)
+					ipc.Logf("[scanner] Fichier verrouillé/illisible ignoré (%v) : %s", err, t.fullPath)
 					// Conserver l'ancienne entrée en cas d'erreur EBUSY/EPERM
 					if oldManifest != nil {
 						if oldEntry, ok := oldManifest[t.relPath]; ok {
@@ -260,6 +271,9 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 		}()
 	}
 	wg.Wait()
+	if n := skippedFiles.Load(); n > 0 {
+		ipc.Logf("[scanner] AVERTISSEMENT : %d fichier(s) illisible(s) ou verrouillé(s) lors du scan.", n)
+	}
 
 	return manifest, nil
 }
