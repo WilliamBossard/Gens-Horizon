@@ -105,7 +105,8 @@ func AcquireLock() bool {
 			}
 
 			activeLockPath = lockPath
-			startHeartbeat(lockPath)
+			heartbeatDone = make(chan struct{})
+			startHeartbeat(lockPath, heartbeatDone)
 			return true
 		}
 
@@ -115,15 +116,14 @@ func AcquireLock() bool {
 	return false
 }
 
-func startHeartbeat(lockPath string) {
-	heartbeatDone = make(chan struct{})
+func startHeartbeat(lockPath string, done <-chan struct{}) {
 	ticker := time.NewTicker(5 * time.Second)
 
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-heartbeatDone:
+			case <-done:
 				return
 			case t := <-ticker.C:
 				_ = os.Chtimes(lockPath, t, t)
