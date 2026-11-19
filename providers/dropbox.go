@@ -17,6 +17,7 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
+	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 type DropboxProvider struct {
@@ -57,9 +58,11 @@ func (d *DropboxProvider) getAccessToken() (string, error) {
 func (d *DropboxProvider) refreshToken() error {
 	form := url.Values{
 		"client_id":     {d.creds.ClientID},
-		"client_secret": {d.creds.ClientSecret},
 		"refresh_token": {d.tokenData.RefreshToken},
 		"grant_type":    {"refresh_token"},
+	}
+	if d.creds.ClientSecret != "" {
+		form.Set("client_secret", d.creds.ClientSecret)
 	}
 
 	resp, err := d.client.PostForm("https://api.dropboxapi.com/oauth2/token", form)
@@ -68,9 +71,12 @@ func (d *DropboxProvider) refreshToken() error {
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("erreur refresh token Dropbox (HTTP %d) : %s", resp.StatusCode, string(bodyBytes))
+		return &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("erreur refresh token Dropbox (HTTP %d) : %s", resp.StatusCode, string(bodyBytes)),
+		}
 	}
 
 	var res struct {
@@ -149,7 +155,7 @@ func (d *DropboxProvider) doRPC(endpoint string, reqBody any) ([]byte, error) {
 		return nil, err
 	}
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
 	_ = resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
@@ -165,16 +171,22 @@ func (d *DropboxProvider) doRPC(endpoint string, reqBody any) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		respBytes, _ = io.ReadAll(resp2.Body)
+		respBytes, _ = io.ReadAll(io.LimitReader(resp2.Body, 16*1024*1024))
 		_ = resp2.Body.Close()
 		if resp2.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("dropbox RPC %s HTTP %d : %s", endpoint, resp2.StatusCode, string(respBytes))
+			return nil, &retry.HTTPError{
+				StatusCode: resp2.StatusCode,
+				Message:    fmt.Sprintf("dropbox RPC %s HTTP %d : %s", endpoint, resp2.StatusCode, string(respBytes)),
+			}
 		}
 		return respBytes, nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("dropbox RPC %s HTTP %d : %s", endpoint, resp.StatusCode, string(respBytes))
+		return nil, &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("dropbox RPC %s HTTP %d : %s", endpoint, resp.StatusCode, string(respBytes)),
+		}
 	}
 	return respBytes, nil
 }
@@ -366,11 +378,14 @@ func (d *DropboxProvider) DownloadJSON(fileID string, target any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("dropbox downloadJSON HTTP %d : %s", resp.StatusCode, string(b))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		return &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("dropbox downloadJSON HTTP %d : %s", resp.StatusCode, string(b)),
+		}
 	}
 
-	return json.NewDecoder(resp.Body).Decode(target)
+	return json.NewDecoder(io.LimitReader(resp.Body, 16*1024*1024)).Decode(target)
 }
 
 var dropboxChunkSize = int64(8 * 1024 * 1024)
@@ -440,22 +455,37 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 				lastErr = doErr
 				continue
 			}
-			b, _ := io.ReadAll(resp.Body)
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 			_ = resp.Body.Close()
 			cleanup()
 
 			if resp.StatusCode == http.StatusOK {
 				return b, nil
 			}
+			if resp.StatusCode == http.StatusConflict {
+				// Récupération d'offset si Dropbox a déjà reçu le bloc lors d'une tentative précédente
+				var conflictBody struct {
+					Error struct {
+						Tag           string `json:".tag"`
+						CorrectOffset int64  `json:"correct_offset"`
+					} `json:"error"`
+				}
+				if json.Unmarshal(b, &conflictBody) == nil && conflictBody.Error.Tag == "incorrect_offset" {
+					expectedNext := offset + chunkLen
+					if conflictBody.Error.CorrectOffset == expectedNext {
+						return b, nil
+					}
+				}
+			}
 			if resp.StatusCode == http.StatusUnauthorized {
 				if _, refErr := d.refreshTokenIfStale(tok); refErr != nil {
 					return nil, refErr
 				}
 				authRefreshed = true
-				lastErr = fmt.Errorf("dropbox %s HTTP 401 : %s", endpoint, string(b))
+				lastErr = &retry.HTTPError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("dropbox %s HTTP 401 : %s", endpoint, string(b))}
 				continue
 			}
-			lastErr = fmt.Errorf("dropbox %s HTTP %d : %s", endpoint, resp.StatusCode, string(b))
+			lastErr = &retry.HTTPError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("dropbox %s HTTP %d : %s", endpoint, resp.StatusCode, string(b))}
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
 				return nil, lastErr
 			}
@@ -600,7 +630,7 @@ func (d *DropboxProvider) UploadJSON(name string, data any, existingID string) (
 			return "", err
 		}
 
-		respBytes, _ := io.ReadAll(resp.Body)
+		respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 		_ = resp.Body.Close()
 
 		if resp.StatusCode == http.StatusUnauthorized && !authRefreshed {
@@ -612,7 +642,10 @@ func (d *DropboxProvider) UploadJSON(name string, data any, existingID string) (
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("dropbox uploadJSON HTTP %d : %s", resp.StatusCode, string(respBytes))
+			return "", &retry.HTTPError{
+				StatusCode: resp.StatusCode,
+				Message:    fmt.Sprintf("dropbox uploadJSON HTTP %d : %s", resp.StatusCode, string(respBytes)),
+			}
 		}
 
 		var res struct {
@@ -638,21 +671,48 @@ func (d *DropboxProvider) DeleteFile(fileID string) error {
 	return err
 }
 
-// RenameFile déplace un fichier staging vers son nom définitif sur Dropbox après suppression de l'ancienne cible.
+// RenameFile déplace un fichier staging vers son nom définitif sur Dropbox de manière réversible
+// (mise en backup temporaire de l'ancienne cible avant promotion, rollback si le déplacement échoue).
 func (d *DropboxProvider) RenameFile(fileID string, newName string, existingTargetID string) (string, error) {
+	targetPath := "/" + newName
+	var backupTempPath string
+
 	if existingTargetID != "" && existingTargetID != fileID {
-		if delErr := d.DeleteFile(existingTargetID); delErr != nil && !errors.Is(delErr, ErrNotFound) {
-			return "", fmt.Errorf("[dropbox] suppression ancienne cible avant promotion : %w", delErr)
+		backupTempPath = fmt.Sprintf("/.__staging_bak_%d_%s", time.Now().UnixMilli(), newName)
+		if _, bakErr := d.doRPC("files/move_v2", map[string]any{
+			"from_path":  existingTargetID,
+			"to_path":    backupTempPath,
+			"autorename": false,
+		}); bakErr != nil {
+			if !strings.Contains(bakErr.Error(), "not_found") {
+				return "", fmt.Errorf("[dropbox] mise en sauvegarde ancienne cible avant promotion : %w", bakErr)
+			}
+			backupTempPath = ""
 		}
 	}
 
 	respBytes, err := d.doRPC("files/move_v2", map[string]any{
 		"from_path":  fileID,
-		"to_path":    "/" + newName,
+		"to_path":    targetPath,
 		"autorename": false,
 	})
 	if err != nil {
+		if backupTempPath != "" {
+			if _, rbErr := d.doRPC("files/move_v2", map[string]any{
+				"from_path":  backupTempPath,
+				"to_path":    targetPath,
+				"autorename": false,
+			}); rbErr != nil {
+				ipc.Logf("[dropbox] avertissement : échec rollback backup %s vers %s : %v", backupTempPath, targetPath, rbErr)
+			}
+		}
 		return "", err
+	}
+
+	if backupTempPath != "" {
+		if delErr := d.DeleteFile(backupTempPath); delErr != nil && !errors.Is(delErr, ErrNotFound) {
+			ipc.Logf("[dropbox] avertissement : suppression backup temporaire %s échouée : %v", backupTempPath, delErr)
+		}
 	}
 
 	var res struct {

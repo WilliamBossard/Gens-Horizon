@@ -636,3 +636,143 @@ func TestProvidersImplementFileTimestampFetcher(t *testing.T) {
 		t.Fatalf("Dropbox GetFileModifiedTime failed: got %v, err=%v", dt, err)
 	}
 }
+
+func TestDropboxRenameFileAtomicPromotionAndRollback(t *testing.T) {
+	var rpcOps []string
+	var failMoveCount atomic.Int32
+
+	dp := &DropboxProvider{
+		tokenData: auth.TokenData{AccessToken: "db-tok", ExpiryDate: time.Now().Add(time.Hour).UnixMilli()},
+		client: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				bodyBytes, _ := io.ReadAll(r.Body)
+				rpcOps = append(rpcOps, r.URL.Path+" "+string(bodyBytes))
+				if r.URL.Path == "/2/files/move_v2" {
+					// 1er move: backup de l'ancienne cible -> succès
+					// 2e move: promotion du staging -> échec simulé
+					// 3e move: rollback du backup -> succès
+					if failMoveCount.Add(1) == 2 {
+						return jsonResponse(http.StatusInternalServerError, map[string]any{"error": "transient"}), nil
+					}
+					return jsonResponse(http.StatusOK, map[string]any{"metadata": map[string]any{"id": "id:moved"}}), nil
+				}
+				if r.URL.Path == "/2/files/delete_v2" {
+					return nil, fmt.Errorf("unexpected delete_v2 before successful promotion: %s", string(bodyBytes))
+				}
+				return jsonResponse(http.StatusOK, map[string]any{}), nil
+			}),
+		},
+	}
+
+	_, err := dp.RenameFile("id:staged", "Backup.zip", "id:existing")
+	if err == nil {
+		t.Fatalf("expected RenameFile to return error when promotion move fails")
+	}
+	if failMoveCount.Load() != 3 {
+		t.Fatalf("expected 3 move_v2 calls (backup -> failed promote -> rollback), got %d (%v)", failMoveCount.Load(), rpcOps)
+	}
+	if !strings.Contains(rpcOps[0], `"from_path":"id:existing"`) || !strings.Contains(rpcOps[0], `.__staging_bak_`) {
+		t.Fatalf("expected step 1 to backup existing target, got: %s", rpcOps[0])
+	}
+	if !strings.Contains(rpcOps[2], `"to_path":"/Backup.zip"`) {
+		t.Fatalf("expected step 3 to rollback backup to /Backup.zip, got: %s", rpcOps[2])
+	}
+}
+
+func TestGoogleDownloadFile403CannotDownloadAbuseFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HORIZON_DATA_DIR", tmpDir)
+
+	payload := []byte("AbuseConfirmedPayload")
+	g := &GoogleProvider{
+		tokenData: auth.TokenData{AccessToken: "g_tok", ExpiryDate: time.Now().Add(time.Hour).UnixMilli()},
+		creds:     config.ProviderConfig{ClientID: "cid", ClientSecret: "csec"},
+		client: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if strings.Contains(r.URL.RawQuery, "acknowledgeAbuse=true") {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/zip"}},
+						Body:       io.NopCloser(bytes.NewReader(payload)),
+					}, nil
+				}
+				return jsonResponse(http.StatusForbidden, map[string]any{
+					"error": map[string]any{
+						"code": 403,
+						"errors": []map[string]any{
+							{"reason": "cannotDownloadAbuseFile"},
+						},
+					},
+				}), nil
+			}),
+		},
+	}
+
+	dest := filepath.Join(tmpDir, "out.zip")
+	if err := g.DownloadFile("file-abuse", dest, nil, int64(len(payload))); err != nil {
+		t.Fatalf("DownloadFile failed on 403 cannotDownloadAbuseFile: %v", err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("unexpected file payload: got %q err=%v", string(got), err)
+	}
+}
+
+func TestOneDriveChunkUploadFastFailOn400AndSessionResumeOn416(t *testing.T) {
+	tmpDir := t.TempDir()
+	// > 4 Mo pour passer en upload par session chunked
+	payload := bytes.Repeat([]byte("A"), 5*1024*1024)
+	src := filepath.Join(tmpDir, "big.zip")
+	if err := os.WriteFile(src, payload, 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	// 1. Erreur 400 définitive -> pas de 3 retries inutiles
+	var putCalls400 atomic.Int32
+	o400 := &OneDriveProvider{
+		tokenData: auth.TokenData{AccessToken: "od_tok", ExpiryDate: time.Now().Add(time.Hour).UnixMilli()},
+		creds:     config.ProviderConfig{ClientID: "od-cid"},
+		client: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if strings.Contains(r.URL.Path, "createUploadSession") {
+					return jsonResponse(http.StatusOK, map[string]any{"uploadUrl": "https://upload.onedrive.com/sess1"}), nil
+				}
+				putCalls400.Add(1)
+				return jsonResponse(http.StatusBadRequest, map[string]any{"error": "badRange"}), nil
+			}),
+		},
+	}
+	if _, err := o400.UploadZip("big.zip", src, "", nil); err == nil {
+		t.Fatalf("expected 400 error")
+	}
+	if putCalls400.Load() != 1 {
+		t.Fatalf("expected permanent 400 to abort after 1 PUT attempt, got %d", putCalls400.Load())
+	}
+
+	// 2. 416 -> interroge la session et reprend/avance via nextExpectedRanges
+	var queries atomic.Int32
+	o416 := &OneDriveProvider{
+		tokenData: auth.TokenData{AccessToken: "od_tok", ExpiryDate: time.Now().Add(time.Hour).UnixMilli()},
+		creds:     config.ProviderConfig{ClientID: "od-cid"},
+		client: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if strings.Contains(r.URL.Path, "createUploadSession") {
+					return jsonResponse(http.StatusOK, map[string]any{"uploadUrl": "https://upload.onedrive.com/sess2"}), nil
+				}
+				if r.Method == http.MethodGet && r.URL.Host == "upload.onedrive.com" {
+					queries.Add(1)
+					return jsonResponse(http.StatusOK, map[string]any{
+						"nextExpectedRanges": []string{fmt.Sprintf("%d-", len(payload))},
+					}), nil
+				}
+				return jsonResponse(http.StatusRequestedRangeNotSatisfiable, map[string]any{"error": "alreadyUploaded"}), nil
+			}),
+		},
+	}
+	if _, err := o416.UploadZip("big.zip", src, "", nil); err != nil {
+		t.Fatalf("expected 416 + nextExpectedRanges to complete upload cleanly, got err=%v", err)
+	}
+	if queries.Load() == 0 {
+		t.Fatalf("expected upload session status GET query on 416")
+	}
+}

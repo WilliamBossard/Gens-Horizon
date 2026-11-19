@@ -40,11 +40,19 @@ func parseTargetInstance(args []string) string {
 }
 
 func Upload(args []string) {
+	UploadWithContext(context.Background(), args)
+}
+
+func UploadWithContext(ctx context.Context, args []string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !lock.AcquireLock() {
 		ipc.SendError("ERR_ALREADY_RUNNING", "ERR_ALREADY_RUNNING", "")
 		os.Exit(1)
 	}
 	defer lock.ReleaseLock()
+	paths.CleanupOrphanedTemps(paths.GetHorizonDataDir())
 
 	if !retry.CheckConnectivity() {
 		ipc.SendOffline("Internet indisponible.")
@@ -53,16 +61,16 @@ func Upload(args []string) {
 
 	settings := paths.LoadSettings()
 	p, err := providers.GetProvider(settings)
-	if err != nil || p == nil {
+	if err != nil {
+		ipc.SendError("AUTH_KEYRING_ERROR", fmt.Sprintf("Erreur temporaire d'accès au trousseau d'authentification : %v", err), "")
+		return
+	}
+	if p == nil {
 		ipc.SendError("AUTH_EXPIRED", "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.", "")
 		return
 	}
 
-	retryOpts := retry.Options{
-		MaxRetries: settings.MaxRetries,
-		BaseDelay:  time.Duration(settings.RetryBaseDelay) * time.Millisecond,
-		Label:      "[upload]",
-	}
+	retryOpts := retry.FromSettings(settings.MaxRetries, settings.RetryBaseDelay, "[upload]")
 
 	verifyHashes := hasFlag(args, "--verify-hashes")
 	targetInst := parseTargetInstance(args)
@@ -84,7 +92,7 @@ func Upload(args []string) {
 	}
 
 	providers.InvalidateCloudIndexCache()
-	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicates(p, retryOpts, "[upload]")
+	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicatesWithContext(ctx, p, retryOpts, "[upload]")
 	if err != nil {
 		ipc.SendError("CLOUD_ERROR", err.Error(), "")
 		return
@@ -93,6 +101,10 @@ func Upload(args []string) {
 	instDir := paths.GetInstancesFolder()
 
 	for _, inst := range instances {
+		if ctx.Err() != nil {
+			ipc.Logf("[upload] Upload interrompu par arrêt gracieux avant '%s'.", inst)
+			return
+		}
 		safeInst, nameErr := paths.SanitizeInstanceName(paths.GetCanonicalName(inst))
 		if nameErr != nil {
 			ipc.SendError("INVALID_INSTANCE_NAME", nameErr.Error(), inst)
@@ -141,11 +153,10 @@ func Upload(args []string) {
 		baseFile, hasBase := cloudIndex[baseBackupName]
 		manifestFile, hasManifest := cloudIndex[manifestName]
 
-		// Comptage des deltas existants
-		prefixDelta := fmt.Sprintf("%s%s_", PrefixDelta, safeInst)
+		// Comptage des deltas existants (correspondance stricte du slug pour éviter toute collision de préfixe)
 		var existingDeltas []providers.CloudFile
 		for name, f := range cloudIndex {
-			if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
+			if _, ok := MatchDeltaForInstance(name, safeInst); ok {
 				existingDeltas = append(existingDeltas, f)
 			}
 		}
@@ -173,7 +184,10 @@ func Upload(args []string) {
 		var remoteManifest scanner.Manifest
 		hasRemoteManifest := false
 		if hasManifest {
-			err = p.DownloadJSON(manifestFile.ID, &remoteManifest)
+			err = retry.Do(ctx, retryOpts, func() error {
+				remoteManifest = nil
+				return p.DownloadJSON(manifestFile.ID, &remoteManifest)
+			})
 			if err == nil {
 				hasRemoteManifest = true
 			} else {
@@ -201,7 +215,12 @@ func Upload(args []string) {
 
 		if needsFullBackup {
 			ipc.Logf("[upload] Création d'une sauvegarde complète pour %s (deltas=%d, tailleDeltas=%d, baseSize=%d, max=%d)", inst, len(existingDeltas), totalDeltasSize, baseFile.Size, cleanupThreshold)
-			tempZip := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_full_%s_%d.zip", safeInst, time.Now().UnixMilli()))
+			tmpZipDir, tmpDirErr := os.MkdirTemp("", "horizon-up-*")
+			if tmpDirErr != nil {
+				ipc.SendError("COMPRESS_FAILED", tmpDirErr.Error(), inst)
+				continue
+			}
+			tempZip := filepath.Join(tmpZipDir, fmt.Sprintf("full_%s.zip", safeInst))
 
 			var manifestTotalBytes int64
 			for _, entry := range newManifest {
@@ -215,7 +234,7 @@ func Upload(args []string) {
 				ipc.SendProgress("COMPRESSING", pct, inst)
 			})
 			if err != nil {
-				_ = os.Remove(tempZip)
+				_ = os.RemoveAll(tmpZipDir)
 				ipc.SendError("COMPRESS_FAILED", err.Error(), inst)
 				continue
 			}
@@ -230,7 +249,8 @@ func Upload(args []string) {
 				mExistingID = manifestFile.ID
 			}
 
-			newBaseID, newMID, stepErrCode, upErr := uploadFullBackupAtomic(
+			newBaseID, newMID, stepErrCode, upErr := uploadFullBackupAtomicWithContext(
+				ctx,
 				p,
 				inst,
 				safeInst,
@@ -242,7 +262,7 @@ func Upload(args []string) {
 				newManifest,
 				retryOpts,
 			)
-			_ = os.Remove(tempZip)
+			_ = os.RemoveAll(tmpZipDir)
 			if upErr != nil {
 				ipc.SendError(stepErrCode, upErr.Error(), inst)
 				continue
@@ -282,7 +302,7 @@ func Upload(args []string) {
 						defer func() { <-delSem }()
 						delOpts := retryOpts
 						delOpts.Label = "deleteOldDelta(" + df.Name + ")"
-						if delErr := retry.Do(context.Background(), delOpts, func() error {
+						if delErr := retry.Do(ctx, delOpts, func() error {
 							return p.DeleteFile(df.ID)
 						}); delErr != nil {
 							ipc.Logf("[upload] AVERTISSEMENT : échec suppression ancien delta %s : %v", df.Name, delErr)
@@ -298,7 +318,7 @@ func Upload(args []string) {
 				_ = osWriteFileAtomic(localManifestFile, b, 0644)
 			}
 
-			serverTime := fetchServerTimeForInstance(p, retryOpts, safeInst, newBaseID, newMID)
+			serverTime := fetchServerTimeForInstanceWithContext(ctx, p, retryOpts, safeInst, newBaseID, newMID)
 			updateLastSyncWithTime(safeInst, serverTime)
 
 			ipc.Send(map[string]any{
@@ -323,14 +343,19 @@ func Upload(args []string) {
 			ipc.Logf("[upload] Delta sync pour %s : +%d, ~%d, -%d fichiers", inst, len(diff.Added), len(diff.Modified), len(diff.Deleted))
 
 			filesToZip := append(diff.Added, diff.Modified...)
-			tempDelta := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_delta_%s_%d.zip", safeInst, time.Now().UnixMilli()))
+			tmpDeltaDir, tmpDirErr := os.MkdirTemp("", "horizon-delta-*")
+			if tmpDirErr != nil {
+				ipc.SendError("COMPRESS_FAILED", tmpDirErr.Error(), inst)
+				continue
+			}
+			tempDelta := filepath.Join(tmpDeltaDir, fmt.Sprintf("delta_%s.zip", safeInst))
 
 			ipc.SendProgress("COMPRESSING", 0, inst)
 			err = ziputils.CreateDeltaZip(localInstFolder, filesToZip, diff.Deleted, tempDelta, func(pct int) {
 				ipc.SendProgress("COMPRESSING", pct, inst)
 			})
 			if err != nil {
-				_ = os.Remove(tempDelta)
+				_ = os.RemoveAll(tmpDeltaDir)
 				ipc.SendError("COMPRESS_FAILED", err.Error(), inst)
 				continue
 			}
@@ -340,7 +365,7 @@ func Upload(args []string) {
 			deltaID, err := p.UploadZip(deltaName, tempDelta, "", func(pct int) {
 				ipc.SendProgress("UPLOADING", pct, inst)
 			})
-			_ = os.Remove(tempDelta)
+			_ = os.RemoveAll(tmpDeltaDir)
 			if err != nil {
 				ipc.SendError("UPLOAD_FAILED", err.Error(), inst)
 				continue
@@ -353,7 +378,7 @@ func Upload(args []string) {
 
 			// Mise à jour du manifest avec retry (nettoie le delta orphelin si le manifest échoue)
 			var newMID string
-			err = retry.Do(context.Background(), retryOpts, func() error {
+			err = retry.Do(ctx, retryOpts, func() error {
 				id, upErr := p.UploadJSON(manifestName, newManifest, manifestFile.ID)
 				if upErr != nil {
 					return upErr
@@ -393,7 +418,7 @@ func Upload(args []string) {
 				_ = osWriteFileAtomic(localManifestFile, b, 0644)
 			}
 
-			serverTime := fetchServerTimeForInstance(p, retryOpts, safeInst, deltaID, newMID)
+			serverTime := fetchServerTimeForInstanceWithContext(ctx, p, retryOpts, safeInst, deltaID, newMID)
 			updateLastSyncWithTime(safeInst, serverTime)
 
 			summary := fmt.Sprintf("+%d ajouté(s), ~%d modifié(s), -%d supprimé(s)", len(diff.Added), len(diff.Modified), len(diff.Deleted))
@@ -422,9 +447,8 @@ func maxServerTimeForInstance(cloudIndex map[string]providers.CloudFile, safeIns
 	if mf, ok := cloudIndex[manifestName]; ok {
 		consider(mf.ModifiedTime)
 	}
-	prefixDelta := PrefixDelta + safeInst + "_"
 	for name, f := range cloudIndex {
-		if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
+		if _, ok := MatchDeltaForInstance(name, safeInst); ok {
 			consider(f.ModifiedTime)
 		}
 	}
@@ -435,6 +459,13 @@ func maxServerTimeForInstance(cloudIndex map[string]providers.CloudFile, safeIns
 }
 
 func fetchServerTimeForInstance(p providers.Provider, opts retry.Options, safeInst string, fileIDs ...string) time.Time {
+	return fetchServerTimeForInstanceWithContext(context.Background(), p, opts, safeInst, fileIDs...)
+}
+
+func fetchServerTimeForInstanceWithContext(ctx context.Context, p providers.Provider, opts retry.Options, safeInst string, fileIDs ...string) time.Time {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	providers.InvalidateCloudIndexCache()
 	if fetcher, ok := p.(providers.FileTimestampFetcher); ok && len(fileIDs) > 0 {
 		var maxT time.Time
@@ -445,7 +476,7 @@ func fetchServerTimeForInstance(p providers.Provider, opts retry.Options, safeIn
 			var modTime time.Time
 			fetchOpts := opts
 			fetchOpts.Label = "getFileModifiedTime(" + id + ")"
-			if err := retry.Do(context.Background(), fetchOpts, func() error {
+			if err := retry.Do(ctx, fetchOpts, func() error {
 				t, gErr := fetcher.GetFileModifiedTime(id)
 				if gErr != nil {
 					return gErr
@@ -460,7 +491,7 @@ func fetchServerTimeForInstance(p providers.Provider, opts retry.Options, safeIn
 			return maxT.UTC()
 		}
 	}
-	freshIndex, err := providers.GetCloudIndexAndCleanDuplicates(p, opts, "[upload-ts]")
+	freshIndex, err := providers.GetCloudIndexAndCleanDuplicatesWithContext(ctx, p, opts, "[upload-ts]")
 	if err != nil {
 		return time.Now().UTC()
 	}
@@ -521,6 +552,22 @@ func isPathStrictlyUnder(baseDir, targetPath string) bool {
 		return false
 	}
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func isRealPathStrictlyUnder(baseDir, targetPath string) bool {
+	if !isPathStrictlyUnder(baseDir, targetPath) {
+		return false
+	}
+	info, err := os.Lstat(targetPath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || info.IsDir() {
+		return false
+	}
+	realBase, err1 := filepath.EvalSymlinks(baseDir)
+	realTarget, err2 := filepath.EvalSymlinks(targetPath)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return isPathStrictlyUnder(realBase, realTarget)
 }
 
 var validImageDataURIRe = regexp.MustCompile(`^data:image/(?:png|jpeg|jpg|webp|gif|bmp);base64,[A-Za-z0-9+/=]+$`)
@@ -621,7 +668,7 @@ func extractInstanceMetadata(instFolder string, instName string) map[string]any 
 			filePath = filePath[1:] // Pour Windows : /C:/path -> C:/path
 		}
 		filePath = filepath.FromSlash(filePath)
-		if isPathStrictlyUnder(instFolder, filePath) {
+		if isRealPathStrictlyUnder(instFolder, filePath) {
 			if info, err := os.Stat(filePath); err == nil && !info.IsDir() && info.Size() < 2*1024*1024 {
 				if b64, mime, err := readFileBase64(filePath); err == nil {
 					finalIconData = fmt.Sprintf("data:%s;base64,%s", mime, b64)
@@ -716,6 +763,37 @@ func uploadFullBackupAtomic(
 	newManifest scanner.Manifest,
 	retryOpts retry.Options,
 ) (string, string, string, error) {
+	return uploadFullBackupAtomicWithContext(
+		context.Background(),
+		p,
+		inst,
+		safeInst,
+		tempZip,
+		baseBackupName,
+		existingBaseID,
+		manifestName,
+		existingManifestID,
+		newManifest,
+		retryOpts,
+	)
+}
+
+func uploadFullBackupAtomicWithContext(
+	ctx context.Context,
+	p providers.Provider,
+	inst string,
+	safeInst string,
+	tempZip string,
+	baseBackupName string,
+	existingBaseID string,
+	manifestName string,
+	existingManifestID string,
+	newManifest scanner.Manifest,
+	retryOpts retry.Options,
+) (string, string, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	renamer, canStage := p.(providers.FileRenamer)
 	useStaging := canStage && existingBaseID != ""
 
@@ -734,7 +812,7 @@ func uploadFullBackupAtomic(
 		var stagedManifestID string
 		mOpts := retryOpts
 		mOpts.Label = "uploadStagingManifest(" + inst + ")"
-		err = retry.Do(context.Background(), mOpts, func() error {
+		err = retry.Do(ctx, mOpts, func() error {
 			id, upErr := p.UploadJSON(stagingManifestName, newManifest, "")
 			if upErr != nil {
 				return upErr
@@ -777,7 +855,7 @@ func uploadFullBackupAtomic(
 	}
 
 	var newMID string
-	err = retry.Do(context.Background(), retryOpts, func() error {
+	err = retry.Do(ctx, retryOpts, func() error {
 		id, upErr := p.UploadJSON(manifestName, newManifest, existingManifestID)
 		if upErr != nil {
 			return upErr

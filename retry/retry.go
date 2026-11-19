@@ -2,6 +2,7 @@ package retry
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"net"
 	"time"
@@ -25,6 +26,21 @@ func DefaultOptions() Options {
 	}
 }
 
+// FromSettings convertit les réglages Horizon en Options de retry.
+// Contrairement au zéro-value de Options (qui garde 3 tentatives par défaut),
+// un maxRetries <= 0 issu des réglages explicites désactive les réessais (1 seule tentative).
+func FromSettings(maxRetries int, baseDelayMs int, label string) Options {
+	effRetries := maxRetries
+	if effRetries <= 0 {
+		effRetries = -1
+	}
+	return Options{
+		MaxRetries: effRetries,
+		BaseDelay:  time.Duration(baseDelayMs) * time.Millisecond,
+		Label:      label,
+	}
+}
+
 type HTTPError struct {
 	StatusCode int
 	Message    string
@@ -38,7 +54,8 @@ func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if httpErr, ok := err.(*HTTPError); ok {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
 		// 429 Too Many Requests, ou erreurs serveur 5xx
 		if httpErr.StatusCode == 429 || (httpErr.StatusCode >= 500 && httpErr.StatusCode <= 599) {
 			return true
@@ -49,7 +66,9 @@ func IsRetryable(err error) bool {
 }
 
 func Do(ctx context.Context, opts Options, fn func() error) error {
-	if opts.MaxRetries <= 0 {
+	if opts.MaxRetries < 0 {
+		opts.MaxRetries = 1
+	} else if opts.MaxRetries == 0 {
 		opts.MaxRetries = 3
 	}
 	if opts.BaseDelay <= 0 {

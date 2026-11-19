@@ -64,11 +64,13 @@ type QuotaInstance struct {
 }
 
 type QuotaMessage struct {
-	Type        string          `json:"type"`
-	UsedBytes   int64           `json:"usedBytes"`
-	TotalBytes  int64           `json:"totalBytes"`
-	HorizonUsed int64           `json:"horizonUsed"`
-	Instances   []QuotaInstance `json:"instances"`
+	Type         string          `json:"type"`
+	Provider     string          `json:"provider"`
+	UsedBytes    int64           `json:"usedBytes"`
+	TotalBytes   int64           `json:"totalBytes"`
+	HorizonUsed  int64           `json:"horizonUsed"`
+	HorizonBytes int64           `json:"horizonBytes"`
+	Instances    []QuotaInstance `json:"instances"`
 }
 
 // Send écrit n'importe quel objet JSON sur stdout (thread-safe)

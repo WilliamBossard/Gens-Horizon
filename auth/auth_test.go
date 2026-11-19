@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -232,6 +233,32 @@ func TestLegacyV1PBKDF2DecryptionAndMigrationToV2(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(migratedRaw), "v2:") {
 		t.Fatalf("expected legacy token to migrate to v2: format, got %q", string(migratedRaw))
+	}
+}
+
+func TestGetSecureTokenReturnsErrTokenCorruptedOnMalformedCiphertext(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HORIZON_DATA_DIR", tmpDir)
+
+	authMu.Lock()
+	machineID = ""
+	salt = nil
+	secretKey = nil
+	authMu.Unlock()
+
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0700); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	badTokenPath := filepath.Join(authDir, "token_bad.json")
+	if err := os.WriteFile(badTokenPath, []byte("v2:deadbeef:not_hex"), 0600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	var target TokenData
+	err := GetSecureToken(badTokenPath, &target)
+	if !errors.Is(err, ErrTokenCorrupted) {
+		t.Fatalf("expected ErrTokenCorrupted on malformed ciphertext, got: %v", err)
 	}
 }
 

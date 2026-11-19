@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -258,5 +259,29 @@ func TestDownloadWithResumeRejectsTruncatedEOF(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Fatalf("expected incomplete target file %s to be cleaned up", dest)
+	}
+}
+
+func TestDownloadMultiStreamChunkZero200FallsBack(t *testing.T) {
+	tmpDir := t.TempDir()
+	dest := filepath.Join(tmpDir, "fallback.bin")
+	var reqCount atomic.Int32
+
+	err := downloadMultiRange(dest, 40*1024*1024, nil, func(start, end int64) (*http.Response, error) {
+		n := reqCount.Add(1)
+		// 1er segment (resp0): 206 partiel interrompu ; sur retry du chunk 0 (ou tout segment): serveur répond 200 OK
+		if n == 1 && start == 0 {
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Body:       io.NopCloser(&partialErrReader{data: []byte("PART")}),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader([]byte("full-body-no-range"))),
+		}, nil
+	})
+	if !errors.Is(err, errMultiRangeFallback) {
+		t.Fatalf("expected errMultiRangeFallback when chunk 0 retry gets 200 OK, got: %v", err)
 	}
 }

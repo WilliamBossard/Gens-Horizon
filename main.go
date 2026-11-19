@@ -2,17 +2,26 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
 	"github.com/WilliamBossard/Gens-Horizon/lock"
 	"github.com/WilliamBossard/Gens-Horizon/operations"
 	"github.com/WilliamBossard/Gens-Horizon/paths"
+	"github.com/WilliamBossard/Gens-Horizon/providers"
 )
 
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	providers.SetBaseContext(ctx)
+
 	// Écoute de l'arrêt gracieux demandé par le Launcher via stdin
 	go func() {
 		stdinScanner := bufio.NewScanner(os.Stdin)
@@ -20,17 +29,19 @@ func main() {
 			text := strings.TrimSpace(stdinScanner.Text())
 			if text == "SHUTDOWN" {
 				ipc.Logf("[Horizon] Arrêt gracieux (SHUTDOWN) reçu sur stdin.")
-				lock.ReleaseLock()
-				os.Exit(0)
+				cancel()
+				time.AfterFunc(3*time.Second, func() {
+					ipc.Logf("[Horizon] Délai d'arrêt gracieux dépassé, libération du verrou et sortie forcée.")
+					lock.ReleaseLock()
+					os.Exit(130)
+				})
+				return
 			}
 		}
 		if err := stdinScanner.Err(); err != nil {
 			ipc.Logf("[Horizon] Erreur lecture stdin : %v", err)
 		}
 	}()
-
-	// Nettoyage automatique des fichiers temporaires orphelins (> 10 min)
-	paths.CleanupOrphanedTemps(paths.GetHorizonDataDir())
 
 	// Initialisation des settings par défaut si absents
 	_ = paths.LoadSettings()
@@ -67,21 +78,21 @@ func main() {
 	} else if containsCommand(args, "--status", "status") {
 		operations.Status(args)
 	} else if containsCommand(args, "--login", "login") {
-		operations.Login(args)
+		operations.LoginWithContext(ctx, args)
 	} else if containsCommand(args, "--check", "check") {
-		operations.Check(args)
+		operations.CheckWithContext(ctx, args)
 	} else if containsCommand(args, "--sync", "sync") {
-		operations.Sync(args)
+		operations.SyncWithContext(ctx, args)
 	} else if containsCommand(args, "--upload", "upload") {
-		operations.Upload(args)
+		operations.UploadWithContext(ctx, args)
 	} else if containsCommand(args, "--quota", "quota") {
-		operations.Quota(args)
+		operations.QuotaWithContext(ctx, args)
 	} else if containsCommand(args, "--rollback", "rollback") {
 		operations.Rollback(args)
 	} else if containsCommand(args, "--clean", "clean") {
-		operations.Clean(args)
+		operations.CleanWithContext(ctx, args)
 	} else if containsCommand(args, "--delete", "delete") {
-		operations.Sync(args)
+		operations.SyncWithContext(ctx, args)
 	} else if containsCommand(args, "--version", "-v") {
 		ipc.Send(map[string]any{
 			"type":    "INFO",
@@ -92,6 +103,10 @@ func main() {
 			Type:    "ERROR",
 			Message: "Unknown command. Available commands: --login, --check, --sync, --upload, --quota, --rollback, --clean, --delete, --status, --help, --version",
 		})
+	}
+
+	if ctx.Err() != nil {
+		os.Exit(130)
 	}
 }
 

@@ -1,9 +1,10 @@
 package operations
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,14 @@ type CleanItem struct {
 
 // Clean analyse le Cloud et purge les deltas obsolètes (post-consolidation), métadonnées orphelines et résidus
 func Clean(args []string) {
+	CleanWithContext(context.Background(), args)
+}
+
+// CleanWithContext exécute le nettoyage Cloud en respectant l'annulation par contexte.
+func CleanWithContext(ctx context.Context, args []string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	apply := hasFlag(args, "--apply")
 
 	if apply {
@@ -31,6 +40,7 @@ func Clean(args []string) {
 			os.Exit(1)
 		}
 		defer lock.ReleaseLock()
+		paths.CleanupOrphanedTemps(paths.GetHorizonDataDir())
 	}
 
 	if !retry.CheckConnectivity() {
@@ -40,18 +50,18 @@ func Clean(args []string) {
 
 	settings := paths.LoadSettings()
 	p, err := providers.GetProvider(settings)
-	if err != nil || p == nil {
+	if err != nil {
+		ipc.SendError("AUTH_KEYRING_ERROR", fmt.Sprintf("Erreur temporaire d'accès au trousseau d'authentification : %v", err), "")
+		return
+	}
+	if p == nil {
 		ipc.SendError("AUTH_EXPIRED", "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.", "")
 		return
 	}
 
-	retryOpts := retry.Options{
-		MaxRetries: settings.MaxRetries,
-		BaseDelay:  time.Duration(settings.RetryBaseDelay) * time.Millisecond,
-		Label:      "[clean]",
-	}
+	retryOpts := retry.FromSettings(settings.MaxRetries, settings.RetryBaseDelay, "[clean]")
 
-	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicates(p, retryOpts, "[clean]")
+	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicatesWithContext(ctx, p, retryOpts, "[clean]")
 	if err != nil {
 		ipc.SendError("CLOUD_ERROR", err.Error(), "")
 		return
@@ -73,25 +83,44 @@ func Clean(args []string) {
 		return
 	}
 
-	// Mode APPLY : suppression effective des fichiers
+	// Mode APPLY : suppression effective des fichiers avec retry et comptage exact
 	var deletedCount int
+	var deletedBytes int64
+	var failedCount int
 	for _, item := range itemsToClean {
-		if err := p.DeleteFile(item.ID); err == nil {
+		if ctx.Err() != nil {
+			ipc.Logf("[clean] Nettoyage interrompu par arrêt gracieux : %d/%d supprimé(s).", deletedCount, len(itemsToClean))
+			break
+		}
+		delOpts := retryOpts
+		delOpts.Label = "clean(" + item.Name + ")"
+		delErr := retry.Do(ctx, delOpts, func() error {
+			err := p.DeleteFile(item.ID)
+			if errors.Is(err, providers.ErrNotFound) {
+				return nil
+			}
+			return err
+		})
+		if delErr == nil {
 			deletedCount++
+			deletedBytes += item.Size
 		} else {
-			ipc.Logf("[clean] Échec suppression fichier %s (%s) : %v", item.Name, item.ID, err)
+			failedCount++
+			ipc.Logf("[clean] Échec suppression fichier %s (%s) : %v", item.Name, item.ID, delErr)
 		}
 	}
 
 	providers.InvalidateCloudIndexCache()
+	formattedDeleted := formatByteSize(deletedBytes)
 
 	ipc.Send(map[string]any{
 		"type":           "CLEAN_COMPLETE",
 		"items":          itemsToClean,
 		"count":          deletedCount,
-		"freedBytes":     totalFreed,
-		"freedFormatted": formattedFreed,
-		"message":        fmt.Sprintf("Nettoyage terminé : %d fichier(s) supprimé(s), %s libéré(s).", deletedCount, formattedFreed),
+		"failedCount":    failedCount,
+		"freedBytes":     deletedBytes,
+		"freedFormatted": formattedDeleted,
+		"message":        fmt.Sprintf("Nettoyage terminé : %d fichier(s) supprimé(s), %s libéré(s).", deletedCount, formattedDeleted),
 	})
 }
 
@@ -125,50 +154,48 @@ func collectCleanItems(cloudIndex map[string]providers.CloudFile) ([]CleanItem, 
 		activeSlugs[slug] = true
 	}
 
+	stagingGraceCutoff := time.Now().Add(-15 * time.Minute)
+
 	for name, file := range cloudIndex {
 		// A. Deltas
-		if strings.HasPrefix(name, PrefixDelta) && strings.HasSuffix(name, ".zip") {
-			stripped := strings.TrimSuffix(strings.TrimPrefix(name, PrefixDelta), ".zip")
-			idx := strings.LastIndex(stripped, "_")
-			if idx > 0 {
-				slug := stripped[:idx]
-				rawTs := stripped[idx+1:]
-				deltaTs, parseErr := strconv.ParseInt(rawTs, 10, 64)
-
-				base, hasBase := baseFiles[slug]
-				if !hasBase {
+		if slug, deltaTs, ok := ParseDeltaFileName(name); ok {
+			base, hasBase := baseFiles[slug]
+			if !hasBase {
+				itemsToClean = append(itemsToClean, CleanItem{
+					ID:     file.ID,
+					Name:   file.Name,
+					Size:   file.Size,
+					Reason: "Delta orphelin (aucune archive de base correspondante)",
+				})
+				totalFreed += file.Size
+			} else {
+				// Comparer les horodatages serveur (ModifiedTime) pour éviter la dérive d'horloge client
+				isObsolete := false
+				if !file.ModifiedTime.IsZero() && !base.ModifiedTime.IsZero() {
+					isObsolete = file.ModifiedTime.Before(base.ModifiedTime)
+				} else {
+					isObsolete = deltaTs < base.ModifiedTime.UnixMilli()
+				}
+				if isObsolete {
 					itemsToClean = append(itemsToClean, CleanItem{
 						ID:     file.ID,
 						Name:   file.Name,
 						Size:   file.Size,
-						Reason: "Delta orphelin (aucune archive de base correspondante)",
+						Reason: "Delta obsolète (déjà consolidé dans l'archive de base)",
 					})
 					totalFreed += file.Size
-				} else if parseErr == nil {
-					// Comparer les horodatages serveur (ModifiedTime) pour éviter la dérive d'horloge client
-					isObsolete := false
-					if !file.ModifiedTime.IsZero() && !base.ModifiedTime.IsZero() {
-						isObsolete = file.ModifiedTime.Before(base.ModifiedTime)
-					} else {
-						isObsolete = deltaTs < base.ModifiedTime.UnixMilli()
-					}
-					if isObsolete {
-						itemsToClean = append(itemsToClean, CleanItem{
-							ID:     file.ID,
-							Name:   file.Name,
-							Size:   file.Size,
-							Reason: "Delta obsolète (déjà consolidé dans l'archive de base)",
-						})
-						totalFreed += file.Size
-					} else {
-						activeSlugs[slug] = true
-					}
+				} else {
+					activeSlugs[slug] = true
 				}
 			}
 		}
 
 		// B. Fichiers temporaires, staging interrompus ou corrompus
+		// Fenêtre de grâce de 15 minutes sur GensHorizon_Staging_* pour ne pas supprimer un upload actif d'un autre PC.
 		if strings.HasPrefix(name, "GensHorizon_Staging_") || strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".part") || strings.HasPrefix(name, "tmp_") {
+			if strings.HasPrefix(name, "GensHorizon_Staging_") && !file.ModifiedTime.IsZero() && file.ModifiedTime.After(stagingGraceCutoff) {
+				continue
+			}
 			reason := "Fichier temporaire résiduel"
 			if strings.HasPrefix(name, "GensHorizon_Staging_") {
 				reason = "Fichier staging résiduel (upload interrompu)"

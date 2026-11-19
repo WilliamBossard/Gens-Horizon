@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -36,6 +37,9 @@ func osKeyringAvailable() bool {
 		_, err := exec.LookPath("security")
 		return err == nil
 	case "linux":
+		if os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
+			return false
+		}
 		_, err := exec.LookPath("secret-tool")
 		return err == nil
 	default:
@@ -58,7 +62,7 @@ func osKeyringProtect(saltBytes []byte) ([]byte, error) {
 	refID := hex.EncodeToString(refBuf)
 	saltHex := hex.EncodeToString(saltBytes)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	switch runtime.GOOS {
@@ -92,7 +96,7 @@ func osKeyringUnprotect(refBytes []byte) ([]byte, error) {
 		return nil, errors.New("keyring: unavailable")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var cmd *exec.Cmd

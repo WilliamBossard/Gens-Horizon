@@ -5,8 +5,27 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
+
+var baseProcessCtx atomic.Pointer[context.Context]
+
+// SetBaseContext configure le contexte racine du processus (annulé sur SIGINT/SIGTERM/SHUTDOWN)
+// afin que les transferts HTTP en cours puissent être interrompus proprement.
+func SetBaseContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	baseProcessCtx.Store(&ctx)
+}
+
+func baseContext() context.Context {
+	if ptr := baseProcessCtx.Load(); ptr != nil && *ptr != nil {
+		return *ptr
+	}
+	return context.Background()
+}
 
 // defaultPooledTransport est un transport HTTP mutualisé entre tous les providers Cloud
 // optimisé pour le débit élevé, la réutilisation des sockets TLS et HTTP/2.
@@ -70,7 +89,7 @@ func (ir *idleActivityReader) Read(p []byte) (int, error) {
 // doUploadWithIdleTimeout exécute une requête d'upload en surveillant l'activité I/O
 // (annule uniquement si aucun octet n'est transmis pendant uploadIdleTimeout).
 func doUploadWithIdleTimeout(client *http.Client, method, rawURL string, body io.Reader, contentLen int64, setHeaders func(*http.Request)) (*http.Response, func(), error) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(baseContext())
 	var timer *time.Timer
 	reqBody := body
 	if body != nil && uploadIdleTimeout > 0 {

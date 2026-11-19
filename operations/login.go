@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -58,6 +59,13 @@ func openBrowser(targetURL string) error {
 }
 
 func Login(args []string) {
+	LoginWithContext(context.Background(), args)
+}
+
+func LoginWithContext(ctx context.Context, args []string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	settings := paths.LoadSettings()
 	providerName := paths.GetProviderName(args, settings)
 
@@ -142,7 +150,7 @@ func Login(args []string) {
 		return
 	}
 
-	ipc.Logf("[login] Ouverture du navigateur vers : %s", authURL)
+	ipc.Logf("[login] Ouverture du navigateur pour l'authentification %s (%s).", providerName, parsedAuth.Host)
 	if bErr := openBrowser(authURL); bErr != nil {
 		_ = listener.Close()
 		ipc.SendError("BROWSER_ERROR", bErr.Error(), "")
@@ -168,21 +176,21 @@ func Login(args []string) {
 			return
 		}
 		q := r.URL.Query()
+		retState := q.Get("state")
+		if subtle.ConstantTimeCompare([]byte(retState), []byte(state)) != 1 {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Erreur CSRF</h2><p>Le jeton de session est invalide.</p></body></html>")
+			ipc.Logf("[login] Requête OAuth ignorée (state invalide)")
+			return
+		}
+
 		if q.Get("error") != "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusForbidden)
 			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Connexion annulée</h2><p>%s</p></body></html>", html.EscapeString(q.Get("error")))
 			ipc.SendError("AUTH_CANCELLED", "La demande de connexion a été refusée ou annulée.", "")
 			signalDone()
-			return
-		}
-
-		retState := q.Get("state")
-		if retState != state {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Erreur CSRF</h2><p>Le jeton de session est invalide.</p></body></html>")
-			ipc.Logf("[login] Requête OAuth ignorée (state invalide)")
 			return
 		}
 
@@ -255,13 +263,18 @@ func Login(args []string) {
 
 	select {
 	case <-done:
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = server.Shutdown(ctx)
+		_ = server.Shutdown(shutCtx)
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutCtx)
+		ipc.SendError("AUTH_CANCELLED", "Connexion annulée.", "")
 	case <-time.After(5 * time.Minute):
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = server.Shutdown(ctx)
+		_ = server.Shutdown(shutCtx)
 		ipc.SendError("TIMEOUT", "Délai d'attente d'authentification dépassé (5 minutes).", "")
 	}
 }
@@ -309,11 +322,13 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 
 	case "dropbox":
 		form := url.Values{
-			"code":          {code},
-			"client_id":     {cfg.ClientID},
-			"client_secret": {cfg.ClientSecret},
-			"redirect_uri":  {cfg.RedirectURI},
-			"grant_type":    {"authorization_code"},
+			"code":         {code},
+			"client_id":    {cfg.ClientID},
+			"redirect_uri": {cfg.RedirectURI},
+			"grant_type":   {"authorization_code"},
+		}
+		if cfg.ClientSecret != "" {
+			form.Set("client_secret", cfg.ClientSecret)
 		}
 		if codeVerifier != "" {
 			form.Set("code_verifier", codeVerifier)
@@ -324,7 +339,7 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 		}
 		defer resp.Body.Close()
 
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if resp.StatusCode != http.StatusOK {
 			return tokenData, fmt.Errorf("dropbox token exchange HTTP %d : %s", resp.StatusCode, string(b))
 		}

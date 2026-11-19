@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -20,6 +21,15 @@ const (
 )
 
 func Check(args []string) {
+	CheckWithContext(context.Background(), args)
+}
+
+func CheckWithContext(ctx context.Context, args []string) {
+	if ctx == nil || ctx.Err() != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return
+		}
+	}
 	if !retry.CheckConnectivity() {
 		ipc.SendOffline("Internet indisponible.")
 		return
@@ -27,7 +37,11 @@ func Check(args []string) {
 
 	settings := paths.LoadSettings()
 	p, err := providers.GetProvider(settings)
-	if err != nil || p == nil {
+	if err != nil {
+		ipc.SendError("AUTH_KEYRING_ERROR", err.Error(), "")
+		return
+	}
+	if p == nil {
 		ipc.Send(ipc.CheckResultMessage{
 			Type:    "CHECK_RESULT",
 			Status:  "NOT_LOGGED_IN",
@@ -36,13 +50,9 @@ func Check(args []string) {
 		return
 	}
 
-	retryOpts := retry.Options{
-		MaxRetries: settings.MaxRetries,
-		BaseDelay:  time.Duration(settings.RetryBaseDelay) * time.Millisecond,
-		Label:      "[check]",
-	}
+	retryOpts := retry.FromSettings(settings.MaxRetries, settings.RetryBaseDelay, "[check]")
 
-	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicates(p, retryOpts, "[check]")
+	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicatesWithContext(ctx, p, retryOpts, "[check]")
 	if err != nil {
 		ipc.SendError("CHECK_FAILED", err.Error(), "")
 		return
@@ -76,9 +86,8 @@ func Check(args []string) {
 		cloudTime := baseFile.ModifiedTime.UnixMilli()
 
 		var latestDeltaTime int64
-		prefixDelta := PrefixDelta + instName + "_"
 		for name, f := range cloudIndex {
-			if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
+			if _, ok := MatchDeltaForInstance(name, instName); ok {
 				ts := f.ModifiedTime.UnixMilli()
 				if ts > latestDeltaTime {
 					latestDeltaTime = ts

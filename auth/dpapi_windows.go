@@ -4,6 +4,7 @@ package auth
 
 import (
 	"errors"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -40,6 +41,8 @@ func dpapiProtect(data []byte) ([]byte, error) {
 		0x1, // CRYPTPROTECT_UI_FORBIDDEN
 		uintptr(unsafe.Pointer(&outBlob)),
 	)
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(inBlob)
 	if r == 0 {
 		return nil, err
 	}
@@ -65,6 +68,8 @@ func dpapiUnprotect(data []byte) ([]byte, error) {
 		0x1, // CRYPTPROTECT_UI_FORBIDDEN
 		uintptr(unsafe.Pointer(&outBlob)),
 	)
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(inBlob)
 	if r == 0 {
 		return nil, err
 	}

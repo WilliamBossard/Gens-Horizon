@@ -67,6 +67,7 @@ func Rollback(args []string) {
 		return
 	}
 	defer lock.ReleaseLock()
+	paths.CleanupOrphanedTemps(paths.GetHorizonDataDir())
 
 	entries, err := os.ReadDir(instDir)
 	if err != nil {

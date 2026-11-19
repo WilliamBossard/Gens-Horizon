@@ -491,3 +491,35 @@ func TestFetchServerTimeUsesFileTimestampFetcherWithoutListFiles(t *testing.T) {
 		t.Fatalf("expected ListFiles NOT to be called when FileTimestampFetcher succeeds, got %d calls", p.listCalled.Load())
 	}
 }
+
+type stubMetaListProvider struct {
+	stubDeleteProvider
+	dlCalls atomic.Int32
+}
+
+func (s *stubMetaListProvider) DownloadJSON(id string, target any) error {
+	s.dlCalls.Add(1)
+	return nil
+}
+
+func TestHandleCloudListCachesEmptyIconMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HORIZON_DATA_DIR", tmpDir)
+
+	modTime := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	localMetaPath := paths.GetMetaPath("NoIconPack")
+	_ = os.MkdirAll(filepath.Dir(localMetaPath), 0755)
+	_ = os.WriteFile(localMetaPath, []byte(`{"realName":"NoIconPack","loader":"fabric"}`), 0644)
+	_ = os.Chtimes(localMetaPath, modTime, modTime)
+
+	p := &stubMetaListProvider{}
+	cloudIndex := map[string]providers.CloudFile{
+		"GensHorizon_Backup_NoIconPack.zip":       {ID: "b1", Name: "GensHorizon_Backup_NoIconPack.zip", Size: 100, ModifiedTime: modTime},
+		"GensHorizon_Meta_NoIconPack.json":        {ID: "m1", Name: "GensHorizon_Meta_NoIconPack.json", Size: 40, ModifiedTime: modTime},
+	}
+
+	handleCloudList(cloudIndex, p)
+	if p.dlCalls.Load() != 0 {
+		t.Fatalf("expected cached metadata without iconData to skip DownloadJSON, got %d calls", p.dlCalls.Load())
+	}
+}

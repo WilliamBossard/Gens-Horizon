@@ -25,6 +25,10 @@ import (
 )
 
 var (
+	// ErrTokenCorrupted indique que le fichier de token ou sa charge chiffrée est structurellement corrompu
+	// (distinct d'une indisponibilité transitoire du trousseau OS / DPAPI).
+	ErrTokenCorrupted = errors.New("token corrompu ou illisible")
+
 	authMu    sync.Mutex
 	machineID string
 	salt      []byte
@@ -93,7 +97,12 @@ func initAuthData() error {
 	// 2. Initialisation de salt.key (scellement DPAPI Windows ou Trousseau OS macOS/Linux + compatibilité héritée)
 	const dpapiPrefix = "DPAPIv1:"
 	const keyringPrefix = "KEYRINGv1:"
-	if data, err := os.ReadFile(sFile); err == nil && len(data) >= 16 {
+	saltData, saltReadErr := os.ReadFile(sFile)
+	if saltReadErr == nil {
+		if len(saltData) < 16 {
+			return fmt.Errorf("salt.key existant tronqué ou corrompu (%d octets) — écrasement refusé pour protéger les tokens", len(saltData))
+		}
+		data := saltData
 		if len(data) > len(dpapiPrefix) && string(data[:len(dpapiPrefix)]) == dpapiPrefix {
 			unsealed, err := dpapiUnprotect(data[len(dpapiPrefix):])
 			if err != nil || len(unsealed) < 16 {
@@ -121,22 +130,32 @@ func initAuthData() error {
 				}
 			}
 		}
+	} else if !os.IsNotExist(saltReadErr) {
+		return fmt.Errorf("impossible de lire salt.key : %w", saltReadErr)
 	} else {
 		salt = make([]byte, 16)
 		if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 			return fmt.Errorf("impossible de générer un salt aléatoire : %w", err)
 		}
 		toWrite := salt
+		sealedByOS := false
 		if dpapiAvailable() {
 			if sealed, err := dpapiProtect(salt); err == nil {
 				toWrite = append([]byte(dpapiPrefix), sealed...)
+				sealedByOS = true
+			} else {
+				ipc.Logf("[auth] AVERTISSEMENT : échec protection DPAPI pour salt.key (%v).", err)
 			}
 		} else if osKeyringAvailable() {
 			if refID, err := osKeyringProtect(salt); err == nil {
 				toWrite = append([]byte(keyringPrefix), refID...)
+				sealedByOS = true
+			} else {
+				ipc.Logf("[auth] AVERTISSEMENT : échec protection trousseau OS pour salt.key (%v).", err)
 			}
-		} else {
-			ipc.Logf("[auth] AVERTISSEMENT : aucun trousseau OS disponible (DPAPI/keyring), salt.key stocké avec permissions 0600 uniquement.")
+		}
+		if !sealedByOS {
+			ipc.Logf("[auth] AVERTISSEMENT : aucun trousseau OS fonctionnel (DPAPI/keyring), salt.key stocké localement avec permissions 0600 uniquement.")
 		}
 		if err := writeAtomicFile(sFile, toWrite, 0600); err != nil {
 			return fmt.Errorf("impossible d'écrire le salt de sécurité (salt.key) : %w", err)
@@ -233,15 +252,15 @@ func Encrypt(text string) (string, error) {
 func openGCM(key []byte, ivHex, tagHex, ctHex string) (string, error) {
 	iv, err := hex.DecodeString(ivHex)
 	if err != nil {
-		return "", errors.New("IV hex invalide")
+		return "", fmt.Errorf("%w: IV hex invalide", ErrTokenCorrupted)
 	}
 	authTag, err := hex.DecodeString(tagHex)
 	if err != nil {
-		return "", errors.New("AuthTag hex invalide")
+		return "", fmt.Errorf("%w: AuthTag hex invalide", ErrTokenCorrupted)
 	}
 	ciphertext, err := hex.DecodeString(ctHex)
 	if err != nil {
-		return "", errors.New("Ciphertext hex invalide")
+		return "", fmt.Errorf("%w: Ciphertext hex invalide", ErrTokenCorrupted)
 	}
 
 	block, err := aes.NewCipher(key)
@@ -253,12 +272,12 @@ func openGCM(key []byte, ivHex, tagHex, ctHex string) (string, error) {
 		return "", err
 	}
 	if len(iv) != gcm.NonceSize() {
-		return "", errors.New("taille IV GCM invalide")
+		return "", fmt.Errorf("%w: taille IV GCM invalide", ErrTokenCorrupted)
 	}
 	ciphertextWithTag := append(ciphertext, authTag...)
 	plaintext, err := gcm.Open(nil, iv, ciphertextWithTag, nil)
 	if err != nil {
-		return "", fmt.Errorf("échec de déchiffrement GCM (tag invalide ou clé incorrecte) : %w", err)
+		return "", fmt.Errorf("%w: échec de déchiffrement GCM (%v)", ErrTokenCorrupted, err)
 	}
 	return string(plaintext), nil
 }
@@ -293,11 +312,11 @@ func Decrypt(encryptedText string) (string, bool, error) {
 		// Format legacy AES-256-CBC (iv:ciphertext)
 		iv, err := hex.DecodeString(parts[0])
 		if err != nil {
-			return "", false, errors.New("IV CBC hex invalide")
+			return "", false, fmt.Errorf("%w: IV CBC hex invalide", ErrTokenCorrupted)
 		}
 		ciphertext, err := hex.DecodeString(strings.Join(parts[1:], ":"))
 		if err != nil {
-			return "", false, errors.New("Ciphertext CBC hex invalide")
+			return "", false, fmt.Errorf("%w: Ciphertext CBC hex invalide", ErrTokenCorrupted)
 		}
 
 		cbcKey := key
@@ -310,10 +329,10 @@ func Decrypt(encryptedText string) (string, bool, error) {
 			return "", false, err
 		}
 		if len(iv) != aes.BlockSize {
-			return "", false, errors.New("taille IV CBC invalide")
+			return "", false, fmt.Errorf("%w: taille IV CBC invalide", ErrTokenCorrupted)
 		}
 		if len(ciphertext)%aes.BlockSize != 0 {
-			return "", false, errors.New("taille de bloc CBC invalide")
+			return "", false, fmt.Errorf("%w: taille de bloc CBC invalide", ErrTokenCorrupted)
 		}
 
 		mode := cipher.NewCBCDecrypter(block, iv)
@@ -323,12 +342,12 @@ func Decrypt(encryptedText string) (string, bool, error) {
 		// Unpadding PKCS#7
 		unpadded, err := pkcs7Unpad(plaintext)
 		if err != nil {
-			return "", false, err
+			return "", false, fmt.Errorf("%w: %v", ErrTokenCorrupted, err)
 		}
 		return string(unpadded), true, nil
 	}
 
-	return "", false, errors.New("format de token chiffré non reconnu")
+	return "", false, fmt.Errorf("%w: format de token chiffré non reconnu", ErrTokenCorrupted)
 }
 
 func pkcs7Unpad(data []byte) ([]byte, error) {
@@ -355,13 +374,13 @@ func GetSecureToken(filePath string, target any) error {
 	}
 	content := strings.TrimSpace(string(data))
 	if len(content) == 0 {
-		return errors.New("fichier de token vide")
+		return fmt.Errorf("%w: fichier de token vide", ErrTokenCorrupted)
 	}
 
 	// Si le fichier commence par '{', c'est du JSON en clair -> migrer vers chiffré
 	if strings.HasPrefix(content, "{") {
 		if err := json.Unmarshal([]byte(content), target); err != nil {
-			return err
+			return fmt.Errorf("%w: json token invalide (%v)", ErrTokenCorrupted, err)
 		}
 		ipc.Logf("[Auth] Sécurisation immédiate du token en clair : %s", filePath)
 		_ = EncryptToken(filePath, target)
@@ -374,7 +393,7 @@ func GetSecureToken(filePath string, target any) error {
 	}
 
 	if err := json.Unmarshal([]byte(decrypted), target); err != nil {
-		return fmt.Errorf("json token invalide après déchiffrement : %w", err)
+		return fmt.Errorf("%w: json token invalide après déchiffrement (%v)", ErrTokenCorrupted, err)
 	}
 
 	if needsMigration {
@@ -404,15 +423,23 @@ func writeAtomicFile(filePath string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
 		return err
 	}
-	tmpFile := fmt.Sprintf("%s.tmp.%d", filePath, os.Getpid())
+	tmpFile := fmt.Sprintf("%s.tmp.%d.%d", filePath, os.Getpid(), time.Now().UnixNano())
 	if err := os.WriteFile(tmpFile, data, perm); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpFile, filePath); err != nil {
-		_ = os.Remove(tmpFile)
-		return err
+	var renameErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := os.Rename(tmpFile, filePath); err == nil {
+			return nil
+		} else {
+			renameErr = err
+		}
+		if attempt < 4 {
+			time.Sleep(time.Duration(40*(attempt+1)) * time.Millisecond)
+		}
 	}
-	return nil
+	_ = os.Remove(tmpFile)
+	return renameErr
 }
 
 // TokenData représente la structure standard d'un jeton OAuth2

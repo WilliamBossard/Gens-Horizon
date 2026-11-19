@@ -38,11 +38,12 @@ var IgnoredDirs = map[string]bool{
 }
 
 var IgnoredFilesExact = map[string]bool{
-	".ds_store":    true,
-	"thumbs.db":    true,
-	"desktop.ini":  true,
-	"ehthumbs.db":  true,
-	"session.lock": true,
+	".ds_store":     true,
+	"thumbs.db":     true,
+	"desktop.ini":   true,
+	"ehthumbs.db":   true,
+	"session.lock":  true,
+	"instance.lock": true,
 }
 
 // IsIgnoredFile détermine si un fichier doit être exclu du scan (pollution OS ou fichier temporaire)
@@ -167,8 +168,8 @@ func GenerateManifestWithOptions(targetDir string, oldManifest Manifest, verifyA
 			return nil
 		}
 
-		if d.Type()&os.ModeSymlink != 0 {
-			ipc.Logf("[scanner] Lien symbolique ignoré par sécurité : %s", currentPath)
+		if d.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			ipc.Logf("[scanner] Lien symbolique ou fichier irrégulier ignoré par sécurité : %s", currentPath)
 			return nil
 		}
 

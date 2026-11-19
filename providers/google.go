@@ -19,6 +19,7 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
+	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 type GoogleProvider struct {
@@ -72,9 +73,12 @@ func (g *GoogleProvider) refreshToken() error {
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("échec rafraîchissement token (HTTP %d) : %s", resp.StatusCode, string(bodyBytes))
+		return &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("échec rafraîchissement token (HTTP %d) : %s", resp.StatusCode, string(bodyBytes)),
+		}
 	}
 
 	var res struct {
@@ -175,11 +179,14 @@ func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 			return nil, err
 		}
 
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
 		_ = resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("[google] listFiles HTTP %d : %s", resp.StatusCode, string(bodyBytes))
+			return nil, &retry.HTTPError{
+				StatusCode: resp.StatusCode,
+				Message:    fmt.Sprintf("[google] listFiles HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
+			}
 		}
 
 		var res struct {
@@ -285,7 +292,24 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 		}
 
 		contentType := resp.Header.Get("Content-Type")
-		if resp.StatusCode == http.StatusOK && (strings.Contains(contentType, "text/html") || (strings.Contains(contentType, "application/json") && !strings.Contains(contentType, "octet"))) {
+		isAbusePrompt := resp.StatusCode == http.StatusOK && (strings.Contains(contentType, "text/html") || (strings.Contains(contentType, "application/json") && !strings.Contains(contentType, "octet")))
+		if !isAbusePrompt && resp.StatusCode == http.StatusForbidden && !useConfirm {
+			peekBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+			peekStr := string(peekBytes)
+			if strings.Contains(peekStr, "cannotDownloadAbuseFile") || strings.Contains(peekStr, "acknowledgeAbuse") {
+				isAbusePrompt = true
+			} else {
+				origBody := resp.Body
+				resp.Body = struct {
+					io.Reader
+					io.Closer
+				}{
+					Reader: io.MultiReader(bytes.NewReader(peekBytes), origBody),
+					Closer: origBody,
+				}
+			}
+		}
+		if isAbusePrompt {
 			_ = resp.Body.Close()
 			confirmAbuseMu.Lock()
 			confirmAbuse = true
@@ -319,11 +343,14 @@ func (g *GoogleProvider) DownloadJSON(fileID string, target any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("[google] downloadJSON HTTP %d : %s", resp.StatusCode, string(b))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		return &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("[google] downloadJSON HTTP %d : %s", resp.StatusCode, string(b)),
+		}
 	}
 
-	return json.NewDecoder(resp.Body).Decode(target)
+	return json.NewDecoder(io.LimitReader(resp.Body, 16*1024*1024)).Decode(target)
 }
 
 func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID string, onProgress func(pct int)) (string, error) {

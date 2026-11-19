@@ -10,6 +10,14 @@ import (
 
 // GetCloudIndexAndCleanDuplicates récupère la liste des fichiers cloud (avec cache éphémère 45s) et purge automatiquement les doublons obsolètes
 func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix string) (map[string]CloudFile, error) {
+	return GetCloudIndexAndCleanDuplicatesWithContext(context.Background(), p, opts, logPrefix)
+}
+
+// GetCloudIndexAndCleanDuplicatesWithContext respecte le contexte d'annulation lors de l'indexation et de la purge des doublons.
+func GetCloudIndexAndCleanDuplicatesWithContext(ctx context.Context, p Provider, opts retry.Options, logPrefix string) (map[string]CloudFile, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if cachedFiles, ok := GetCleanedCloudIndex(p.Name(), DefaultCloudIndexTTL); ok {
 		cloudIndex := make(map[string]CloudFile, len(cachedFiles))
 		for _, f := range cachedFiles {
@@ -19,7 +27,7 @@ func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix s
 	}
 
 	var cloudFiles []CloudFile
-	err := retry.Do(context.Background(), opts, func() error {
+	err := retry.Do(ctx, opts, func() error {
 		files, err := p.ListFiles("GensHorizon_")
 		if err != nil {
 			return err
@@ -68,7 +76,7 @@ func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix s
 				defer func() { <-sem }()
 				delOpts := opts
 				delOpts.Label = "deleteDuplicate(" + file.Name + ")"
-				if delErr := retry.Do(context.Background(), delOpts, func() error {
+				if delErr := retry.Do(ctx, delOpts, func() error {
 					return p.DeleteFile(file.ID)
 				}); delErr != nil {
 					ipc.Logf("%s Échec purge doublon Cloud %s (%s) : %v", logPrefix, file.Name, file.ID, delErr)

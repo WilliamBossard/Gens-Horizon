@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
+	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 type OneDriveProvider struct {
@@ -75,9 +77,12 @@ func (o *OneDriveProvider) refreshToken() error {
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("erreur refresh token OneDrive (HTTP %d) : %s", resp.StatusCode, string(bodyBytes))
+		return &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("erreur refresh token OneDrive (HTTP %d) : %s", resp.StatusCode, string(bodyBytes)),
+		}
 	}
 
 	var res struct {
@@ -198,11 +203,14 @@ func (o *OneDriveProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 			return nil, err
 		}
 
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
 		_ = resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("onedrive listFiles HTTP %d : %s", resp.StatusCode, string(bodyBytes))
+			return nil, &retry.HTTPError{
+				StatusCode: resp.StatusCode,
+				Message:    fmt.Sprintf("onedrive listFiles HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
+			}
 		}
 
 		type Item struct {
@@ -315,11 +323,14 @@ func (o *OneDriveProvider) DownloadJSON(fileID string, target any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("onedrive downloadJSON HTTP %d : %s", resp.StatusCode, string(b))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		return &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("onedrive downloadJSON HTTP %d : %s", resp.StatusCode, string(b)),
+		}
 	}
 
-	return json.NewDecoder(resp.Body).Decode(target)
+	return json.NewDecoder(io.LimitReader(resp.Body, 16*1024*1024)).Decode(target)
 }
 
 func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID string, onProgress func(pct int)) (string, error) {
@@ -435,6 +446,33 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 	var offset int64
 	var finalID string
 
+	querySessionNextOffset := func() (int64, bool) {
+		req, qErr := http.NewRequest(http.MethodGet, sessionRes.UploadURL, nil)
+		if qErr != nil {
+			return 0, false
+		}
+		qResp, qErr := o.client.Do(req)
+		if qErr != nil {
+			return 0, false
+		}
+		defer qResp.Body.Close()
+		if qResp.StatusCode != http.StatusOK {
+			return 0, false
+		}
+		var status struct {
+			NextExpectedRanges []string `json:"nextExpectedRanges"`
+		}
+		if err := json.NewDecoder(io.LimitReader(qResp.Body, 64*1024)).Decode(&status); err != nil || len(status.NextExpectedRanges) == 0 {
+			return 0, false
+		}
+		rangeParts := strings.SplitN(status.NextExpectedRanges[0], "-", 2)
+		nextStart, pErr := strconv.ParseInt(strings.TrimSpace(rangeParts[0]), 10, 64)
+		if pErr != nil || nextStart < 0 {
+			return 0, false
+		}
+		return nextStart, true
+	}
+
 	for offset < fileSize {
 		remaining := fileSize - offset
 		currentChunk := chunkSize
@@ -444,6 +482,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 
 		var chunkDone bool
 		var lastErr error
+		var nextOffset = offset + currentChunk
 
 		for attempt := 0; attempt < 3; attempt++ {
 			if attempt > 0 {
@@ -467,6 +506,11 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 			})
 			if err != nil {
 				lastErr = err
+				if expectedStart, ok := querySessionNextOffset(); ok && expectedStart > offset {
+					nextOffset = expectedStart
+					chunkDone = true
+					break
+				}
 				continue
 			}
 			chunkBody, _ := io.ReadAll(chunkResp.Body)
@@ -475,6 +519,18 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 
 			if chunkResp.StatusCode != http.StatusOK && chunkResp.StatusCode != http.StatusCreated && chunkResp.StatusCode != http.StatusAccepted {
 				lastErr = fmt.Errorf("onedrive chunk upload HTTP %d : %s", chunkResp.StatusCode, string(chunkBody))
+				if chunkResp.StatusCode == http.StatusRequestedRangeNotSatisfiable || chunkResp.StatusCode >= 500 || chunkResp.StatusCode == http.StatusTooManyRequests || chunkResp.StatusCode == http.StatusRequestTimeout {
+					if expectedStart, ok := querySessionNextOffset(); ok && expectedStart > offset {
+						nextOffset = expectedStart
+						chunkDone = true
+						break
+					}
+					continue
+				}
+				// Erreur 4xx définitive (400/401/403/404/413...) : inutile de réessayer
+				if chunkResp.StatusCode >= 400 && chunkResp.StatusCode < 500 {
+					break
+				}
 				continue
 			}
 
@@ -492,7 +548,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 		if !chunkDone {
 			return "", lastErr
 		}
-		offset += currentChunk
+		offset = nextOffset
 	}
 
 	InvalidateCloudIndexCache()

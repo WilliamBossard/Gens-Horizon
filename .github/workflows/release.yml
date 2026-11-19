@@ -8,19 +8,37 @@ on:
         required: true
         default: 'v1.4.2'
 
+permissions:
+  contents: write
+
+concurrency:
+  group: release-gens-horizon
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: 'go.mod'
           check-latest: true
+
+      - name: Validate Tag Name
+        env:
+          TAG_NAME: ${{ github.event.inputs.tag_name }}
+        run: |
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "Tag invalide : $TAG_NAME" >&2
+            exit 1
+          fi
 
       - name: Go Vet
         run: go vet ./...
@@ -29,17 +47,23 @@ jobs:
         run: go test -race -count=1 -v ./...
 
       - name: Install lipo (Universal Binary tool)
-        run: go install github.com/konoui/lipo@latest
+        run: go install github.com/konoui/lipo@v0.10.0
 
       - name: Compile Horizon Binaries (Cross-Platform)
+        env:
+          G_CLIENT_ID: ${{ secrets.G_CLIENT_ID }}
+          G_CLIENT_SECRET: ${{ secrets.G_CLIENT_SECRET }}
+          D_CLIENT_ID: ${{ secrets.D_CLIENT_ID }}
+          D_CLIENT_SECRET: ${{ secrets.D_CLIENT_SECRET }}
+          O_CLIENT_ID: ${{ secrets.O_CLIENT_ID }}
+          TAG_NAME: ${{ github.event.inputs.tag_name }}
         run: |
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "Tag invalide : $TAG_NAME" >&2
+            exit 1
+          fi
           mkdir -p dist
-          LDFLAGS="-s -w -X 'github.com/WilliamBossard/Gens-Horizon/config.GoogleClientID=${{ secrets.G_CLIENT_ID }}' \
-                         -X 'github.com/WilliamBossard/Gens-Horizon/config.GoogleClientSecret=${{ secrets.G_CLIENT_SECRET }}' \
-                         -X 'github.com/WilliamBossard/Gens-Horizon/config.DropboxClientID=${{ secrets.D_CLIENT_ID }}' \
-                         -X 'github.com/WilliamBossard/Gens-Horizon/config.DropboxClientSecret=${{ secrets.D_CLIENT_SECRET }}' \
-                         -X 'github.com/WilliamBossard/Gens-Horizon/config.OneDriveClientID=${{ secrets.O_CLIENT_ID }}' \
-                         -X 'github.com/WilliamBossard/Gens-Horizon/config.AppVersion=${{ github.event.inputs.tag_name }}'"
+          LDFLAGS="-s -w -X github.com/WilliamBossard/Gens-Horizon/config.GoogleClientID=${G_CLIENT_ID} -X github.com/WilliamBossard/Gens-Horizon/config.GoogleClientSecret=${G_CLIENT_SECRET} -X github.com/WilliamBossard/Gens-Horizon/config.DropboxClientID=${D_CLIENT_ID} -X github.com/WilliamBossard/Gens-Horizon/config.DropboxClientSecret=${D_CLIENT_SECRET} -X github.com/WilliamBossard/Gens-Horizon/config.OneDriveClientID=${O_CLIENT_ID} -X github.com/WilliamBossard/Gens-Horizon/config.AppVersion=${TAG_NAME}"
 
           # Windows amd64
           GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/Horizon.exe .
@@ -65,7 +89,7 @@ jobs:
           sha256sum Horizon-macos | awk '{print $1}' > Horizon-macos.sha256
 
       - name: Publish to GitHub Releases
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.event.inputs.tag_name }}
           name: Release ${{ github.event.inputs.tag_name }}

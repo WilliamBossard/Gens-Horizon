@@ -74,10 +74,14 @@ func GetProvider(settings config.Settings) (Provider, error) {
 	var tokenData auth.TokenData
 	if err := auth.GetSecureToken(tokenPath, &tokenData); err != nil {
 		ipc.Logf("[provider] Token illisible pour '%s' : %v", name, err)
-		// Sauvegarder backup du token corrompu
-		corruptPath := fmt.Sprintf("%s.corrupted_%d", tokenPath, time.Now().UnixMilli())
-		_ = os.Rename(tokenPath, corruptPath)
-		return nil, nil
+		if errors.Is(err, auth.ErrTokenCorrupted) {
+			// Sauvegarder backup uniquement en cas de corruption structurelle confirmée du token
+			corruptPath := fmt.Sprintf("%s.corrupted_%d", tokenPath, time.Now().UnixMilli())
+			_ = os.Rename(tokenPath, corruptPath)
+			return nil, nil
+		}
+		// Erreur transitoire du trousseau OS / DPAPI : préserver token.json intact
+		return nil, err
 	}
 
 	cfg, err := config.GetProviderConfig(name, paths.GetHorizonDataDir())

@@ -157,14 +157,31 @@ func ResolveWithFallback(newPath string, legacyPaths ...string) string {
 	return newPath
 }
 
+func isWindowsReservedName(segment string) bool {
+	s := strings.TrimRight(strings.TrimSpace(segment), ". ")
+	if dot := strings.IndexByte(s, '.'); dot >= 0 {
+		s = s[:dot]
+	}
+	switch strings.ToUpper(s) {
+	case "CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		return true
+	}
+	return false
+}
+
 // SanitizeInstanceName valide qu'un nom d'instance est un segment unique sûr (pas de traversal ni de séparateurs).
 func SanitizeInstanceName(name string) (string, error) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" || trimmed == "." || trimmed == ".." {
 		return "", fmt.Errorf("nom d'instance invalide")
 	}
-	if strings.ContainsAny(trimmed, "/\\\x00") || strings.Contains(trimmed, "..") {
+	if strings.ContainsAny(trimmed, "/\\:\x00") || strings.Contains(trimmed, "..") {
 		return "", fmt.Errorf("nom d'instance contient des caractères interdits : %q", name)
+	}
+	if isWindowsReservedName(trimmed) {
+		return "", fmt.Errorf("nom d'instance réservé Windows interdit : %q", name)
 	}
 	return trimmed, nil
 }
@@ -173,6 +190,17 @@ func SanitizeInstanceName(name string) (string, error) {
 func SafeJoinUnder(baseDir, relPath string) (string, error) {
 	if relPath == "" {
 		return "", fmt.Errorf("chemin relatif vide")
+	}
+	if strings.ContainsAny(relPath, ":\x00") {
+		return "", fmt.Errorf("caractère interdit dans le chemin : %q", relPath)
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(relPath), "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		if seg == ".." || isWindowsReservedName(seg) {
+			return "", fmt.Errorf("segment de chemin interdit : %q", relPath)
+		}
 	}
 	absBase, err := filepath.Abs(filepath.Clean(baseDir))
 	if err != nil {

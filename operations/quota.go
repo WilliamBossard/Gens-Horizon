@@ -5,7 +5,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
 	"github.com/WilliamBossard/Gens-Horizon/paths"
@@ -14,6 +13,13 @@ import (
 )
 
 func Quota(args []string) {
+	QuotaWithContext(context.Background(), args)
+}
+
+func QuotaWithContext(ctx context.Context, args []string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !retry.CheckConnectivity() {
 		ipc.SendOffline("Internet indisponible.")
 		return
@@ -21,16 +27,16 @@ func Quota(args []string) {
 
 	settings := paths.LoadSettings()
 	p, err := providers.GetProvider(settings)
-	if err != nil || p == nil {
+	if err != nil {
+		ipc.SendError("AUTH_KEYRING_ERROR", err.Error(), "")
+		return
+	}
+	if p == nil {
 		ipc.SendError("AUTH_EXPIRED", "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.", "")
 		return
 	}
 
-	retryOpts := retry.Options{
-		MaxRetries: settings.MaxRetries,
-		BaseDelay:  time.Duration(settings.RetryBaseDelay) * time.Millisecond,
-		Label:      "[quota]",
-	}
+	retryOpts := retry.FromSettings(settings.MaxRetries, settings.RetryBaseDelay, "[quota]")
 
 	var usedBytes, totalBytes int64
 	var quotaErr error
@@ -41,7 +47,7 @@ func Quota(args []string) {
 
 	go func() {
 		defer wg.Done()
-		quotaErr = retry.Do(context.Background(), retryOpts, func() error {
+		quotaErr = retry.Do(ctx, retryOpts, func() error {
 			var qErr error
 			usedBytes, totalBytes, qErr = p.GetQuota()
 			return qErr
@@ -54,7 +60,7 @@ func Quota(args []string) {
 			cloudFiles = cached
 			return
 		}
-		listErr := retry.Do(context.Background(), retryOpts, func() error {
+		listErr := retry.Do(ctx, retryOpts, func() error {
 			var lErr error
 			cloudFiles, lErr = p.ListFiles("GensHorizon_")
 			return lErr
@@ -87,13 +93,9 @@ func Quota(args []string) {
 
 		if strings.HasPrefix(f.Name, PrefixBackup) {
 			instName = strings.TrimSuffix(strings.TrimPrefix(f.Name, PrefixBackup), ".zip")
-		} else if strings.HasPrefix(f.Name, PrefixDelta) {
-			body := strings.TrimSuffix(strings.TrimPrefix(f.Name, PrefixDelta), ".zip")
-			parts := strings.Split(body, "_")
-			if len(parts) > 1 {
-				instName = strings.Join(parts[:len(parts)-1], "_")
-				isDelta = true
-			}
+		} else if slug, _, ok := ParseDeltaFileName(f.Name); ok {
+			instName = slug
+			isDelta = true
 		} else if strings.HasPrefix(f.Name, PrefixManifest) {
 			instName = strings.TrimSuffix(strings.TrimPrefix(f.Name, PrefixManifest), ".json")
 		} else if strings.HasPrefix(f.Name, PrefixMeta) {
@@ -122,11 +124,13 @@ func Quota(args []string) {
 	})
 
 	ipc.Send(ipc.QuotaMessage{
-		Type:        "QUOTA",
-		UsedBytes:   usedBytes,
-		TotalBytes:  totalBytes,
-		HorizonUsed: horizonUsed,
-		Instances:   instances,
+		Type:         "QUOTA",
+		Provider:     settings.Provider,
+		UsedBytes:    usedBytes,
+		TotalBytes:   totalBytes,
+		HorizonUsed:  horizonUsed,
+		HorizonBytes: horizonUsed,
+		Instances:    instances,
 	})
 }
 

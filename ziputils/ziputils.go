@@ -34,9 +34,42 @@ var zipBufPool = sync.Pool{
 	},
 }
 
-// isZipEntrySafeUnder vérifie via filepath.Rel qu'une entrée ZIP reste strictement sous cleanTarget.
+var windowsReservedNames = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
+	"com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
+	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
+func isWindowsReservedSegment(seg string) bool {
+	trimmed := strings.TrimRight(seg, " .")
+	if trimmed == "" {
+		return false
+	}
+	base := trimmed
+	if dot := strings.IndexByte(base, '.'); dot >= 0 {
+		base = base[:dot]
+	}
+	return windowsReservedNames[strings.ToLower(base)]
+}
+
+// isZipEntrySafeUnder vérifie via filepath.Rel qu'une entrée ZIP reste strictement sous cleanTarget
+// et ne contient ni ':' (ADS/lecteur Windows) ni nom de périphérique réservé Windows.
 func isZipEntrySafeUnder(cleanTarget, entryName string) (string, bool) {
-	destPath := filepath.Join(cleanTarget, filepath.FromSlash(entryName))
+	if strings.ContainsAny(entryName, ":\x00") {
+		return "", false
+	}
+	normalized := strings.ReplaceAll(entryName, "\\", "/")
+	for _, seg := range strings.Split(normalized, "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		if seg == ".." || isWindowsReservedSegment(seg) {
+			return "", false
+		}
+	}
+	destPath := filepath.Join(cleanTarget, filepath.FromSlash(normalized))
 	cleanDest := filepath.Clean(destPath)
 	rel, err := filepath.Rel(cleanTarget, cleanDest)
 	if err != nil {
@@ -55,8 +88,8 @@ func resolveNearestRealDir(cleanTargetReal, candidateDir string) error {
 	for {
 		info, err := os.Lstat(cur)
 		if err == nil {
-			if info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("lien symbolique détecté dans le dossier cible : %s", cur)
+			if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+				return fmt.Errorf("lien symbolique ou jonction détecté dans le dossier cible : %s", cur)
 			}
 			realCur, rErr := filepath.EvalSymlinks(cur)
 			if rErr != nil {
@@ -140,6 +173,32 @@ func sanitizeZipFileMode(mode os.FileMode) os.FileMode {
 // extractZipEntriesParallel extrait une liste validée d'entrées ZIP en parallèle avec limites anti-Zip-Bomb et progression throttlée.
 func extractZipEntriesParallel(cleanTarget string, filesToExtract []*zip.File, onProgress func(pct int)) error {
 	return extractZipEntriesParallelWithLimits(cleanTarget, filesToExtract, maxZipExtractTotalBytes, maxZipSingleFileBytes, onProgress)
+}
+
+type atomicBudgetReader struct {
+	r           io.Reader
+	total       *atomic.Int64
+	maxTotal    int64
+	maxSingle   int64
+	singleRead  int64
+	entryName   string
+	exceededErr error
+}
+
+func (br *atomicBudgetReader) Read(p []byte) (int, error) {
+	n, err := br.r.Read(p)
+	if n > 0 {
+		br.singleRead += int64(n)
+		if br.singleRead > br.maxSingle {
+			br.exceededErr = fmt.Errorf("fichier ZIP trop volumineux (%s > %d octets)", br.entryName, br.maxSingle)
+			return n, br.exceededErr
+		}
+		if br.total.Add(int64(n)) > br.maxTotal {
+			br.exceededErr = fmt.Errorf("archive ZIP trop volumineuse après décompression (> %d octets)", br.maxTotal)
+			return n, br.exceededErr
+		}
+	}
+	return n, err
 }
 
 func extractZipEntriesParallelWithLimits(cleanTarget string, filesToExtract []*zip.File, maxTotalBytes int64, maxSingleBytes int64, onProgress func(pct int)) error {
@@ -231,26 +290,32 @@ func extractZipEntriesParallelWithLimits(cleanTarget string, filesToExtract []*z
 					return
 				}
 
-				remainingBudget := maxTotalBytes - totalExtractedBytes.Load()
-				if remainingBudget <= 0 {
+				if totalExtractedBytes.Load() >= maxTotalBytes {
 					_ = outFile.Close()
 					_ = rc.Close()
 					_ = os.Remove(cleanDest)
 					setErr(fmt.Errorf("archive ZIP trop volumineuse après décompression (> %d octets)", maxTotalBytes))
 					return
 				}
-				readCap := maxSingleBytes
-				if remainingBudget < readCap {
-					readCap = remainingBudget
-				}
 
-				limitedRC := io.LimitReader(rc, readCap+1)
+				budgetReader := &atomicBudgetReader{
+					r:         rc,
+					total:     &totalExtractedBytes,
+					maxTotal:  maxTotalBytes,
+					maxSingle: maxSingleBytes,
+					entryName: zf.Name,
+				}
 				bufPtr := zipBufPool.Get().(*[]byte)
-				written, copyErr := io.CopyBuffer(outFile, limitedRC, *bufPtr)
+				_, copyErr := io.CopyBuffer(outFile, budgetReader, *bufPtr)
 				zipBufPool.Put(bufPtr)
 				closeErr := outFile.Close()
 				_ = rc.Close()
 
+				if budgetReader.exceededErr != nil {
+					_ = os.Remove(cleanDest)
+					setErr(budgetReader.exceededErr)
+					return
+				}
 				if copyErr != nil {
 					_ = os.Remove(cleanDest)
 					setErr(copyErr)
@@ -259,20 +324,6 @@ func extractZipEntriesParallelWithLimits(cleanTarget string, filesToExtract []*z
 				if closeErr != nil {
 					_ = os.Remove(cleanDest)
 					setErr(closeErr)
-					return
-				}
-				if written > readCap {
-					_ = os.Remove(cleanDest)
-					if written > maxSingleBytes {
-						setErr(fmt.Errorf("fichier ZIP trop volumineux (%s > %d octets)", zf.Name, maxSingleBytes))
-					} else {
-						setErr(fmt.Errorf("archive ZIP trop volumineuse après décompression (> %d octets)", maxTotalBytes))
-					}
-					return
-				}
-				if totalExtractedBytes.Add(written) > maxTotalBytes {
-					_ = os.Remove(cleanDest)
-					setErr(fmt.Errorf("archive ZIP trop volumineuse après décompression (> %d octets)", maxTotalBytes))
 					return
 				}
 
@@ -361,6 +412,19 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 	}
 
 	// Étape 1 : Création synchrone rapide de tous les répertoires et filtrage des fichiers valides
+	verifiedDirs := map[string]bool{cleanTarget: true}
+	ensureSafeCachedDir := func(dirPath string) error {
+		cleanDir := filepath.Clean(dirPath)
+		if verifiedDirs[cleanDir] {
+			return nil
+		}
+		if err := ensureSafeDestDir(cleanTargetReal, cleanDir); err != nil {
+			return err
+		}
+		verifiedDirs[cleanDir] = true
+		return nil
+	}
+
 	var declaredTotal uint64
 	var filesToExtract []*zip.File
 	seenPathsLower := make(map[string]int, len(zr.File))
@@ -376,7 +440,7 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 		}
 
 		if zf.FileInfo().IsDir() {
-			if err := ensureSafeDestDir(cleanTargetReal, cleanDest); err != nil {
+			if err := ensureSafeCachedDir(cleanDest); err != nil {
 				return err
 			}
 			continue
@@ -394,7 +458,7 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 			return fmt.Errorf("archive ZIP dépasse la taille maximale décompressée (%d octets)", maxZipExtractTotalBytes)
 		}
 
-		if err := ensureSafeDestDir(cleanTargetReal, filepath.Dir(cleanDest)); err != nil {
+		if err := ensureSafeCachedDir(filepath.Dir(cleanDest)); err != nil {
 			return err
 		}
 
@@ -420,7 +484,7 @@ func WriteFullZip(sourceFolder string, out io.Writer, onProgress func(pct int)) 
 // s'il est fourni (> 0) pour éviter une double traversée WalkDir.
 func WriteFullZipWithHint(sourceFolder string, totalBytesHint int64, out io.Writer, onProgress func(pct int)) error {
 	isIgnoredEntry := func(d os.DirEntry, fullPath string) bool {
-		if d.Type()&os.ModeSymlink != 0 {
+		if d.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 {
 			return true
 		}
 		lowerName := strings.ToLower(d.Name())
@@ -536,6 +600,9 @@ func WriteFullZipWithHint(sourceFolder string, totalBytesHint int64, out io.Writ
 				}
 			}
 			if rErr != nil {
+				if rErr != io.EOF {
+					writeErr = fmt.Errorf("erreur lecture fichier '%s' pendant archivage : %w", rel, rErr)
+				}
 				break
 			}
 		}
@@ -559,7 +626,7 @@ func CreateFullZip(sourceFolder string, destZipPath string, onProgress func(pct 
 // CreateFullZipWithHint compresse l'intégralité d'un dossier d'instance dans un fichier avec tampon de 256 Ko
 // en exploitant totalBytesHint (> 0) pour éviter une passe WalkDir redondante.
 func CreateFullZipWithHint(sourceFolder string, totalBytesHint int64, destZipPath string, onProgress func(pct int)) (retErr error) {
-	outFile, err := os.Create(destZipPath)
+	outFile, err := os.OpenFile(destZipPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
@@ -632,7 +699,7 @@ func WriteDeltaZip(sourceFolder string, files []string, deletedFiles []string, o
 	for _, rel := range files {
 		fullPath := filepath.Join(sourceFolder, filepath.FromSlash(rel))
 		info, err := os.Lstat(fullPath)
-		if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if err != nil || info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
 			continue
 		}
 
@@ -688,6 +755,12 @@ func WriteDeltaZip(sourceFolder string, files []string, deletedFiles []string, o
 				}
 			}
 			if rErr != nil {
+				if rErr != io.EOF {
+					zipBufPool.Put(bufPtr)
+					_ = inFile.Close()
+					_ = zw.Close()
+					return fmt.Errorf("erreur lecture fichier delta '%s' pendant archivage : %w", rel, rErr)
+				}
 				break
 			}
 		}
@@ -700,7 +773,7 @@ func WriteDeltaZip(sourceFolder string, files []string, deletedFiles []string, o
 
 // CreateDeltaZip crée une archive contenant uniquement les fichiers spécifiés avec tampon de 256 Ko
 func CreateDeltaZip(sourceFolder string, files []string, deletedFiles []string, destZipPath string, onProgress func(pct int)) (retErr error) {
-	outFile, err := os.Create(destZipPath)
+	outFile, err := os.OpenFile(destZipPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}

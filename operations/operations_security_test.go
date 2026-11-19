@@ -89,3 +89,33 @@ func TestIsValidImageDataURISVGDecodesBase64(t *testing.T) {
 	}
 }
 
+func TestIsRealPathStrictlyUnderRejectsSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	instDir := filepath.Join(tmp, "instance")
+	outsideDir := filepath.Join(tmp, "outside")
+	if err := os.MkdirAll(instDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	secretImg := filepath.Join(outsideDir, "secret.png")
+	if err := os.WriteFile(secretImg, []byte("PNG"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	validIcon := filepath.Join(instDir, "icon.png")
+	if err := os.WriteFile(validIcon, []byte("PNG"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !isRealPathStrictlyUnder(instDir, validIcon) {
+		t.Fatalf("expected regular file inside instDir to pass isRealPathStrictlyUnder")
+	}
+
+	linkIcon := filepath.Join(instDir, "leak.png")
+	if err := os.Symlink(secretImg, linkIcon); err == nil {
+		if isRealPathStrictlyUnder(instDir, linkIcon) {
+			t.Fatalf("expected symlink pointing outside instDir to be rejected")
+		}
+	}
+}
+

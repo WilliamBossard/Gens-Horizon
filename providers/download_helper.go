@@ -39,21 +39,38 @@ func parseContentRangeStart(hdr string) (int64, bool) {
 var downloadIdleTimeout = 60 * time.Second
 
 type idleTimeoutReadCloser struct {
-	rc       io.ReadCloser
-	timeout  time.Duration
-	timedOut atomic.Bool
-	timer    *time.Timer
+	rc        io.ReadCloser
+	timeout   time.Duration
+	timedOut  atomic.Bool
+	reading   atomic.Bool
+	timer     *time.Timer
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func newIdleTimeoutReader(rc io.ReadCloser, timeout time.Duration) *idleTimeoutReadCloser {
-	itr := &idleTimeoutReadCloser{rc: rc, timeout: timeout}
+	itr := &idleTimeoutReadCloser{
+		rc:      rc,
+		timeout: timeout,
+		done:    make(chan struct{}),
+	}
 	if timeout > 0 {
-		t := time.AfterFunc(24*time.Hour, func() {
-			itr.timedOut.Store(true)
-			_ = itr.rc.Close()
-		})
-		t.Stop()
-		itr.timer = t
+		itr.timer = time.NewTimer(timeout)
+		itr.timer.Stop()
+		go func() {
+			for {
+				select {
+				case <-itr.done:
+					return
+				case <-itr.timer.C:
+					if itr.reading.Load() {
+						itr.timedOut.Store(true)
+						_ = itr.rc.Close()
+						return
+					}
+				}
+			}
+		}()
 	}
 	return itr
 }
@@ -62,9 +79,14 @@ func (itr *idleTimeoutReadCloser) Read(p []byte) (int, error) {
 	if itr.timeout <= 0 || itr.timer == nil {
 		return itr.rc.Read(p)
 	}
+	itr.reading.Store(true)
 	itr.timer.Reset(itr.timeout)
+
 	n, err := itr.rc.Read(p)
+
+	itr.reading.Store(false)
 	itr.timer.Stop()
+
 	if err != nil && itr.timedOut.Load() {
 		return n, fmt.Errorf("download stalled (no data for %s): %w", itr.timeout, err)
 	}
@@ -72,9 +94,13 @@ func (itr *idleTimeoutReadCloser) Read(p []byte) (int, error) {
 }
 
 func (itr *idleTimeoutReadCloser) Close() error {
-	if itr.timer != nil {
-		itr.timer.Stop()
-	}
+	itr.closeOnce.Do(func() {
+		itr.reading.Store(false)
+		close(itr.done)
+		if itr.timer != nil {
+			itr.timer.Stop()
+		}
+	})
 	return itr.rc.Close()
 }
 
@@ -92,11 +118,16 @@ func finalizeTempDownloadFile(out *os.File, tmpPath string, destPath string) err
 		return err
 	}
 	_ = os.Chmod(tmpPath, 0644)
-	if err := os.Rename(tmpPath, destPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
+	var renameErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		renameErr = os.Rename(tmpPath, destPath)
+		if renameErr == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(attempt+1) * 40 * time.Millisecond)
 	}
-	return nil
+	_ = os.Remove(tmpPath)
+	return renameErr
 }
 
 // RangeRequestFunc est la signature de la fonction construisant une requête HTTP pour une plage [start, end].
@@ -224,7 +255,7 @@ func downloadMultiRange(
 		chunks[i] = chunkRange{id: i, start: start, end: end}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(baseContext())
 	defer cancel()
 
 	streamChunk := func(c chunkRange, initialResp *http.Response) error {
@@ -256,8 +287,8 @@ func downloadMultiRange(
 					continue
 				}
 				// Les requêtes Range de segments DOIVENT recevoir 206 Partial Content
-				// (un 200 OK sur un segment > 0 indique l'absence de support Range : bascule sur flux unique).
-				if r.StatusCode == http.StatusOK && c.id > 0 {
+				// (un 200 OK indique l'absence de support Range : bascule sur flux unique).
+				if r.StatusCode == http.StatusOK {
 					_ = r.Body.Close()
 					return errMultiRangeFallback
 				}
@@ -266,6 +297,13 @@ func downloadMultiRange(
 					_ = r.Body.Close()
 					chunkErr = fmt.Errorf("chunk %d HTTP %d (expected 206): %s", c.id, r.StatusCode, string(b))
 					continue
+				}
+				if crHdr := r.Header.Get("Content-Range"); crHdr != "" {
+					if startByte, ok := parseContentRangeStart(crHdr); !ok || startByte != currentOffset {
+						_ = r.Body.Close()
+						chunkErr = fmt.Errorf("chunk %d Content-Range mismatch (%s, expected start %d)", c.id, crHdr, currentOffset)
+						continue
+					}
 				}
 				resp = r
 			}
@@ -382,7 +420,11 @@ func streamSingleResponse(resp *http.Response, destPath string, totalSize int64,
 	lastPct := -1
 	buf := make([]byte, 128*1024)
 
+	ctx := baseContext()
 	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		n, rErr := bodyReader.Read(buf)
 		if n > 0 {
 			if _, wErr := out.Write(buf[:n]); wErr != nil {
@@ -443,10 +485,18 @@ func downloadWithResume(
 	lastPct := -1
 	buf := make([]byte, 64*1024)
 
+	ctx := baseContext()
 	const maxAttempts = 3
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt*1500) * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt*1500) * time.Millisecond):
+			}
 		}
 
 		resp, reqErr := makeRequest(downloaded)
@@ -492,6 +542,10 @@ func downloadWithResume(
 		bodyReader := newIdleTimeoutReader(resp.Body, downloadIdleTimeout)
 		var streamErr error
 		for {
+			if ctx.Err() != nil {
+				streamErr = ctx.Err()
+				break
+			}
 			n, rErr := bodyReader.Read(buf)
 			if n > 0 {
 				if _, wErr := out.Write(buf[:n]); wErr != nil {

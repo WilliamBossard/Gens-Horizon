@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +23,13 @@ import (
 )
 
 func Sync(args []string) {
+	SyncWithContext(context.Background(), args)
+}
+
+func SyncWithContext(ctx context.Context, args []string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	isList := hasFlag(args, "--list")
 	isDelete := hasFlag(args, "--delete")
 
@@ -32,6 +39,7 @@ func Sync(args []string) {
 			os.Exit(1)
 		}
 		defer lock.ReleaseLock()
+		paths.CleanupOrphanedTemps(paths.GetHorizonDataDir())
 	}
 
 	if !retry.CheckConnectivity() {
@@ -41,18 +49,18 @@ func Sync(args []string) {
 
 	settings := paths.LoadSettings()
 	p, err := providers.GetProvider(settings)
-	if err != nil || p == nil {
+	if err != nil {
+		ipc.SendError("AUTH_KEYRING_ERROR", fmt.Sprintf("Erreur temporaire d'accès au trousseau d'authentification : %v", err), "")
+		return
+	}
+	if p == nil {
 		ipc.SendError("AUTH_EXPIRED", "Session expirée. Veuillez lier à nouveau votre compte depuis les paramètres.", "")
 		return
 	}
 
-	retryOpts := retry.Options{
-		MaxRetries: settings.MaxRetries,
-		BaseDelay:  time.Duration(settings.RetryBaseDelay) * time.Millisecond,
-		Label:      "[sync]",
-	}
+	retryOpts := retry.FromSettings(settings.MaxRetries, settings.RetryBaseDelay, "[sync]")
 
-	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicates(p, retryOpts, "[sync]")
+	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicatesWithContext(ctx, p, retryOpts, "[sync]")
 	if err != nil {
 		ipc.SendError("CLOUD_ERROR", err.Error(), "")
 		return
@@ -103,6 +111,10 @@ func Sync(args []string) {
 	}
 
 	for _, inst := range instancesToSync {
+		if ctx.Err() != nil {
+			ipc.Logf("[sync] Synchronisation interrompue par arrêt gracieux avant '%s'.", inst)
+			return
+		}
 		safeInst, nameErr := paths.SanitizeInstanceName(paths.GetCanonicalName(inst))
 		if nameErr != nil {
 			ipc.SendError("INVALID_INSTANCE_NAME", nameErr.Error(), inst)
@@ -177,14 +189,19 @@ func Sync(args []string) {
 		}
 
 		if needsBaseExtract {
-			tempBase := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_base_%s_%d.zip", safeInst, time.Now().UnixMilli()))
+			baseTmpDir, tmpDirErr := os.MkdirTemp("", "horizon-sync-*")
+			if tmpDirErr != nil {
+				ipc.SendError("DOWNLOAD_FAILED", tmpDirErr.Error(), inst)
+				continue
+			}
+			tempBase := filepath.Join(baseTmpDir, fmt.Sprintf("base_%s.zip", safeInst))
 			ipc.SendProgress("DOWNLOADING", 0, inst)
 
 			err = p.DownloadFile(baseFile.ID, tempBase, func(pct int) {
 				ipc.SendProgress("DOWNLOADING", pct, inst)
 			}, baseFile.Size)
 			if err != nil {
-				_ = os.Remove(tempBase)
+				_ = os.RemoveAll(baseTmpDir)
 				if isNewInstance {
 					_ = os.RemoveAll(localPath)
 				} else if rollbackPath != "" {
@@ -195,7 +212,7 @@ func Sync(args []string) {
 			}
 
 			if err := ziputils.VerifyZipIntegrity(tempBase); err != nil {
-				_ = os.Remove(tempBase)
+				_ = os.RemoveAll(baseTmpDir)
 				if isNewInstance {
 					_ = os.RemoveAll(localPath)
 				}
@@ -206,7 +223,7 @@ func Sync(args []string) {
 			ensureRollback()
 			if !isNewInstance {
 				if cErr := cleanNonIgnoredEntries(localPath); cErr != nil {
-					_ = os.Remove(tempBase)
+					_ = os.RemoveAll(baseTmpDir)
 					restoreOnSyncFailure()
 					ipc.SendError("CLEAN_FAILED", cErr.Error(), inst)
 					continue
@@ -217,7 +234,7 @@ func Sync(args []string) {
 			err = ziputils.ExtractZip(tempBase, localPath, func(pct int) {
 				ipc.SendProgress("EXTRACTING", pct, inst)
 			})
-			_ = os.Remove(tempBase)
+			_ = os.RemoveAll(baseTmpDir)
 			if err != nil {
 				restoreOnSyncFailure()
 				ipc.SendError("EXTRACT_FAILED", err.Error(), inst)
@@ -232,6 +249,7 @@ func Sync(args []string) {
 
 		// Pré-téléchargement parallèle des deltas (concurrence max: 4)
 		type downloadedDelta struct {
+			tempDir  string
 			tempPath string
 			valid    bool
 			errMsg   string
@@ -246,20 +264,25 @@ func Sync(args []string) {
 				go func(idx int, item syncDeltaEntry) {
 					defer dlWg.Done()
 					defer func() { <-dlSem }()
-					tempDelta := filepath.Join(os.TempDir(), fmt.Sprintf("horizon_delta_%s_%d.zip", safeInst, item.timestamp))
+					dTmpDir, dErr := os.MkdirTemp("", "horizon-delta-*")
+					if dErr != nil {
+						dlResults[idx] = downloadedDelta{errMsg: dErr.Error()}
+						return
+					}
+					tempDelta := filepath.Join(dTmpDir, fmt.Sprintf("delta_%s_%d.zip", safeInst, item.timestamp))
 					if dErr := p.DownloadFile(item.file.ID, tempDelta, nil, item.file.Size); dErr != nil {
-						_ = os.Remove(tempDelta)
+						_ = os.RemoveAll(dTmpDir)
 						ipc.Logf("[sync] Échec téléchargement delta %s : %v", item.file.Name, dErr)
 						dlResults[idx] = downloadedDelta{errMsg: dErr.Error()}
 						return
 					}
 					if vErr := ziputils.VerifyZipIntegrity(tempDelta); vErr != nil {
-						_ = os.Remove(tempDelta)
+						_ = os.RemoveAll(dTmpDir)
 						ipc.Logf("[sync] Archive delta corrompue %s : %v", item.file.Name, vErr)
 						dlResults[idx] = downloadedDelta{errMsg: vErr.Error()}
 						return
 					}
-					dlResults[idx] = downloadedDelta{tempPath: tempDelta, valid: true}
+					dlResults[idx] = downloadedDelta{tempDir: dTmpDir, tempPath: tempDelta, valid: true}
 				}(i, d)
 			}
 			dlWg.Wait()
@@ -267,7 +290,9 @@ func Sync(args []string) {
 
 		cleanupDeltaTemps := func() {
 			for _, r := range dlResults {
-				if r.tempPath != "" {
+				if r.tempDir != "" {
+					_ = os.RemoveAll(r.tempDir)
+				} else if r.tempPath != "" {
 					_ = os.Remove(r.tempPath)
 				}
 			}
@@ -317,7 +342,11 @@ func Sync(args []string) {
 		manifestName := fmt.Sprintf("%s%s.json", PrefixManifest, safeInst)
 		if mf, ok := cloudIndex[manifestName]; ok {
 			var remoteM scanner.Manifest
-			if err := p.DownloadJSON(mf.ID, &remoteM); err != nil {
+			err = retry.Do(ctx, retryOpts, func() error {
+				remoteM = nil
+				return p.DownloadJSON(mf.ID, &remoteM)
+			})
+			if err != nil {
 				restoreOnSyncFailure()
 				ipc.SendError("MANIFEST_DOWNLOAD_FAILED", fmt.Sprintf("Échec téléchargement manifest cloud : %v", err), inst)
 				continue
@@ -397,12 +426,10 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 				if data, err := os.ReadFile(localMetaPath); err == nil {
 					var meta metaResult
 					if err := json.Unmarshal(data, &meta); err == nil {
-						if meta.IconData != nil && *meta.IconData != "" {
-							metaMu.Lock()
-							metaCache[instName] = meta
-							metaMu.Unlock()
-							needsDownload = false
-						}
+						metaMu.Lock()
+						metaCache[instName] = meta
+						metaMu.Unlock()
+						needsDownload = false
 					}
 				}
 			}
@@ -438,9 +465,8 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 
 		var totalSize int64 = baseFile.Size
 		var deltaCount int
-		prefixDelta := PrefixDelta + instName + "_"
 		for name, f := range cloudIndex {
-			if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
+			if _, ok := MatchDeltaForInstance(name, instName); ok {
 				deltaCount++
 				totalSize += f.Size
 			}
@@ -460,18 +486,25 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 		// Fallback intelligent : si l'icône est absente de la métadonnée cloud mais que l'instance existe localement sur le disque
 		if iconData == nil || *iconData == "" {
 			instDir := paths.GetInstancesFolder()
-			safeKey := paths.GetCanonicalName(instName)
-			localInstFolder := filepath.Join(instDir, safeKey)
-			if _, err := os.Stat(localInstFolder); os.IsNotExist(err) {
-				localInstFolder = filepath.Join(instDir, instName)
-			}
-			if _, err := os.Stat(localInstFolder); err == nil {
-				localMeta := extractInstanceMetadata(localInstFolder, instName)
-				if b64, ok := localMeta["iconData"].(string); ok && b64 != "" {
-					iconData = &b64
-				}
-				if ldr, ok := localMeta["loader"].(string); ok && ldr != "" && (loader == nil || *loader == "") {
-					loader = &ldr
+			if safeKey, nameErr := paths.SanitizeInstanceName(paths.GetCanonicalName(instName)); nameErr == nil {
+				localInstFolder, pathErr := paths.SafeJoinUnder(instDir, safeKey)
+				if pathErr == nil {
+					if _, err := os.Stat(localInstFolder); os.IsNotExist(err) {
+						if safeRaw, rawErr := paths.SanitizeInstanceName(instName); rawErr == nil {
+							if altFolder, altErr := paths.SafeJoinUnder(instDir, safeRaw); altErr == nil {
+								localInstFolder = altFolder
+							}
+						}
+					}
+					if _, err := os.Stat(localInstFolder); err == nil {
+						localMeta := extractInstanceMetadata(localInstFolder, instName)
+						if b64, ok := localMeta["iconData"].(string); ok && b64 != "" {
+							iconData = &b64
+						}
+						if ldr, ok := localMeta["loader"].(string); ok && ldr != "" && (loader == nil || *loader == "") {
+							loader = &ldr
+						}
+					}
 				}
 			}
 		}
@@ -504,11 +537,11 @@ func handleDelete(targetInst string, cloudIndex map[string]providers.CloudFile, 
 	baseBackupName := fmt.Sprintf("%s%s.zip", PrefixBackup, safeInst)
 	manifestName := fmt.Sprintf("%s%s.json", PrefixManifest, safeInst)
 	metaName := fmt.Sprintf("%s%s.json", PrefixMeta, safeInst)
-	prefixDelta := fmt.Sprintf("%s%s_", PrefixDelta, safeInst)
 
 	var deleteErrs []string
 	for name, f := range cloudIndex {
-		if name == baseBackupName || name == manifestName || name == metaName || strings.HasPrefix(name, prefixDelta) {
+		_, isMatchingDelta := MatchDeltaForInstance(name, safeInst)
+		if name == baseBackupName || name == manifestName || name == metaName || isMatchingDelta {
 			if delErr := p.DeleteFile(f.ID); delErr != nil && !errors.Is(delErr, providers.ErrNotFound) {
 				ipc.Logf("[sync] Échec suppression Cloud '%s' (%s) : %v", name, f.ID, delErr)
 				deleteErrs = append(deleteErrs, fmt.Sprintf("%s: %v", name, delErr))
@@ -654,6 +687,9 @@ func restoreInPlace(snapshotDir, targetPath string) error {
 		if walkErr != nil {
 			return walkErr
 		}
+		if d.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return nil
+		}
 		rel, err := filepath.Rel(snapshotDir, path)
 		if err != nil || rel == "." {
 			return err
@@ -740,6 +776,9 @@ func copyDir(src, dst string, skipIgnored bool) error {
 		if err != nil {
 			return err
 		}
+		if d.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return nil
+		}
 		rel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
@@ -801,15 +840,10 @@ func selectSyncDeltas(
 	lastSyncTime int64,
 	needsBaseExtract bool,
 ) []syncDeltaEntry {
-	prefixDelta := fmt.Sprintf("%s%s_", PrefixDelta, safeInst)
 	var deltas []syncDeltaEntry
 	for name, f := range cloudIndex {
-		if strings.HasPrefix(name, prefixDelta) && strings.HasSuffix(name, ".zip") {
-			rawTs := strings.TrimSuffix(strings.TrimPrefix(name, prefixDelta), ".zip")
-			orderTs, err := strconv.ParseInt(rawTs, 10, 64)
-			if err != nil {
-				orderTs = f.ModifiedTime.UnixMilli()
-			}
+		orderTs, ok := MatchDeltaForInstance(name, safeInst)
+		if ok {
 			serverModMs := f.ModifiedTime.UnixMilli()
 			isOlderThanBase := !baseFile.ModifiedTime.IsZero() && !f.ModifiedTime.IsZero() && f.ModifiedTime.Before(baseFile.ModifiedTime)
 			if (serverModMs > lastSyncTime && !isOlderThanBase) || (needsBaseExtract && !isOlderThanBase) {

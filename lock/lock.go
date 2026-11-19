@@ -3,12 +3,10 @@ package lock
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
@@ -16,10 +14,9 @@ import (
 )
 
 var (
-	lockMu            sync.Mutex
-	heartbeatDone     chan struct{}
-	activeLockPath    string
-	signalHandlerOnce sync.Once
+	lockMu         sync.Mutex
+	heartbeatDone  chan struct{}
+	activeLockPath string
 )
 
 func getLockFilePath() string {
@@ -109,7 +106,6 @@ func AcquireLock() bool {
 
 			activeLockPath = lockPath
 			startHeartbeat(lockPath)
-			setupSignalHandler()
 			return true
 		}
 
@@ -160,15 +156,4 @@ func ReleaseLock() {
 	activeLockPath = ""
 }
 
-func setupSignalHandler() {
-	signalHandlerOnce.Do(func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-		go func() {
-			<-sigChan
-			ReleaseLock()
-			os.Exit(0)
-		}()
-	})
-}
 
