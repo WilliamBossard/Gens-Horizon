@@ -166,11 +166,16 @@ func SyncWithContext(ctx context.Context, args []string) {
 
 		// Rollback paresseux : créé uniquement après téléchargement et validation des archives
 		var rollbackPath string
-		ensureRollback := func() {
+		ensureRollback := func() error {
 			if !isNewInstance && rollbackPath == "" {
-				rollbackPath = createRollbackSnapshot(localPath)
+				var snapErr error
+				rollbackPath, snapErr = createRollbackSnapshot(localPath)
+				if snapErr != nil {
+					return snapErr
+				}
 				pruneOldRollbacks(instDir, 3, safeInst+"_rollback_", filepath.Base(localPath)+"_rollback_")
 			}
+			return nil
 		}
 
 		restoreOnSyncFailure := func() {
@@ -220,7 +225,11 @@ func SyncWithContext(ctx context.Context, args []string) {
 				continue
 			}
 
-			ensureRollback()
+			if rbErr := ensureRollback(); rbErr != nil {
+				_ = os.RemoveAll(baseTmpDir)
+				ipc.SendError("ROLLBACK_SNAPSHOT_FAILED", rbErr.Error(), inst)
+				continue
+			}
 			if !isNewInstance {
 				if cErr := cleanNonIgnoredEntries(localPath); cErr != nil {
 					_ = os.RemoveAll(baseTmpDir)
@@ -317,7 +326,11 @@ func SyncWithContext(ctx context.Context, args []string) {
 		}
 
 		if len(deltas) > 0 {
-			ensureRollback()
+			if rbErr := ensureRollback(); rbErr != nil {
+				cleanupDeltaTemps()
+				ipc.SendError("ROLLBACK_SNAPSHOT_FAILED", rbErr.Error(), inst)
+				continue
+			}
 		}
 		// Application séquentielle stricte dans l'ordre chronologique
 		applyFailed := ""
@@ -580,7 +593,7 @@ func handleDelete(targetInst string, cloudIndex map[string]providers.CloudFile, 
 	})
 }
 
-func createRollbackSnapshot(localPath string) string {
+func createRollbackSnapshot(localPath string) (string, error) {
 	instDir := filepath.Dir(localPath)
 	folderName := filepath.Base(localPath)
 	timestamp := time.Now().UnixMilli()
@@ -588,11 +601,11 @@ func createRollbackSnapshot(localPath string) string {
 
 	if err := copyDir(localPath, rollbackFolder, true); err != nil {
 		ipc.Logf("[sync] Impossible de créer le snapshot rollback : %v", err)
-		return ""
+		return "", err
 	}
 
 	ipc.Logf("[sync] Snapshot rollback créé : %s", filepath.Base(rollbackFolder))
-	return rollbackFolder
+	return rollbackFolder, nil
 }
 
 func cleanupRollback(rollbackPath string) {

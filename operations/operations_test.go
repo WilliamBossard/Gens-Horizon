@@ -57,9 +57,9 @@ func TestHardlinkRollbackIsolation(t *testing.T) {
 	origFile := filepath.Join(instDir, "config", "settings.txt")
 	_ = os.WriteFile(origFile, []byte("original_value"), 0644)
 
-	rollbackPath := createRollbackSnapshot(instDir)
-	if rollbackPath == "" {
-		t.Fatalf("expected rollback snapshot to be created")
+	rollbackPath, err := createRollbackSnapshot(instDir)
+	if err != nil || rollbackPath == "" {
+		t.Fatalf("expected rollback snapshot to be created, got err=%v", err)
 	}
 	defer cleanupRollback(rollbackPath)
 

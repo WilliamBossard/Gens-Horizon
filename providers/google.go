@@ -385,10 +385,14 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 	if err != nil {
 		return "", err
 	}
+	errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("[google] initiation upload resumable échouée : HTTP %d", resp.StatusCode)
+		return "", &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("[google] initiation upload resumable échouée : HTTP %d : %s", resp.StatusCode, string(errBytes)),
+		}
 	}
 
 	uploadURL := resp.Header.Get("Location")
@@ -656,9 +660,12 @@ func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (s
 	}
 	defer resp.Body.Close()
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("[google] uploadJSON HTTP %d : %s", resp.StatusCode, string(respBytes))
+		return "", &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("[google] uploadJSON HTTP %d : %s", resp.StatusCode, string(respBytes)),
+		}
 	}
 
 	var res struct {
@@ -679,13 +686,17 @@ func (g *GoogleProvider) DeleteFile(fileID string) error {
 	if err != nil {
 		return err
 	}
+	errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	_ = resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("[google] deleteFile HTTP %d", resp.StatusCode)
+		return &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("[google] deleteFile HTTP %d : %s", resp.StatusCode, string(errBytes)),
+		}
 	}
 	InvalidateCloudIndexCache()
 	return nil
@@ -711,9 +722,12 @@ func (g *GoogleProvider) RenameFile(fileID string, newName string, existingTarge
 	}
 	defer resp.Body.Close()
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("[google] renameFile HTTP %d : %s", resp.StatusCode, string(respBytes))
+		return "", &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("[google] renameFile HTTP %d : %s", resp.StatusCode, string(respBytes)),
+		}
 	}
 
 	var res struct {
@@ -747,9 +761,12 @@ func (g *GoogleProvider) GetQuota() (int64, int64, error) {
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("[google] getQuota HTTP %d : %s", resp.StatusCode, string(bodyBytes))
+		return 0, 0, &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("[google] getQuota HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
+		}
 	}
 
 	var res struct {
@@ -783,12 +800,15 @@ func (g *GoogleProvider) GetFileModifiedTime(fileID string) (time.Time, error) {
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode == http.StatusNotFound {
 		return time.Time{}, ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return time.Time{}, fmt.Errorf("[google] getFileModifiedTime HTTP %d : %s", resp.StatusCode, string(bodyBytes))
+		return time.Time{}, &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("[google] getFileModifiedTime HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
+		}
 	}
 
 	var res struct {

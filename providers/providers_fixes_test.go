@@ -17,6 +17,7 @@ import (
 
 	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
+	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -776,3 +777,50 @@ func TestOneDriveChunkUploadFastFailOn400AndSessionResumeOn416(t *testing.T) {
 		t.Fatalf("expected upload session status GET query on 416")
 	}
 }
+
+func TestProvidersReturnTypedHTTPErrorOnNon2xx(t *testing.T) {
+	g := &GoogleProvider{
+		tokenData: auth.TokenData{AccessToken: "g_tok", ExpiryDate: time.Now().Add(time.Hour).UnixMilli()},
+		creds:     config.ProviderConfig{ClientID: "g-cid"},
+		client: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return jsonResponse(http.StatusTooManyRequests, map[string]any{"error": "rate_limit"}), nil
+			}),
+		},
+	}
+	for name, err := range map[string]error{
+		"google.UploadJSON":          func() error { _, e := g.UploadJSON("a.json", map[string]string{"k": "v"}, ""); return e }(),
+		"google.DeleteFile":          g.DeleteFile("id-1"),
+		"google.RenameFile":          func() error { _, e := g.RenameFile("id-1", "new.zip", ""); return e }(),
+		"google.GetQuota":            func() error { _, _, e := g.GetQuota(); return e }(),
+		"google.GetFileModifiedTime": func() error { _, e := g.GetFileModifiedTime("id-1"); return e }(),
+	} {
+		var httpErr *retry.HTTPError
+		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("%s expected *retry.HTTPError(429), got %T (%v)", name, err, err)
+		}
+	}
+
+	o := &OneDriveProvider{
+		tokenData: auth.TokenData{AccessToken: "o_tok", ExpiryDate: time.Now().Add(time.Hour).UnixMilli()},
+		creds:     config.ProviderConfig{ClientID: "o-cid"},
+		client: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return jsonResponse(http.StatusServiceUnavailable, map[string]any{"error": "busy"}), nil
+			}),
+		},
+	}
+	for name, err := range map[string]error{
+		"onedrive.UploadJSON":          func() error { _, e := o.UploadJSON("a.json", map[string]string{"k": "v"}, ""); return e }(),
+		"onedrive.DeleteFile":          o.DeleteFile("id-1"),
+		"onedrive.RenameFile":          func() error { _, e := o.RenameFile("id-1", "new.zip", ""); return e }(),
+		"onedrive.GetQuota":            func() error { _, _, e := o.GetQuota(); return e }(),
+		"onedrive.GetFileModifiedTime": func() error { _, e := o.GetFileModifiedTime("id-1"); return e }(),
+	} {
+		var httpErr *retry.HTTPError
+		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("%s expected *retry.HTTPError(503), got %T (%v)", name, err, err)
+		}
+	}
+}
+

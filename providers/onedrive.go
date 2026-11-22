@@ -387,9 +387,12 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 		}
 		defer resp.Body.Close()
 
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-			return "", fmt.Errorf("onedrive simple upload HTTP %d : %s", resp.StatusCode, string(b))
+			return "", &retry.HTTPError{
+				StatusCode: resp.StatusCode,
+				Message:    fmt.Sprintf("onedrive simple upload HTTP %d : %s", resp.StatusCode, string(b)),
+			}
 		}
 		var res struct {
 			ID string `json:"id"`
@@ -419,9 +422,12 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 	}
 	defer resp.Body.Close()
 
-	sessBytes, _ := io.ReadAll(resp.Body)
+	sessBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("onedrive createUploadSession HTTP %d : %s", resp.StatusCode, string(sessBytes))
+		return "", &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("onedrive createUploadSession HTTP %d : %s", resp.StatusCode, string(sessBytes)),
+		}
 	}
 
 	var sessionRes struct {
@@ -578,9 +584,12 @@ func (o *OneDriveProvider) UploadJSON(name string, data any, existingID string) 
 	}
 	defer resp.Body.Close()
 
-	b, _ := io.ReadAll(resp.Body)
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("onedrive uploadJSON HTTP %d : %s", resp.StatusCode, string(b))
+		return "", &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("onedrive uploadJSON HTTP %d : %s", resp.StatusCode, string(b)),
+		}
 	}
 
 	var res struct {
@@ -602,13 +611,17 @@ func (o *OneDriveProvider) DeleteFile(fileID string) error {
 	if err != nil {
 		return err
 	}
+	errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	_ = resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("onedrive delete HTTP %d", resp.StatusCode)
+		return &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("onedrive delete HTTP %d : %s", resp.StatusCode, string(errBytes)),
+		}
 	}
 	InvalidateCloudIndexCache()
 	return nil
@@ -636,7 +649,7 @@ func (o *OneDriveProvider) RenameFile(fileID string, newName string, existingTar
 			return nil, nil, err
 		}
 		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 		return resp, b, nil
 	}
 
@@ -654,7 +667,10 @@ func (o *OneDriveProvider) RenameFile(fileID string, newName string, existingTar
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("onedrive renameFile HTTP %d : %s", resp.StatusCode, string(b))
+		return "", &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("onedrive renameFile HTTP %d : %s", resp.StatusCode, string(b)),
+		}
 	}
 
 	var res struct {
@@ -682,9 +698,12 @@ func (o *OneDriveProvider) GetQuota() (int64, int64, error) {
 	}
 	defer resp.Body.Close()
 
-	b, _ := io.ReadAll(resp.Body)
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("onedrive quota HTTP %d : %s", resp.StatusCode, string(b))
+		return 0, 0, &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("onedrive quota HTTP %d : %s", resp.StatusCode, string(b)),
+		}
 	}
 
 	var res struct {
@@ -716,12 +735,15 @@ func (o *OneDriveProvider) GetFileModifiedTime(fileID string) (time.Time, error)
 	}
 	defer resp.Body.Close()
 
-	b, _ := io.ReadAll(resp.Body)
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode == http.StatusNotFound {
 		return time.Time{}, ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return time.Time{}, fmt.Errorf("onedrive getFileModifiedTime HTTP %d : %s", resp.StatusCode, string(b))
+		return time.Time{}, &retry.HTTPError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("onedrive getFileModifiedTime HTTP %d : %s", resp.StatusCode, string(b)),
+		}
 	}
 
 	var res struct {

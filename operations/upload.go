@@ -30,9 +30,24 @@ func parseTargetInstance(args []string) string {
 			return args[i+1]
 		}
 	}
-	// Recherche d'un argument positionnel qui n'est pas un flag
+	// Recherche d'un argument positionnel qui n'est pas un flag ni la valeur d'un flag à paramètre
+	skipNext := false
 	for _, arg := range args {
-		if !strings.HasPrefix(arg, "--") && arg != "upload" && arg != "sync" && arg != "check" && arg != "login" && arg != "quota" && arg != "rollback" {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if arg == "--provider" {
+			skipNext = true
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			continue
+		}
+		switch arg {
+		case "upload", "sync", "check", "login", "quota", "rollback", "clean", "delete", "status":
+			continue
+		default:
 			return arg
 		}
 	}
@@ -287,7 +302,9 @@ func UploadWithContext(ctx context.Context, args []string) {
 			}
 			_, _ = p.UploadJSON(metaName, metaData, metaExistingID)
 			if b, err := json.MarshalIndent(metaData, "", "  "); err == nil {
-				_ = osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644)
+				if wErr := osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644); wErr != nil {
+					ipc.Logf("[upload] avertissement : sauvegarde metadata locale échouée : %v", wErr)
+				}
 			}
 
 			// Nettoyage parallèle des anciens deltas consolidés (concurrence max: 4)
@@ -315,7 +332,9 @@ func UploadWithContext(ctx context.Context, args []string) {
 
 			// Sauvegarde du manifest en local
 			if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
-				_ = osWriteFileAtomic(localManifestFile, b, 0644)
+				if wErr := osWriteFileAtomic(localManifestFile, b, 0644); wErr != nil {
+					ipc.Logf("[upload] avertissement : sauvegarde manifest local échouée : %v", wErr)
+				}
 			}
 
 			serverTime := fetchServerTimeForInstanceWithContext(ctx, p, retryOpts, safeInst, newBaseID, newMID)
@@ -410,12 +429,16 @@ func UploadWithContext(ctx context.Context, args []string) {
 			}
 			_, _ = p.UploadJSON(metaName, metaData, metaExistingID)
 			if b, err := json.MarshalIndent(metaData, "", "  "); err == nil {
-				_ = osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644)
+				if wErr := osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644); wErr != nil {
+					ipc.Logf("[upload] avertissement : sauvegarde metadata locale échouée : %v", wErr)
+				}
 			}
 
 			// Sauvegarde du manifest en local
 			if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
-				_ = osWriteFileAtomic(localManifestFile, b, 0644)
+				if wErr := osWriteFileAtomic(localManifestFile, b, 0644); wErr != nil {
+					ipc.Logf("[upload] avertissement : sauvegarde manifest local échouée : %v", wErr)
+				}
 			}
 
 			serverTime := fetchServerTimeForInstanceWithContext(ctx, p, retryOpts, safeInst, deltaID, newMID)
@@ -513,7 +536,9 @@ func updateLastSyncWithTime(safeInst string, serverTime time.Time) {
 	}
 	syncInfo[safeInst] = serverTime.UTC().Format(time.RFC3339Nano)
 	if b, err := json.MarshalIndent(syncInfo, "", "  "); err == nil {
-		_ = osWriteFileAtomic(syncInfoPath, b, 0644)
+		if wErr := osWriteFileAtomic(syncInfoPath, b, 0644); wErr != nil {
+			ipc.Logf("[upload] avertissement : sauvegarde last_sync échouée : %v", wErr)
+		}
 	}
 }
 

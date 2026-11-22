@@ -410,9 +410,18 @@ func osWriteFileAtomic(filePath string, data []byte, perm uint32) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, filePath); err != nil {
-		_ = os.Remove(tmp)
-		return err
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := os.Rename(tmp, filePath); err != nil {
+			lastErr = err
+			if attempt < 4 {
+				time.Sleep(time.Duration(25*(attempt+1)) * time.Millisecond)
+				continue
+			}
+		} else {
+			return nil
+		}
 	}
-	return nil
+	_ = os.Remove(tmp)
+	return lastErr
 }

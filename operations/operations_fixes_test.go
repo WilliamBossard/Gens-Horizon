@@ -523,3 +523,30 @@ func TestHandleCloudListCachesEmptyIconMetadata(t *testing.T) {
 		t.Fatalf("expected cached metadata without iconData to skip DownloadJSON, got %d calls", p.dlCalls.Load())
 	}
 }
+
+func TestCreateRollbackSnapshotReturnsErrorOnMissingSource(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	rb, err := createRollbackSnapshot(missing)
+	if err == nil {
+		t.Fatalf("expected createRollbackSnapshot to return error for missing source %q, got rb=%q", missing, rb)
+	}
+	if rb != "" {
+		t.Fatalf("expected empty rollback path on error, got %q", rb)
+	}
+}
+
+func TestParseTargetInstanceSkipsProviderFlagValueAndCleanSubcommands(t *testing.T) {
+	if got := parseTargetInstance([]string{"sync", "--provider", "google"}); got != "" {
+		t.Fatalf("expected empty instance for --provider google without positional instance, got %q", got)
+	}
+	if got := parseTargetInstance([]string{"clean", "--provider", "onedrive"}); got != "" {
+		t.Fatalf("expected empty instance for clean subcommand, got %q", got)
+	}
+	if got := parseTargetInstance([]string{"upload", "--provider", "google", "MyPack"}); got != "MyPack" {
+		t.Fatalf("expected MyPack, got %q", got)
+	}
+	if got := parseTargetInstance([]string{"sync", "--instance", "ExplicitPack", "--provider", "dropbox"}); got != "ExplicitPack" {
+		t.Fatalf("expected ExplicitPack, got %q", got)
+	}
+}
+
