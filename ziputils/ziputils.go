@@ -818,9 +818,18 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 	var deletedFiles []string
 	var declaredTotal uint64
 	var filesToExtract []*zip.File
+	var dirsToEnsure []string
+	seenDirs := map[string]bool{cleanTarget: true}
+	queueDir := func(d string) {
+		cleanDir := filepath.Clean(d)
+		if !seenDirs[cleanDir] {
+			seenDirs[cleanDir] = true
+			dirsToEnsure = append(dirsToEnsure, cleanDir)
+		}
+	}
 	seenPathsLower := make(map[string]int, len(zr.File))
 
-	// 1. Détection de __delta__.json et préparation des dossiers
+	// 1. Détection de __delta__.json, validation Zip Slip / budget et collecte des entrées
 	for _, zf := range zr.File {
 		if zf.Name == "__delta__.json" {
 			rc, err := zf.Open()
@@ -848,9 +857,7 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 		}
 
 		if zf.FileInfo().IsDir() {
-			if err := ensureSafeDestDir(cleanTargetReal, cleanDest); err != nil {
-				return err
-			}
+			queueDir(cleanDest)
 			continue
 		}
 
@@ -866,9 +873,7 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 			return fmt.Errorf("archive delta dépasse la taille maximale décompressée (%d octets)", maxZipExtractTotalBytes)
 		}
 
-		if err := ensureSafeDestDir(cleanTargetReal, filepath.Dir(cleanDest)); err != nil {
-			return err
-		}
+		queueDir(filepath.Dir(cleanDest))
 
 		dedupKey := zipDedupKey(cleanDest)
 		if prevIdx, exists := seenPathsLower[dedupKey]; exists {
@@ -880,6 +885,8 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 	}
 
 	// 2. Suppression des fichiers orphelins indiqués dans le manifest du delta + élagage des dossiers vides
+	//    Exécuté AVANT la création des répertoires cibles afin que pruneEmptyParentDirs ne supprime pas un
+	//    dossier qui doit recevoir un nouveau fichier du même delta (ex: rotation d'une DLL dans natives/).
 	for _, rel := range deletedFiles {
 		cleanDel, ok := isZipEntrySafeUnder(cleanTarget, rel)
 		if !ok || cleanDel == cleanTarget {
@@ -894,6 +901,13 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 			continue
 		}
 		pruneEmptyParentDirs(cleanTarget, filepath.Dir(cleanDel))
+	}
+
+	// 3. Création et vérification de tous les répertoires nécessaires aux fichiers extraits
+	for _, dir := range dirsToEnsure {
+		if err := ensureSafeDestDir(cleanTargetReal, dir); err != nil {
+			return err
+		}
 	}
 
 	return extractZipEntriesParallel(cleanTarget, filesToExtract, onProgress)

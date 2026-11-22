@@ -202,5 +202,53 @@ func TestParallelExtraction(t *testing.T) {
 	}
 }
 
+func TestApplyDeltaReplacesSoleFileInNestedDirWithoutPruningTargetDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "instance")
+	nestedDir := filepath.Join(targetDir, "natives", "26.3", "jna")
+	if err := os.MkdirAll(nestedDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	oldFile := filepath.Join(nestedDir, "jna_old.dll")
+	if err := os.WriteFile(oldFile, []byte("old-dll"), 0644); err != nil {
+		t.Fatalf("WriteFile oldFile failed: %v", err)
+	}
+
+	// Source contenant uniquement la nouvelle DLL à la place de l'ancienne
+	deltaSrc := filepath.Join(tmpDir, "delta_src")
+	deltaNested := filepath.Join(deltaSrc, "natives", "26.3", "jna")
+	if err := os.MkdirAll(deltaNested, 0755); err != nil {
+		t.Fatalf("MkdirAll deltaSrc failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(deltaNested, "jna_new.dll"), []byte("new-dll"), 0644); err != nil {
+		t.Fatalf("WriteFile newFile failed: %v", err)
+	}
+
+	deltaZip := filepath.Join(tmpDir, "delta.zip")
+	err := CreateDeltaZip(
+		deltaSrc,
+		[]string{"natives/26.3/jna/jna_new.dll"},
+		[]string{"natives/26.3/jna/jna_old.dll"},
+		deltaZip,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateDeltaZip failed: %v", err)
+	}
+
+	if err := ApplyDelta(deltaZip, targetDir, nil); err != nil {
+		t.Fatalf("ApplyDelta failed when replacing sole file in nested dir: %v", err)
+	}
+
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Fatalf("expected old file to be removed, stat err=%v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(nestedDir, "jna_new.dll"))
+	if err != nil || string(got) != "new-dll" {
+		t.Fatalf("expected new file content 'new-dll', got %q (err=%v)", string(got), err)
+	}
+}
+
+
 
 
