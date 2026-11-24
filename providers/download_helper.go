@@ -38,11 +38,18 @@ func parseContentRangeStart(hdr string) (int64, bool) {
 // downloadIdleTimeout définit le délai d'inactivité maximal toléré entre deux lectures sur un flux HTTP
 var downloadIdleTimeout = 60 * time.Second
 
+var (
+	dlBuf64Pool  = sync.Pool{New: func() any { b := make([]byte, 64*1024); return &b }}
+	dlBuf128Pool = sync.Pool{New: func() any { b := make([]byte, 128*1024); return &b }}
+)
+
 type idleTimeoutReadCloser struct {
 	rc        io.ReadCloser
 	timeout   time.Duration
 	timedOut  atomic.Bool
-	reading   atomic.Bool
+	mu        sync.Mutex
+	reading   bool
+	readGen   uint64
 	timer     *time.Timer
 	done      chan struct{}
 	closeOnce sync.Once
@@ -63,7 +70,10 @@ func newIdleTimeoutReader(rc io.ReadCloser, timeout time.Duration) *idleTimeoutR
 				case <-itr.done:
 					return
 				case <-itr.timer.C:
-					if itr.reading.Load() {
+					itr.mu.Lock()
+					shouldClose := itr.reading
+					itr.mu.Unlock()
+					if shouldClose {
 						itr.timedOut.Store(true)
 						_ = itr.rc.Close()
 						return
@@ -79,13 +89,18 @@ func (itr *idleTimeoutReadCloser) Read(p []byte) (int, error) {
 	if itr.timeout <= 0 || itr.timer == nil {
 		return itr.rc.Read(p)
 	}
-	itr.reading.Store(true)
+	itr.mu.Lock()
+	itr.readGen++
+	itr.reading = true
 	itr.timer.Reset(itr.timeout)
+	itr.mu.Unlock()
 
 	n, err := itr.rc.Read(p)
 
-	itr.reading.Store(false)
+	itr.mu.Lock()
+	itr.reading = false
 	itr.timer.Stop()
+	itr.mu.Unlock()
 
 	if err != nil && itr.timedOut.Load() {
 		return n, fmt.Errorf("download stalled (no data for %s): %w", itr.timeout, err)
@@ -95,11 +110,13 @@ func (itr *idleTimeoutReadCloser) Read(p []byte) (int, error) {
 
 func (itr *idleTimeoutReadCloser) Close() error {
 	itr.closeOnce.Do(func() {
-		itr.reading.Store(false)
-		close(itr.done)
+		itr.mu.Lock()
+		itr.reading = false
 		if itr.timer != nil {
 			itr.timer.Stop()
 		}
+		itr.mu.Unlock()
+		close(itr.done)
 	})
 	return itr.rc.Close()
 }
@@ -308,7 +325,8 @@ func downloadMultiRange(
 				resp = r
 			}
 
-			buf := make([]byte, 128*1024)
+			bufPtr := dlBuf128Pool.Get().(*[]byte)
+			buf := *bufPtr
 			bodyReader := newIdleTimeoutReader(resp.Body, downloadIdleTimeout)
 			var streamErr error
 			for {
@@ -320,10 +338,12 @@ func downloadMultiRange(
 				if n > 0 {
 					if currentOffset+int64(n) > c.end+1 {
 						_ = bodyReader.Close()
+			dlBuf128Pool.Put(bufPtr)
 						return fmt.Errorf("chunk %d overflow: serveur a renvoyé plus d'octets que la plage [%d..%d]", c.id, c.start, c.end)
 					}
 					if _, wErr := out.WriteAt(buf[:n], currentOffset); wErr != nil {
 						_ = bodyReader.Close()
+			dlBuf128Pool.Put(bufPtr)
 						return fmt.Errorf("chunk %d write error: %w", c.id, wErr)
 					}
 					currentOffset += int64(n)
@@ -337,6 +357,7 @@ func downloadMultiRange(
 				}
 			}
 			_ = bodyReader.Close()
+			dlBuf128Pool.Put(bufPtr)
 
 			if streamErr == nil && currentOffset == c.end+1 {
 				return nil
@@ -418,7 +439,9 @@ func streamSingleResponse(resp *http.Response, destPath string, totalSize int64,
 
 	var downloaded int64
 	lastPct := -1
-	buf := make([]byte, 128*1024)
+	bufPtr := dlBuf128Pool.Get().(*[]byte)
+	defer dlBuf128Pool.Put(bufPtr)
+	buf := *bufPtr
 
 	ctx := baseContext()
 	for {
@@ -483,7 +506,9 @@ func downloadWithResume(
 
 	var downloaded int64
 	lastPct := -1
-	buf := make([]byte, 64*1024)
+	bufPtr := dlBuf64Pool.Get().(*[]byte)
+	defer dlBuf64Pool.Put(bufPtr)
+	buf := *bufPtr
 
 	ctx := baseContext()
 	const maxAttempts = 3

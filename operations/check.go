@@ -52,7 +52,8 @@ func CheckWithContext(ctx context.Context, args []string) {
 
 	retryOpts := retry.FromSettings(settings.MaxRetries, settings.RetryBaseDelay, "[check]")
 
-	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicatesWithContext(ctx, p, retryOpts, "[check]")
+	providers.InvalidateCloudIndexCache()
+	cloudIndex, err := providers.GetCloudIndexReadOnlyWithContext(ctx, p, retryOpts, "[check]")
 	if err != nil {
 		ipc.SendError("CHECK_FAILED", err.Error(), "")
 		return

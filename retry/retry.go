@@ -2,9 +2,14 @@ package retry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/rand"
 	"net"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
@@ -44,28 +49,66 @@ func FromSettings(maxRetries int, baseDelayMs int, label string) Options {
 type HTTPError struct {
 	StatusCode int
 	Message    string
+	RetryAfter time.Duration
 }
 
 func (e *HTTPError) Error() string {
 	return e.Message
 }
 
+// ParseRetryAfter parse un en-tête Retry-After (secondes ou date HTTP) en durée bornée à 120s.
+func ParseRetryAfter(val string) time.Duration {
+	v := strings.TrimSpace(val)
+	if v == "" {
+		return 0
+	}
+	const maxRetryAfter = 120 * time.Second
+	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		d := time.Duration(secs) * time.Second
+		if d > maxRetryAfter {
+			return maxRetryAfter
+		}
+		return d
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		d := time.Until(t)
+		if d <= 0 {
+			return 0
+		}
+		if d > maxRetryAfter {
+			return maxRetryAfter
+		}
+		return d
+	}
+	return 0
+}
+
 func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var syntaxErr *json.SyntaxError
+	var unmarshalErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &unmarshalErr) {
+		return false
+	}
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
-		// 429 Too Many Requests, ou erreurs serveur 5xx
 		if httpErr.StatusCode == 429 || (httpErr.StatusCode >= 500 && httpErr.StatusCode <= 599) {
 			return true
 		}
 		return false
 	}
-	return true // Erreurs réseau / timeouts par défaut
+	return true
 }
 
 func Do(ctx context.Context, opts Options, fn func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if opts.MaxRetries < 0 {
 		opts.MaxRetries = 1
 	} else if opts.MaxRetries == 0 {
@@ -97,6 +140,10 @@ func Do(ctx context.Context, opts Options, fn func() error) error {
 		actualDelay := delay + jitter
 		if actualDelay > opts.MaxDelay {
 			actualDelay = opts.MaxDelay
+		}
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.RetryAfter > actualDelay {
+			actualDelay = httpErr.RetryAfter
 		}
 
 		if opts.Label != "" {
@@ -142,6 +189,11 @@ func CheckConnectivity() bool {
 		case <-success:
 			return true
 		case <-done:
+		}
+	}
+	for _, envKey := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		if strings.TrimSpace(os.Getenv(envKey)) != "" {
+			return true
 		}
 	}
 	return false

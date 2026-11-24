@@ -42,3 +42,22 @@ func TestFromSettingsZeroMeansNoRetry(t *testing.T) {
 	}
 }
 
+
+func TestIsRetryableNonTransient(t *testing.T) {
+	if IsRetryable(context.Canceled) {
+		t.Fatalf("context.Canceled should not be retryable")
+	}
+	if IsRetryable(context.DeadlineExceeded) {
+		t.Fatalf("context.DeadlineExceeded should not be retryable")
+	}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	err := Do(canceledCtx, Options{MaxRetries: 3, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}, func() error {
+		calls++
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || calls != 0 {
+		t.Fatalf("expected immediate context.Canceled with 0 calls, got err=%v calls=%d", err, calls)
+	}
+}

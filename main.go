@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
 	"github.com/WilliamBossard/Gens-Horizon/lock"
@@ -22,31 +23,33 @@ func main() {
 	defer cancel()
 	providers.SetBaseContext(ctx)
 
-	// Écoute de l'arrêt gracieux demandé par le Launcher via stdin
-	go func() {
-		stdinScanner := bufio.NewScanner(os.Stdin)
-		for stdinScanner.Scan() {
-			text := strings.TrimSpace(stdinScanner.Text())
-			if text == "SHUTDOWN" {
-				ipc.Logf("[Horizon] Arrêt gracieux (SHUTDOWN) reçu sur stdin.")
-				cancel()
-				time.AfterFunc(3*time.Second, func() {
-					ipc.Logf("[Horizon] Délai d'arrêt gracieux dépassé, libération du verrou et sortie forcée.")
-					lock.ReleaseLock()
-					os.Exit(130)
-				})
-				return
+	args := os.Args[1:]
+
+	// Écoute de l'arrêt gracieux demandé par le Launcher via stdin (désactivé pour --set-e2e-key qui lit stdin)
+	if !containsCommand(args, "--set-e2e-key") {
+		go func() {
+			stdinScanner := bufio.NewScanner(os.Stdin)
+			for stdinScanner.Scan() {
+				text := strings.TrimSpace(stdinScanner.Text())
+				if text == "SHUTDOWN" {
+					ipc.Logf("[Horizon] Arrêt gracieux (SHUTDOWN) reçu sur stdin.")
+					cancel()
+					time.AfterFunc(3*time.Second, func() {
+						ipc.Logf("[Horizon] Délai d'arrêt gracieux dépassé, libération du verrou et sortie forcée.")
+						lock.ReleaseLock()
+						os.Exit(130)
+					})
+					return
+				}
 			}
-		}
-		if err := stdinScanner.Err(); err != nil {
-			ipc.Logf("[Horizon] Erreur lecture stdin : %v", err)
-		}
-	}()
+			if err := stdinScanner.Err(); err != nil {
+				ipc.Logf("[Horizon] Erreur lecture stdin : %v", err)
+			}
+		}()
+	}
 
 	// Initialisation des settings par défaut si absents
 	_ = paths.LoadSettings()
-
-	args := os.Args[1:]
 
 	if len(args) == 0 {
 		ipc.Send(ipc.BaseMessage{
@@ -93,6 +96,32 @@ func main() {
 		operations.CleanWithContext(ctx, args)
 	} else if containsCommand(args, "--delete", "delete") {
 		operations.SyncWithContext(ctx, args)
+	} else if containsCommand(args, "--set-e2e-key") {
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		pass := strings.TrimSpace(line)
+		if pass == "" {
+			pass, _ = auth.GenerateRecoveryPassphrase()
+		}
+		if err := auth.SaveE2EPassphrase(pass); err != nil {
+			ipc.SendError("E2E_KEY_SAVE_FAILED", err.Error(), "")
+		} else {
+			ipc.Send(map[string]any{"type": "INFO", "message": "E2E_KEY_SAVED", "passphrase": pass})
+		}
+	} else if containsCommand(args, "--has-e2e-key") {
+		pass, err := auth.LoadE2EPassphrase()
+		if err != nil {
+			ipc.SendError("E2E_KEY_LOAD_FAILED", err.Error(), "")
+		} else {
+			ipc.Send(map[string]any{"type": "INFO", "hasKey": pass != ""})
+		}
+	} else if containsCommand(args, "--get-e2e-key") {
+		pass, err := auth.LoadE2EPassphrase()
+		if err != nil {
+			ipc.SendError("E2E_KEY_LOAD_FAILED", err.Error(), "")
+		} else {
+			ipc.Send(map[string]any{"type": "INFO", "hasKey": pass != "", "passphrase": pass})
+		}
 	} else if containsCommand(args, "--version", "-v") {
 		ipc.Send(map[string]any{
 			"type":    "INFO",

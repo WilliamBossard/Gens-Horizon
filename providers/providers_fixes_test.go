@@ -824,3 +824,59 @@ func TestProvidersReturnTypedHTTPErrorOnNon2xx(t *testing.T) {
 	}
 }
 
+
+func TestOneDriveRenameFileConflictBackupAndRestore(t *testing.T) {
+	var calls []string
+	o := &OneDriveProvider{
+		tokenData: auth.TokenData{AccessToken: "o_tok", ExpiryDate: time.Now().Add(time.Hour).UnixMilli()},
+		creds:     config.ProviderConfig{ClientID: "o-cid"},
+		client: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				b, _ := io.ReadAll(r.Body)
+				calls = append(calls, fmt.Sprintf("%s %s %s", r.Method, r.URL.Path, strings.TrimSpace(string(b))))
+				switch len(calls) {
+				case 1:
+					return jsonResponse(http.StatusConflict, map[string]any{"error": "conflict"}), nil
+				case 2:
+					return jsonResponse(http.StatusOK, map[string]any{"id": "existing-id"}), nil
+				case 3:
+					return jsonResponse(http.StatusInternalServerError, map[string]any{"error": "boom"}), nil
+				case 4:
+					return jsonResponse(http.StatusOK, map[string]any{"id": "existing-id"}), nil
+				default:
+					return jsonResponse(http.StatusNotFound, map[string]any{}), nil
+				}
+			}),
+		},
+	}
+
+	_, err := o.RenameFile("staging-id", "target.zip", "existing-id")
+	if err == nil {
+		t.Fatalf("expected error when promotion PATCH fails")
+	}
+	if len(calls) != 4 {
+		t.Fatalf("expected 4 HTTP calls (conflict, backup, failed promote, restore), got %d: %v", len(calls), calls)
+	}
+	if !strings.Contains(calls[1], "target.zip.bak.") || !strings.Contains(calls[3], `"name":"target.zip"`) {
+		t.Fatalf("expected backup and restore calls, got: %v", calls)
+	}
+}
+
+func TestIdleTimeoutReadCloserNoSpuriousTimeout(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("hello-"))
+		time.Sleep(30 * time.Millisecond)
+		_, _ = pw.Write([]byte("world"))
+		_ = pw.Close()
+	}()
+	itr := newIdleTimeoutReader(pr, 250*time.Millisecond)
+	defer itr.Close()
+	data, err := io.ReadAll(itr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(data) != "hello-world" {
+		t.Fatalf("got %q, want hello-world", string(data))
+	}
+}

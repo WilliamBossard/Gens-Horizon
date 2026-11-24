@@ -2,16 +2,17 @@ package operations
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/WilliamBossard/Gens-Horizon/auth"
+	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
 	"github.com/WilliamBossard/Gens-Horizon/lock"
 	"github.com/WilliamBossard/Gens-Horizon/paths"
@@ -20,6 +21,37 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/scanner"
 	"github.com/WilliamBossard/Gens-Horizon/ziputils"
 )
+
+func resolveSelectiveProfile(settings config.Settings, inst, safeInst string) string {
+	if !settings.SelectiveSync || len(settings.SelectiveProfiles) == 0 {
+		return ""
+	}
+	if p, ok := settings.SelectiveProfiles[inst]; ok && p != "" {
+		return p
+	}
+	if p, ok := settings.SelectiveProfiles[safeInst]; ok && p != "" {
+		return p
+	}
+	return ""
+}
+
+func maybeEncryptZipForUpload(tempZip string, settings config.Settings) (string, string, error) {
+	if !settings.E2EEncryption {
+		return tempZip, "", nil
+	}
+	pass, err := auth.LoadE2EPassphrase()
+	if err != nil {
+		return "", "E2E_KEY_LOAD_FAILED", err
+	}
+	if pass == "" {
+		return "", "E2E_KEY_REQUIRED", errors.New("chiffrement E2E activé mais aucune clé configurée")
+	}
+	encPath := tempZip + ".e2e"
+	if err := ziputils.EncryptFileE2E(tempZip, encPath, pass); err != nil {
+		return "", "E2E_ENCRYPT_FAILED", err
+	}
+	return encPath, "", nil
+}
 
 func parseTargetInstance(args []string) string {
 	for i, arg := range args {
@@ -153,7 +185,8 @@ func UploadWithContext(ctx context.Context, args []string) {
 		}
 
 		// 2. Scan et génération du nouveau manifest
-		newManifest, err := scanner.GenerateManifestWithOptions(localInstFolder, oldLocalManifest, verifyHashes)
+		selectiveProfile := resolveSelectiveProfile(settings, inst, safeInst)
+		newManifest, err := scanner.GenerateManifestWithProfile(localInstFolder, oldLocalManifest, verifyHashes, selectiveProfile)
 		if err != nil {
 			ipc.SendError("SCAN_FAILED", err.Error(), inst)
 			continue
@@ -206,7 +239,8 @@ func UploadWithContext(ctx context.Context, args []string) {
 			if err == nil {
 				hasRemoteManifest = true
 			} else {
-				ipc.Logf("[upload] Erreur téléchargement remote manifest, fallback full : %v", err)
+				ipc.SendError("UPLOAD_FAILED", fmt.Sprintf("Impossible de télécharger le manifeste distant : %v", err), inst)
+				continue
 			}
 		}
 
@@ -245,14 +279,32 @@ func UploadWithContext(ctx context.Context, args []string) {
 			}
 
 			ipc.SendProgress("COMPRESSING", 0, inst)
-			err = ziputils.CreateFullZipWithHint(localInstFolder, manifestTotalBytes, tempZip, func(pct int) {
-				ipc.SendProgress("COMPRESSING", pct, inst)
-			})
+			if selectiveProfile != "" && selectiveProfile != "FULL" {
+				allFiles := make([]string, 0, len(newManifest))
+				for relPath := range newManifest {
+					allFiles = append(allFiles, relPath)
+				}
+				err = ziputils.CreateDeltaZip(localInstFolder, allFiles, nil, tempZip, func(pct int) {
+					ipc.SendProgress("COMPRESSING", pct, inst)
+				})
+			} else {
+				err = ziputils.CreateFullZipWithHint(localInstFolder, manifestTotalBytes, tempZip, func(pct int) {
+					ipc.SendProgress("COMPRESSING", pct, inst)
+				})
+			}
 			if err != nil {
 				_ = os.RemoveAll(tmpZipDir)
 				ipc.SendError("COMPRESS_FAILED", err.Error(), inst)
 				continue
 			}
+
+			uploadZipPath, encCode, encErr := maybeEncryptZipForUpload(tempZip, settings)
+			if encErr != nil {
+				_ = os.RemoveAll(tmpZipDir)
+				ipc.SendError(encCode, encErr.Error(), inst)
+				continue
+			}
+			baseArchiveSha, _ := computeFileSHA256(uploadZipPath)
 
 			ipc.SendProgress("UPLOADING", 0, inst)
 			existingID := ""
@@ -269,7 +321,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 				p,
 				inst,
 				safeInst,
-				tempZip,
+				uploadZipPath,
 				baseBackupName,
 				existingID,
 				manifestName,
@@ -296,11 +348,22 @@ func UploadWithContext(ctx context.Context, args []string) {
 
 			// Upload Metadata
 			metaData := extractInstanceMetadata(localInstFolder, inst)
+			if baseArchiveSha != "" {
+				metaData["archiveSha256"] = baseArchiveSha
+			}
+			metaData["deltaSha256s"] = map[string]string{}
 			metaExistingID := ""
 			if mf, ok := cloudIndex[metaName]; ok {
 				metaExistingID = mf.ID
 			}
-			_, _ = p.UploadJSON(metaName, metaData, metaExistingID)
+			metaOpts := retryOpts
+			metaOpts.Label = "uploadMeta(" + inst + ")"
+			if mErr := retry.Do(ctx, metaOpts, func() error {
+				_, upErr := p.UploadJSON(metaName, metaData, metaExistingID)
+				return upErr
+			}); mErr != nil {
+				ipc.Logf("[upload] avertissement : upload metadata cloud échoué pour %s : %v", inst, mErr)
+			}
 			if b, err := json.MarshalIndent(metaData, "", "  "); err == nil {
 				if wErr := osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644); wErr != nil {
 					ipc.Logf("[upload] avertissement : sauvegarde metadata locale échouée : %v", wErr)
@@ -379,9 +442,17 @@ func UploadWithContext(ctx context.Context, args []string) {
 				continue
 			}
 
+			uploadDeltaPath, encCode, encErr := maybeEncryptZipForUpload(tempDelta, settings)
+			if encErr != nil {
+				_ = os.RemoveAll(tmpDeltaDir)
+				ipc.SendError(encCode, encErr.Error(), inst)
+				continue
+			}
+			deltaArchiveSha, _ := computeFileSHA256(uploadDeltaPath)
+
 			deltaName := fmt.Sprintf("%s%s_%d.zip", PrefixDelta, safeInst, time.Now().UnixMilli())
 			ipc.SendProgress("UPLOADING", 0, inst)
-			deltaID, err := p.UploadZip(deltaName, tempDelta, "", func(pct int) {
+			deltaID, err := p.UploadZip(deltaName, uploadDeltaPath, "", func(pct int) {
 				ipc.SendProgress("UPLOADING", pct, inst)
 			})
 			_ = os.RemoveAll(tmpDeltaDir)
@@ -423,11 +494,40 @@ func UploadWithContext(ctx context.Context, args []string) {
 
 			// Mise à jour metadata
 			metaData := extractInstanceMetadata(localInstFolder, inst)
+			var prevMeta struct {
+				ArchiveSha256 string            `json:"archiveSha256"`
+				DeltaSha256s  map[string]string `json:"deltaSha256s"`
+			}
+			if mf, ok := cloudIndex[metaName]; ok {
+				_ = retry.Do(ctx, retryOpts, func() error {
+					return p.DownloadJSON(mf.ID, &prevMeta)
+				})
+			} else if rawMeta, rErr := os.ReadFile(paths.GetMetaPath(safeInst)); rErr == nil {
+				_ = json.Unmarshal(rawMeta, &prevMeta)
+			}
+			if prevMeta.ArchiveSha256 != "" {
+				metaData["archiveSha256"] = prevMeta.ArchiveSha256
+			}
+			deltaShaMap := prevMeta.DeltaSha256s
+			if deltaShaMap == nil {
+				deltaShaMap = make(map[string]string)
+			}
+			if deltaArchiveSha != "" {
+				deltaShaMap[deltaName] = deltaArchiveSha
+			}
+			metaData["deltaSha256s"] = deltaShaMap
 			metaExistingID := ""
 			if mf, ok := cloudIndex[metaName]; ok {
 				metaExistingID = mf.ID
 			}
-			_, _ = p.UploadJSON(metaName, metaData, metaExistingID)
+			metaOpts := retryOpts
+			metaOpts.Label = "uploadMeta(" + inst + ")"
+			if mErr := retry.Do(ctx, metaOpts, func() error {
+				_, upErr := p.UploadJSON(metaName, metaData, metaExistingID)
+				return upErr
+			}); mErr != nil {
+				ipc.Logf("[upload] avertissement : upload metadata cloud échoué pour %s : %v", inst, mErr)
+			}
 			if b, err := json.MarshalIndent(metaData, "", "  "); err == nil {
 				if wErr := osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644); wErr != nil {
 					ipc.Logf("[upload] avertissement : sauvegarde metadata locale échouée : %v", wErr)
@@ -540,187 +640,6 @@ func updateLastSyncWithTime(safeInst string, serverTime time.Time) {
 			ipc.Logf("[upload] avertissement : sauvegarde last_sync échouée : %v", wErr)
 		}
 	}
-}
-
-func readFileBase64(filePath string) (string, string, error) {
-	ext := strings.ToLower(filepath.Ext(filePath))
-	var mime string
-	switch ext {
-	case ".png":
-		mime = "image/png"
-	case ".jpg", ".jpeg":
-		mime = "image/jpeg"
-	case ".webp":
-		mime = "image/webp"
-	case ".gif":
-		mime = "image/gif"
-	case ".bmp":
-		mime = "image/bmp"
-	default:
-		return "", "", fmt.Errorf("format d'icône non autorisé : %s", ext)
-	}
-	bytes, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", "", err
-	}
-	return base64.StdEncoding.EncodeToString(bytes), mime, nil
-}
-
-func isPathStrictlyUnder(baseDir, targetPath string) bool {
-	absBase, err1 := filepath.Abs(filepath.Clean(baseDir))
-	absTarget, err2 := filepath.Abs(filepath.Clean(targetPath))
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	rel, err := filepath.Rel(absBase, absTarget)
-	if err != nil {
-		return false
-	}
-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
-}
-
-func isRealPathStrictlyUnder(baseDir, targetPath string) bool {
-	if !isPathStrictlyUnder(baseDir, targetPath) {
-		return false
-	}
-	info, err := os.Lstat(targetPath)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || info.IsDir() {
-		return false
-	}
-	realBase, err1 := filepath.EvalSymlinks(baseDir)
-	realTarget, err2 := filepath.EvalSymlinks(targetPath)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	return isPathStrictlyUnder(realBase, realTarget)
-}
-
-var validImageDataURIRe = regexp.MustCompile(`^data:image/(?:png|jpeg|jpg|webp|gif|bmp);base64,[A-Za-z0-9+/=]+$`)
-var validSvgDataURIRe = regexp.MustCompile(`^data:image/svg\+xml;(?:charset=[A-Za-z0-9-]+,[A-Za-z0-9%._~:/?#\[\]@!$&()*+,;=-]+|base64,[A-Za-z0-9+/=]+)$`)
-var svgDangerousEventRe = regexp.MustCompile(`(?i)(?:^|[\s/"'])on[a-z]+\s*=`)
-
-func isDangerousSVGContent(svg string) bool {
-	lower := strings.ToLower(svg)
-	if strings.Contains(lower, "<script") ||
-		strings.Contains(lower, "<foreignobject") ||
-		strings.Contains(lower, "javascript:") ||
-		strings.Contains(lower, "vbscript:") ||
-		strings.Contains(lower, "data:text/html") {
-		return true
-	}
-	return svgDangerousEventRe.MatchString(svg)
-}
-
-func isValidImageDataURI(raw string) bool {
-	if len(raw) == 0 || len(raw) > 3*1024*1024 {
-		return false
-	}
-	if validImageDataURIRe.MatchString(raw) {
-		return true
-	}
-	if validSvgDataURIRe.MatchString(raw) {
-		if idx := strings.Index(strings.ToLower(raw), ";base64,"); idx != -1 {
-			b64Payload := raw[idx+len(";base64,"):]
-			decoded, err := base64.StdEncoding.DecodeString(b64Payload)
-			if err != nil {
-				return false
-			}
-			return !isDangerousSVGContent(string(decoded))
-		}
-		lower := strings.ToLower(raw)
-		if strings.Contains(lower, "%3cscript") || strings.Contains(lower, "%3cforeignobject") || isDangerousSVGContent(lower) {
-			return false
-		}
-		return true
-	}
-	return false
-}
-
-func extractInstanceMetadata(instFolder string, instName string) map[string]any {
-	meta := map[string]any{
-		"realName": instName,
-		"loader":   "vanilla",
-		"iconData": nil,
-	}
-
-	var iconField string
-	var loaderField string
-	var nameField string
-
-	// 1. Lire instance.json ou fallback gens/launcher_config.json
-	instJsonPath := filepath.Join(instFolder, "instance.json")
-	var data []byte
-	var err error
-	if data, err = os.ReadFile(instJsonPath); err != nil {
-		configPath := filepath.Join(instFolder, "gens", "launcher_config.json")
-		data, err = os.ReadFile(configPath)
-	}
-
-	if err == nil {
-		var instData struct {
-			Name     string `json:"name"`
-			Loader   string `json:"loader"`
-			Icon     string `json:"icon"`
-			IconData string `json:"iconData"`
-		}
-		if err := json.Unmarshal(data, &instData); err == nil {
-			nameField = instData.Name
-			loaderField = instData.Loader
-			if instData.Icon != "" {
-				iconField = instData.Icon
-			} else if instData.IconData != "" {
-				iconField = instData.IconData
-			}
-		}
-	}
-
-	if nameField != "" {
-		meta["realName"] = nameField
-	}
-	if loaderField != "" {
-		meta["loader"] = loaderField
-	}
-
-	// 2. Traitement de l'icône personnalisée
-	var finalIconData string
-
-	if isValidImageDataURI(iconField) {
-		finalIconData = iconField
-	} else if strings.HasPrefix(iconField, "file://") {
-		// Nettoyage de l'URL file:// (confinée strictement au dossier de l'instance)
-		filePath := strings.TrimPrefix(iconField, "file://")
-		if strings.HasPrefix(filePath, "/") && len(filePath) > 2 && filePath[2] == ':' {
-			filePath = filePath[1:] // Pour Windows : /C:/path -> C:/path
-		}
-		filePath = filepath.FromSlash(filePath)
-		if isRealPathStrictlyUnder(instFolder, filePath) {
-			if info, err := os.Stat(filePath); err == nil && !info.IsDir() && info.Size() < 2*1024*1024 {
-				if b64, mime, err := readFileBase64(filePath); err == nil {
-					finalIconData = fmt.Sprintf("data:%s;base64,%s", mime, b64)
-				}
-			}
-		}
-	}
-
-	// 3. Fallback : scanner les fichiers d'icônes physiques dans instFolder
-	if finalIconData == "" {
-		exts := []string{".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-		for _, ext := range exts {
-			candidate := filepath.Join(instFolder, "icon"+ext)
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Size() < 2*1024*1024 {
-				if b64, mime, err := readFileBase64(candidate); err == nil {
-					finalIconData = fmt.Sprintf("data:%s;base64,%s", mime, b64)
-					break
-				}
-			}
-		}
-	}
-
-	if finalIconData != "" {
-		meta["iconData"] = finalIconData
-	}
-
-	return meta
 }
 
 func detectUploadConflict(

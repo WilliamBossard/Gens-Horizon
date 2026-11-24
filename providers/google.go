@@ -67,7 +67,12 @@ func (g *GoogleProvider) refreshToken() error {
 		"grant_type":    {"refresh_token"},
 	}
 
-	resp, err := g.client.PostForm("https://oauth2.googleapis.com/token", form)
+	req, err := http.NewRequestWithContext(baseContext(), "POST", "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("erreur création requête refresh token : %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := g.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("erreur requête refresh token : %w", err)
 	}
@@ -185,6 +190,7 @@ func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, &retry.HTTPError{
 				StatusCode: resp.StatusCode,
+				RetryAfter: retry.ParseRetryAfter(resp.Header.Get("Retry-After")),
 				Message:    fmt.Sprintf("[google] listFiles HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
 			}
 		}
@@ -433,7 +439,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 			return "", err
 		}
 		defer putResp.Body.Close()
-		respBytes, _ := io.ReadAll(putResp.Body)
+		respBytes, _ := io.ReadAll(io.LimitReader(putResp.Body, 1<<20))
 		if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
 			return "", fmt.Errorf("[google] échec upload ZIP vide (HTTP %d) : %s", putResp.StatusCode, string(respBytes))
 		}
@@ -466,7 +472,11 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 
 		for attempt := 0; attempt < 3; attempt++ {
 			if attempt > 0 {
-				time.Sleep(time.Duration(attempt*1500) * time.Millisecond)
+				select {
+				case <-baseContext().Done():
+					return "", baseContext().Err()
+				case <-time.After(time.Duration(attempt*1500) * time.Millisecond):
+				}
 				if serverOffset, completedBody, qErr := queryGoogleUploadOffset(uploadClient, uploadURL, fileSize); qErr == nil {
 					if completedBody != nil {
 						var res struct {
@@ -515,7 +525,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 				continue
 			}
 
-			respBytes, _ := io.ReadAll(putResp.Body)
+			respBytes, _ := io.ReadAll(io.LimitReader(putResp.Body, 1<<20))
 			_ = putResp.Body.Close()
 			cleanup()
 
@@ -592,7 +602,7 @@ func queryGoogleUploadOffset(client *http.Client, uploadURL string, totalSize in
 		return -1, nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
 		return totalSize, body, nil
@@ -671,7 +681,9 @@ func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (s
 	var res struct {
 		ID string `json:"id"`
 	}
-	_ = json.Unmarshal(respBytes, &res)
+	if err := json.Unmarshal(respBytes, &res); err != nil {
+		ipc.Logf("[google] avertissement parsing réponse uploadJSON : %v", err)
+	}
 	InvalidateCloudIndexCache()
 	return res.ID, nil
 }
@@ -733,7 +745,9 @@ func (g *GoogleProvider) RenameFile(fileID string, newName string, existingTarge
 	var res struct {
 		ID string `json:"id"`
 	}
-	_ = json.Unmarshal(respBytes, &res)
+	if err := json.Unmarshal(respBytes, &res); err != nil {
+		ipc.Logf("[google] avertissement parsing réponse renameFile : %v", err)
+	}
 	promotedID := res.ID
 	if promotedID == "" {
 		promotedID = fileID

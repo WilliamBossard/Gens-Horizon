@@ -8,6 +8,46 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
+// GetCloudIndexReadOnlyWithContext récupère l'index des fichiers cloud sans supprimer de doublons ni modifier le cache disque (sûr sans horizon.lock).
+func GetCloudIndexReadOnlyWithContext(ctx context.Context, p Provider, opts retry.Options, logPrefix string) (map[string]CloudFile, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cachedFiles, ok := GetCleanedCloudIndex(p.Name(), DefaultCloudIndexTTL); ok {
+		cloudIndex := make(map[string]CloudFile, len(cachedFiles))
+		for _, f := range cachedFiles {
+			cloudIndex[f.Name] = f
+		}
+		return cloudIndex, nil
+	}
+
+	var cloudFiles []CloudFile
+	err := retry.Do(ctx, opts, func() error {
+		files, err := p.ListFiles("GensHorizon_")
+		if err != nil {
+			return err
+		}
+		cloudFiles = files
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	cloudIndex := make(map[string]CloudFile, len(cloudFiles))
+	for _, f := range cloudFiles {
+		existing, ok := cloudIndex[f.Name]
+		if !ok {
+			cloudIndex[f.Name] = f
+			continue
+		}
+		if f.ModifiedTime.After(existing.ModifiedTime) || (f.ModifiedTime.Equal(existing.ModifiedTime) && f.Size > existing.Size) {
+			cloudIndex[f.Name] = f
+		}
+	}
+	return cloudIndex, nil
+}
+
 // GetCloudIndexAndCleanDuplicates récupère la liste des fichiers cloud (avec cache éphémère 45s) et purge automatiquement les doublons obsolètes
 func GetCloudIndexAndCleanDuplicates(p Provider, opts retry.Options, logPrefix string) (map[string]CloudFile, error) {
 	return GetCloudIndexAndCleanDuplicatesWithContext(context.Background(), p, opts, logPrefix)

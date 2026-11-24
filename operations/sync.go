@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
 	"github.com/WilliamBossard/Gens-Horizon/lock"
 	"github.com/WilliamBossard/Gens-Horizon/paths"
@@ -21,6 +21,31 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/scanner"
 	"github.com/WilliamBossard/Gens-Horizon/ziputils"
 )
+
+func maybeDecryptDownloadedZip(zipPath string) (string, string, error) {
+	enc, err := ziputils.IsE2EEncryptedFile(zipPath)
+	if err != nil {
+		return "", "CORRUPT_ARCHIVE", err
+	}
+	if !enc {
+		return zipPath, "", nil
+	}
+	pass, err := auth.LoadE2EPassphrase()
+	if err != nil {
+		return "", "E2E_KEY_LOAD_FAILED", err
+	}
+	if pass == "" {
+		return "", "E2E_KEY_REQUIRED", errors.New("archive chiffrée : veuillez saisir votre clé de récupération E2E")
+	}
+	decPath := zipPath + ".dec"
+	if err := ziputils.DecryptFileE2E(zipPath, decPath, pass); err != nil {
+		if errors.Is(err, ziputils.ErrE2EMismatch) {
+			return "", "E2E_KEY_MISMATCH", errors.New("clé E2E incorrecte pour cette archive")
+		}
+		return "", "E2E_DECRYPT_FAILED", err
+	}
+	return decPath, "", nil
+}
 
 func Sync(args []string) {
 	SyncWithContext(context.Background(), args)
@@ -32,8 +57,9 @@ func SyncWithContext(ctx context.Context, args []string) {
 	}
 	isList := hasFlag(args, "--list")
 	isDelete := hasFlag(args, "--delete")
+	isDryRun := hasFlag(args, "--dry-run")
 
-	if !isList {
+	if !isList && !isDryRun {
 		if !lock.AcquireLock() {
 			ipc.SendError("ERR_ALREADY_RUNNING", "ERR_ALREADY_RUNNING", "")
 			os.Exit(1)
@@ -60,7 +86,13 @@ func SyncWithContext(ctx context.Context, args []string) {
 
 	retryOpts := retry.FromSettings(settings.MaxRetries, settings.RetryBaseDelay, "[sync]")
 
-	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicatesWithContext(ctx, p, retryOpts, "[sync]")
+	var cloudIndex map[string]providers.CloudFile
+	if isList || isDryRun {
+		cloudIndex, err = providers.GetCloudIndexReadOnlyWithContext(ctx, p, retryOpts, "[sync]")
+	} else {
+		providers.InvalidateCloudIndexCache()
+		cloudIndex, err = providers.GetCloudIndexAndCleanDuplicatesWithContext(ctx, p, retryOpts, "[sync]")
+	}
 	if err != nil {
 		ipc.SendError("CLOUD_ERROR", err.Error(), "")
 		return
@@ -83,7 +115,7 @@ func SyncWithContext(ctx context.Context, args []string) {
 			ipc.SendError("ARG_MISSING", "Veuillez spécifier l'instance à supprimer du cloud.", "")
 			return
 		}
-		handleDelete(targetInst, cloudIndex, p, dataDir)
+		handleDeleteWithContext(ctx, retryOpts, targetInst, cloudIndex, p, dataDir)
 		return
 	}
 
@@ -108,6 +140,62 @@ func SyncWithContext(ctx context.Context, args []string) {
 				}
 			}
 		}
+	}
+
+	if isDryRun {
+		type previewItem struct {
+			Instance   string `json:"instance"`
+			NeedsBase  bool   `json:"needsBase"`
+			DeltaCount int    `json:"deltaCount"`
+			TotalBytes int64  `json:"totalBytes"`
+		}
+		var previewItems []previewItem
+		for _, inst := range instancesToSync {
+			safeInst, nameErr := paths.SanitizeInstanceName(paths.GetCanonicalName(inst))
+			if nameErr != nil {
+				continue
+			}
+			localPath, pathErr := paths.SafeJoinUnder(instDir, safeInst)
+			if pathErr != nil {
+				continue
+			}
+			baseBackupName := fmt.Sprintf("%s%s.zip", PrefixBackup, safeInst)
+			baseFile, hasBase := cloudIndex[baseBackupName]
+			if !hasBase {
+				continue
+			}
+			_, statErr := os.Stat(localPath)
+			isNew := os.IsNotExist(statErr)
+			var lastSyncTime int64
+			if rawTime, ok := syncInfo[safeInst]; ok {
+				if t, err := time.Parse(time.RFC3339Nano, rawTime); err == nil {
+					lastSyncTime = t.UnixMilli()
+				}
+			}
+			needsBase := isNew || baseFile.ModifiedTime.UnixMilli() > lastSyncTime
+			deltas := selectSyncDeltas(cloudIndex, safeInst, baseFile, lastSyncTime, needsBase)
+			if !needsBase && len(deltas) == 0 {
+				continue
+			}
+			var totalBytes int64
+			if needsBase {
+				totalBytes += baseFile.Size
+			}
+			for _, d := range deltas {
+				totalBytes += d.file.Size
+			}
+			previewItems = append(previewItems, previewItem{
+				Instance:   inst,
+				NeedsBase:  needsBase,
+				DeltaCount: len(deltas),
+				TotalBytes: totalBytes,
+			})
+		}
+		ipc.Send(map[string]any{
+			"type":  "SYNC_PREVIEW",
+			"items": previewItems,
+		})
+		return
 	}
 
 	for _, inst := range instancesToSync {
@@ -164,6 +252,18 @@ func SyncWithContext(ctx context.Context, args []string) {
 			continue
 		}
 
+		// Récupération optionnelle des empreintes SHA-256 cloud depuis meta_<inst>.json
+		var cloudMeta struct {
+			ArchiveSha256 string            `json:"archiveSha256"`
+			DeltaSha256s  map[string]string `json:"deltaSha256s"`
+		}
+		metaName := fmt.Sprintf("%s%s.json", PrefixMeta, safeInst)
+		if mf, ok := cloudIndex[metaName]; ok {
+			_ = retry.Do(ctx, retryOpts, func() error {
+				return p.DownloadJSON(mf.ID, &cloudMeta)
+			})
+		}
+
 		// Rollback paresseux : créé uniquement après téléchargement et validation des archives
 		var rollbackPath string
 		ensureRollback := func() error {
@@ -215,8 +315,29 @@ func SyncWithContext(ctx context.Context, args []string) {
 				ipc.SendError("DOWNLOAD_FAILED", err.Error(), inst)
 				continue
 			}
+			if cloudMeta.ArchiveSha256 != "" {
+				actualSha, shaErr := computeFileSHA256(tempBase)
+				if shaErr != nil || !strings.EqualFold(actualSha, cloudMeta.ArchiveSha256) {
+					_ = os.RemoveAll(baseTmpDir)
+					if isNewInstance {
+						_ = os.RemoveAll(localPath)
+					}
+					ipc.SendError("CORRUPT_ARCHIVE", fmt.Sprintf("Empreinte SHA-256 invalide pour l'archive cloud (attendu %s, obtenu %s).", cloudMeta.ArchiveSha256, actualSha), inst)
+					continue
+				}
+			}
 
-			if err := ziputils.VerifyZipIntegrity(tempBase); err != nil {
+			plainBase, decCode, decErr := maybeDecryptDownloadedZip(tempBase)
+			if decErr != nil {
+				_ = os.RemoveAll(baseTmpDir)
+				if isNewInstance {
+					_ = os.RemoveAll(localPath)
+				}
+				ipc.SendError(decCode, decErr.Error(), inst)
+				continue
+			}
+
+			if err := ziputils.VerifyZipIntegrity(plainBase); err != nil {
 				_ = os.RemoveAll(baseTmpDir)
 				if isNewInstance {
 					_ = os.RemoveAll(localPath)
@@ -230,8 +351,9 @@ func SyncWithContext(ctx context.Context, args []string) {
 				ipc.SendError("ROLLBACK_SNAPSHOT_FAILED", rbErr.Error(), inst)
 				continue
 			}
+			selectiveProfile := resolveSelectiveProfile(settings, inst, safeInst)
 			if !isNewInstance {
-				if cErr := cleanNonIgnoredEntries(localPath); cErr != nil {
+				if cErr := cleanNonIgnoredEntriesForProfile(localPath, selectiveProfile); cErr != nil {
 					_ = os.RemoveAll(baseTmpDir)
 					restoreOnSyncFailure()
 					ipc.SendError("CLEAN_FAILED", cErr.Error(), inst)
@@ -240,7 +362,7 @@ func SyncWithContext(ctx context.Context, args []string) {
 			}
 
 			ipc.SendProgress("EXTRACTING", 0, inst)
-			err = ziputils.ExtractZip(tempBase, localPath, func(pct int) {
+			err = ziputils.ExtractZip(plainBase, localPath, func(pct int) {
 				ipc.SendProgress("EXTRACTING", pct, inst)
 			})
 			_ = os.RemoveAll(baseTmpDir)
@@ -285,13 +407,30 @@ func SyncWithContext(ctx context.Context, args []string) {
 						dlResults[idx] = downloadedDelta{errMsg: dErr.Error()}
 						return
 					}
-					if vErr := ziputils.VerifyZipIntegrity(tempDelta); vErr != nil {
+					if expectedDeltaSha := cloudMeta.DeltaSha256s[item.file.Name]; expectedDeltaSha != "" {
+						actualSha, shaErr := computeFileSHA256(tempDelta)
+						if shaErr != nil || !strings.EqualFold(actualSha, expectedDeltaSha) {
+							_ = os.RemoveAll(dTmpDir)
+							errTxt := fmt.Sprintf("Empreinte SHA-256 invalide pour %s (attendu %s, obtenu %s)", item.file.Name, expectedDeltaSha, actualSha)
+							ipc.Logf("[sync] %s", errTxt)
+							dlResults[idx] = downloadedDelta{errMsg: errTxt}
+							return
+						}
+					}
+					plainDelta, _, decErr := maybeDecryptDownloadedZip(tempDelta)
+					if decErr != nil {
+						_ = os.RemoveAll(dTmpDir)
+						ipc.Logf("[sync] Échec déchiffrement delta %s : %v", item.file.Name, decErr)
+						dlResults[idx] = downloadedDelta{errMsg: decErr.Error()}
+						return
+					}
+					if vErr := ziputils.VerifyZipIntegrity(plainDelta); vErr != nil {
 						_ = os.RemoveAll(dTmpDir)
 						ipc.Logf("[sync] Archive delta corrompue %s : %v", item.file.Name, vErr)
 						dlResults[idx] = downloadedDelta{errMsg: vErr.Error()}
 						return
 					}
-					dlResults[idx] = downloadedDelta{tempDir: dTmpDir, tempPath: tempDelta, valid: true}
+					dlResults[idx] = downloadedDelta{tempDir: dTmpDir, tempPath: plainDelta, valid: true}
 				}(i, d)
 			}
 			dlWg.Wait()
@@ -542,6 +681,10 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 }
 
 func handleDelete(targetInst string, cloudIndex map[string]providers.CloudFile, p providers.Provider, dataDir string) {
+	handleDeleteWithContext(context.Background(), retry.Options{MaxRetries: 1}, targetInst, cloudIndex, p, dataDir)
+}
+
+func handleDeleteWithContext(ctx context.Context, retryOpts retry.Options, targetInst string, cloudIndex map[string]providers.CloudFile, p providers.Provider, dataDir string) {
 	safeInst, err := paths.SanitizeInstanceName(paths.GetCanonicalName(targetInst))
 	if err != nil {
 		ipc.SendError("INVALID_INSTANCE_NAME", err.Error(), targetInst)
@@ -555,7 +698,14 @@ func handleDelete(targetInst string, cloudIndex map[string]providers.CloudFile, 
 	for name, f := range cloudIndex {
 		_, isMatchingDelta := MatchDeltaForInstance(name, safeInst)
 		if name == baseBackupName || name == manifestName || name == metaName || isMatchingDelta {
-			if delErr := p.DeleteFile(f.ID); delErr != nil && !errors.Is(delErr, providers.ErrNotFound) {
+			delErr := retry.Do(ctx, retryOpts, func() error {
+				err := p.DeleteFile(f.ID)
+				if errors.Is(err, providers.ErrNotFound) {
+					return nil
+				}
+				return err
+			})
+			if delErr != nil {
 				ipc.Logf("[sync] Échec suppression Cloud '%s' (%s) : %v", name, f.ID, delErr)
 				deleteErrs = append(deleteErrs, fmt.Sprintf("%s: %v", name, delErr))
 			}
@@ -690,155 +840,6 @@ func preserveIgnoredEntries(backupOldPath, targetPath string) {
 		}
 		return nil
 	})
-}
-
-// restoreInPlace restaure les fichiers du snapshot directement dans targetPath sans renommer le dossier racine
-// (utile sous Windows lorsque logs/ ou un fichier tiers empêche os.Rename sur la racine).
-func restoreInPlace(snapshotDir, targetPath string) error {
-	snapshotSet := make(map[string]bool)
-	err := filepath.WalkDir(snapshotDir, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-			return nil
-		}
-		rel, err := filepath.Rel(snapshotDir, path)
-		if err != nil || rel == "." {
-			return err
-		}
-		snapshotSet[rel] = true
-		dest := filepath.Join(targetPath, rel)
-		info, infoErr := d.Info()
-		if infoErr != nil {
-			return infoErr
-		}
-		if d.IsDir() {
-			return os.MkdirAll(dest, info.Mode())
-		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-			return err
-		}
-		_ = os.Remove(dest)
-		if err := os.Link(path, dest); err == nil {
-			return nil
-		}
-		return copySingleFile(path, dest, info.Mode())
-	})
-	if err != nil {
-		return err
-	}
-
-	// Supprime les fichiers ajoutés pendant la synchro échouée (hors dossiers/fichiers ignorés)
-	var extraPaths []string
-	_ = filepath.WalkDir(targetPath, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		rel, err := filepath.Rel(targetPath, path)
-		if err != nil || rel == "." {
-			return nil
-		}
-		lower := strings.ToLower(d.Name())
-		if d.IsDir() && scanner.IgnoredDirs[lower] {
-			return filepath.SkipDir
-		}
-		if !d.IsDir() && scanner.IsIgnoredFile(d.Name()) {
-			return nil
-		}
-		if !snapshotSet[rel] {
-			extraPaths = append(extraPaths, path)
-		}
-		return nil
-	})
-	for i := len(extraPaths) - 1; i >= 0; i-- {
-		_ = os.Remove(extraPaths[i])
-	}
-	return nil
-}
-
-var rollbackCopyBufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 64*1024)
-		return &b
-	},
-}
-
-func copySingleFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
-	if err != nil {
-		return err
-	}
-	bufPtr := rollbackCopyBufPool.Get().(*[]byte)
-	_, copyErr := io.CopyBuffer(out, in, *bufPtr)
-	rollbackCopyBufPool.Put(bufPtr)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
-}
-
-func copyDir(src, dst string, skipIgnored bool) error {
-	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-			return nil
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		if skipIgnored && rel != "." {
-			lower := strings.ToLower(d.Name())
-			if d.IsDir() && scanner.IgnoredDirs[lower] {
-				return filepath.SkipDir
-			}
-			if !d.IsDir() && scanner.IsIgnoredFile(d.Name()) {
-				return nil
-			}
-		}
-		target := filepath.Join(dst, rel)
-		info, infoErr := d.Info()
-		if infoErr != nil {
-			return infoErr
-		}
-		if d.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-			return err
-		}
-		// Tentative de hardlink instantané (0 écriture disque, ~30ms pour toute l'instance)
-		if err := os.Link(path, target); err == nil {
-			return nil
-		}
-		return copySingleFile(path, target, info.Mode())
-	})
-}
-
-func cleanNonIgnoredEntries(localPath string) error {
-	entries, err := os.ReadDir(localPath)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		lower := strings.ToLower(entry.Name())
-		if scanner.IgnoredDirs[lower] || (!entry.IsDir() && scanner.IsIgnoredFile(entry.Name())) {
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(localPath, entry.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 type syncDeltaEntry struct {

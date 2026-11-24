@@ -436,7 +436,8 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 
 		cleanDest, ok := isZipEntrySafeUnder(cleanTarget, zf.Name)
 		if !ok {
-			continue // Entrée malveillante ignorée (Zip Slip)
+			ipc.Logf("[ziputils] Entrée ZIP dangereuse ignorée (Zip Slip) : %s", zf.Name)
+			continue
 		}
 
 		if zf.FileInfo().IsDir() {
@@ -833,16 +834,19 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 	for _, zf := range zr.File {
 		if zf.Name == "__delta__.json" {
 			rc, err := zf.Open()
-			if err == nil {
-				data, err := io.ReadAll(io.LimitReader(rc, maxDeltaMetaBytes))
-				_ = rc.Close()
-				if err == nil {
-					var meta DeltaMetadata
-					if err := json.Unmarshal(data, &meta); err == nil {
-						deletedFiles = meta.DeletedFiles
-					}
-				}
+			if err != nil {
+				return fmt.Errorf("impossible d'ouvrir __delta__.json : %w", err)
 			}
+			data, readErr := io.ReadAll(io.LimitReader(rc, maxDeltaMetaBytes))
+			_ = rc.Close()
+			if readErr != nil {
+				return fmt.Errorf("impossible de lire __delta__.json : %w", readErr)
+			}
+			var meta DeltaMetadata
+			if err := json.Unmarshal(data, &meta); err != nil {
+				return fmt.Errorf("__delta__.json corrompu : %w", err)
+			}
+			deletedFiles = meta.DeletedFiles
 			continue
 		}
 
@@ -853,7 +857,8 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 
 		cleanDest, ok := isZipEntrySafeUnder(cleanTarget, zf.Name)
 		if !ok {
-			continue // Entrée malveillante ignorée (Zip Slip)
+			ipc.Logf("[ziputils] Entrée ZIP dangereuse ignorée (Zip Slip) : %s", zf.Name)
+			continue
 		}
 
 		if zf.FileInfo().IsDir() {

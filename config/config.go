@@ -17,15 +17,20 @@ type ProviderConfig struct {
 }
 
 type Settings struct {
-	SystemEnabled         bool   `json:"systemEnabled"`
-	SyncMode              string `json:"syncMode"`
-	AutoSync              bool   `json:"autoSync"`
-	AutoUpload            bool   `json:"autoUpload"`
-	Provider              string `json:"provider"`
-	MaxRetries            int    `json:"maxRetries"`
-	RetryBaseDelay        int    `json:"retryBaseDelay"`
-	DeltaCleanupThreshold int    `json:"deltaCleanupThreshold"`
-	Language              string `json:"language,omitempty"`
+	SystemEnabled           bool              `json:"systemEnabled"`
+	SyncMode                string            `json:"syncMode"`
+	AutoSync                bool              `json:"autoSync"`
+	AutoUpload              bool              `json:"autoUpload"`
+	Provider                string            `json:"provider"`
+	MaxRetries              int               `json:"maxRetries"`
+	RetryBaseDelay          int               `json:"retryBaseDelay"`
+	DeltaCleanupThreshold   int               `json:"deltaCleanupThreshold"`
+	Language                string            `json:"language,omitempty"`
+	VerifyIntegrityOnLaunch bool              `json:"verifyIntegrityOnLaunch,omitempty"`
+	DryRunPreview           bool              `json:"dryRunPreview,omitempty"`
+	E2EEncryption           bool              `json:"e2eEncryption,omitempty"`
+	SelectiveSync           bool              `json:"selectiveSync,omitempty"`
+	SelectiveProfiles       map[string]string `json:"selectiveProfiles,omitempty"`
 }
 
 func DefaultSettings() Settings {

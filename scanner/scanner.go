@@ -147,6 +147,29 @@ type scanTask struct {
 	mtimeMs  int64
 }
 
+// IsPathAllowedByProfile indique si un chemin relatif appartient au profil sélectif choisi.
+// Profils supportés : "", "FULL", "ESSENTIAL", "WORLDS_ONLY", "WORLDS_MODS_PACKS".
+func IsPathAllowedByProfile(relPath, profile string) bool {
+	if profile == "" || profile == "FULL" {
+		return true
+	}
+	clean := strings.TrimPrefix(filepath.ToSlash(relPath), "./")
+	if clean == "" || clean == "." {
+		return true
+	}
+	top := strings.ToLower(strings.SplitN(clean, "/", 2)[0])
+	switch profile {
+	case "WORLDS_ONLY":
+		return top == "saves"
+	case "ESSENTIAL":
+		return top == "saves" || top == "config" || top == "options.txt" || top == "servers.dat"
+	case "WORLDS_MODS_PACKS":
+		return top == "saves" || top == "mods" || top == "resourcepacks" || top == "shaderpacks" || top == "config"
+	default:
+		return true
+	}
+}
+
 // GenerateManifest scanne récursivement targetDir et génère le Manifest avec WalkDir optimisé
 func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) {
 	return GenerateManifestWithOptions(targetDir, oldManifest, false)
@@ -154,6 +177,11 @@ func GenerateManifest(targetDir string, oldManifest Manifest) (Manifest, error) 
 
 // GenerateManifestWithOptions scanne récursivement targetDir ; si verifyAll est true, tous les fichiers sont ré-hachés en SHA-256.
 func GenerateManifestWithOptions(targetDir string, oldManifest Manifest, verifyAll bool) (Manifest, error) {
+	return GenerateManifestWithProfile(targetDir, oldManifest, verifyAll, "")
+}
+
+// GenerateManifestWithProfile scanne targetDir en appliquant un filtre de profil sélectif optionnel.
+func GenerateManifestWithProfile(targetDir string, oldManifest Manifest, verifyAll bool, profile string) (Manifest, error) {
 	manifest := make(Manifest)
 	var manifestMu sync.Mutex
 
@@ -179,6 +207,11 @@ func GenerateManifestWithOptions(targetDir string, oldManifest Manifest, verifyA
 			if currentPath != targetDir && (IgnoredDirs[name] || IgnoredDirs[lowerName]) {
 				return filepath.SkipDir
 			}
+			if currentPath != targetDir && profile != "" && profile != "FULL" {
+				if relDir, rErr := filepath.Rel(targetDir, currentPath); rErr == nil && !IsPathAllowedByProfile(relDir, profile) {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 
@@ -196,6 +229,9 @@ func GenerateManifestWithOptions(targetDir string, oldManifest Manifest, verifyA
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
+		if !IsPathAllowedByProfile(rel, profile) {
+			return nil
+		}
 
 		// Vérification rapide dans le cache du manifest précédent (WalkDir est séquentiel)
 		mtimeMs := info.ModTime().UnixMilli()

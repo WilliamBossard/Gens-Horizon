@@ -61,6 +61,7 @@ func CleanWithContext(ctx context.Context, args []string) {
 
 	retryOpts := retry.FromSettings(settings.MaxRetries, settings.RetryBaseDelay, "[clean]")
 
+	providers.InvalidateCloudIndexCache()
 	cloudIndex, err := providers.GetCloudIndexAndCleanDuplicatesWithContext(ctx, p, retryOpts, "[clean]")
 	if err != nil {
 		ipc.SendError("CLOUD_ERROR", err.Error(), "")
@@ -192,7 +193,7 @@ func collectCleanItems(cloudIndex map[string]providers.CloudFile) ([]CleanItem, 
 
 		// B. Fichiers temporaires, staging interrompus ou corrompus
 		// Fenêtre de grâce de 15 minutes sur GensHorizon_Staging_* pour ne pas supprimer un upload actif d'un autre PC.
-		if strings.HasPrefix(name, "GensHorizon_Staging_") || strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".part") || strings.HasPrefix(name, "tmp_") {
+		if strings.HasPrefix(name, "GensHorizon_Staging_") || strings.HasPrefix(name, ".__staging_bak_") || strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".part") || strings.HasPrefix(name, "tmp_") {
 			if strings.HasPrefix(name, "GensHorizon_Staging_") && !file.ModifiedTime.IsZero() && file.ModifiedTime.After(stagingGraceCutoff) {
 				continue
 			}

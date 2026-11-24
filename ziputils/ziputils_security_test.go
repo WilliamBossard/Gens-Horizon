@@ -348,3 +348,25 @@ func TestCreateFullZipWithHintMatchesCreateFullZip(t *testing.T) {
 	}
 }
 
+
+func TestApplyDeltaFailsOnCorruptedDeltaJSON(t *testing.T) {
+	tmp := t.TempDir()
+	zipPath := filepath.Join(tmp, "bad_delta.zip")
+	targetDir := filepath.Join(tmp, "out")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	createTestZip(t, zipPath, []struct {
+		name    string
+		content string
+		mode    os.FileMode
+	}{
+		{name: "__delta__.json", content: "{corrupted-json", mode: 0644},
+		{name: "config/ok.txt", content: "ok", mode: 0644},
+	})
+
+	if err := ApplyDelta(zipPath, targetDir, nil); err == nil {
+		t.Fatalf("expected ApplyDelta to fail on corrupted __delta__.json")
+	}
+}

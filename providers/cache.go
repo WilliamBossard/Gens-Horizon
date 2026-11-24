@@ -123,8 +123,13 @@ func SaveCloudIndexCache(providerName string, files []CloudFile, cleaned bool) {
 			tmpPath := tmpFile.Name()
 			if _, wErr := tmpFile.Write(b); wErr == nil {
 				if cErr := tmpFile.Close(); cErr == nil {
-					if rErr := os.Rename(tmpPath, cachePath); rErr == nil {
-						return
+					for attempt := 0; attempt < 5; attempt++ {
+						if rErr := os.Rename(tmpPath, cachePath); rErr == nil {
+							return
+						}
+						if attempt < 4 {
+							time.Sleep(time.Duration(40*(attempt+1)) * time.Millisecond)
+						}
 					}
 				}
 			} else {

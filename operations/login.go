@@ -90,7 +90,7 @@ func LoginWithContext(ctx context.Context, args []string) {
 
 	listener, err := net.Listen("tcp", "127.0.0.1:"+port)
 	if err != nil {
-		ipc.SendError("PORT_IN_USE", fmt.Sprintf("Le port local %s est déjà utilisé : %v", port, err), "")
+		ipc.SendError("PORT_IN_USE", fmt.Sprintf("Le port local %s requis pour la connexion %s est déjà utilisé (%v). Fermez l'application ou l'onglet qui l'occupe puis réessayez.", port, providerName, err), "")
 		return
 	}
 	defer listener.Close()
@@ -301,7 +301,7 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 		}
 		defer resp.Body.Close()
 
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if resp.StatusCode != http.StatusOK {
 			return tokenData, fmt.Errorf("google token exchange HTTP %d : %s", resp.StatusCode, string(b))
 		}
@@ -377,7 +377,7 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 		}
 		defer resp.Body.Close()
 
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if resp.StatusCode != http.StatusOK {
 			return tokenData, fmt.Errorf("onedrive token exchange HTTP %d : %s", resp.StatusCode, string(b))
 		}

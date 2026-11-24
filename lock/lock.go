@@ -37,7 +37,9 @@ func InspectLock() (locked bool, stale bool, pid int) {
 	return true, isLockStale(lockPath), pid
 }
 
-// IsLockStale vérifie si le fichier de lock correspond à un processus mort ou à un heartbeat dépassé
+const heartbeatStaleTimeout = 10 * time.Minute
+
+// IsLockStale vérifie si le fichier de lock correspond à un processus mort, recyclé ou à un heartbeat dépassé
 func isLockStale(lockPath string) bool {
 	info, err := os.Stat(lockPath)
 	if err != nil {
@@ -60,11 +62,11 @@ func isLockStale(lockPath string) bool {
 	}
 
 	alive := isProcessAlive(pid)
-	if !alive {
+	if !alive || !isHorizonProcess(pid) {
 		return true
 	}
-	// Si le processus tourne encore, n'invalider qu'après 5 min sans heartbeat (tolère une courte mise en veille)
-	return age > 5*time.Minute
+	// Si le processus tourne encore, n'invalider qu'après 10 min sans heartbeat (aligné sur ipc-horizon.js)
+	return age > heartbeatStaleTimeout
 }
 
 // AcquireLock tente d'acquérir le verrou. Renvoie true en cas de succès, false si une instance tourne déjà.

@@ -71,7 +71,12 @@ func (o *OneDriveProvider) refreshToken() error {
 		form.Set("client_secret", o.creds.ClientSecret)
 	}
 
-	resp, err := o.client.PostForm("https://login.microsoftonline.com/common/oauth2/v2.0/token", form)
+	req, err := http.NewRequestWithContext(baseContext(), "POST", "https://login.microsoftonline.com/common/oauth2/v2.0/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := o.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -209,6 +214,7 @@ func (o *OneDriveProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, &retry.HTTPError{
 				StatusCode: resp.StatusCode,
+				RetryAfter: retry.ParseRetryAfter(resp.Header.Get("Retry-After")),
 				Message:    fmt.Sprintf("onedrive listFiles HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
 			}
 		}
@@ -492,7 +498,11 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 
 		for attempt := 0; attempt < 3; attempt++ {
 			if attempt > 0 {
-				time.Sleep(time.Duration(attempt*1500) * time.Millisecond)
+				select {
+				case <-baseContext().Done():
+					return "", baseContext().Err()
+				case <-time.After(time.Duration(attempt*1500) * time.Millisecond):
+				}
 			}
 			if _, err := file.Seek(offset, io.SeekStart); err != nil {
 				return "", err
@@ -519,7 +529,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 				}
 				continue
 			}
-			chunkBody, _ := io.ReadAll(chunkResp.Body)
+			chunkBody, _ := io.ReadAll(io.LimitReader(chunkResp.Body, 1<<20))
 			_ = chunkResp.Body.Close()
 			cleanup()
 
@@ -658,12 +668,44 @@ func (o *OneDriveProvider) RenameFile(fileID string, newName string, existingTar
 		return "", err
 	}
 	if resp.StatusCode == http.StatusConflict && existingTargetID != "" && existingTargetID != fileID {
-		if delErr := o.DeleteFile(existingTargetID); delErr != nil && !errors.Is(delErr, ErrNotFound) {
-			return "", fmt.Errorf("onedrive suppression cible avant promotion : %w", delErr)
+		backupName := fmt.Sprintf("%s.bak.%d", newName, time.Now().UnixNano())
+		backupPayload, _ := json.Marshal(map[string]string{"name": backupName})
+		backupReq, bErr := http.NewRequestWithContext(baseContext(), "PATCH", fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", url.PathEscape(existingTargetID)), bytes.NewReader(backupPayload))
+		if bErr != nil {
+			return "", fmt.Errorf("onedrive backup cible avant promotion : %w", bErr)
 		}
+		backupReq.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(backupPayload)), nil
+		}
+		backupReq.Header.Set("Content-Type", "application/json")
+		backupResp, bErr := o.doRequest(backupReq)
+		if bErr != nil {
+			return "", fmt.Errorf("onedrive backup cible avant promotion : %w", bErr)
+		}
+		_, _ = io.ReadAll(io.LimitReader(backupResp.Body, 1024*1024))
+		_ = backupResp.Body.Close()
+		if backupResp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("onedrive backup cible HTTP %d", backupResp.StatusCode)
+		}
+
 		resp, b, err = tryPatch()
-		if err != nil {
-			return "", err
+		if err != nil || resp.StatusCode != http.StatusOK {
+			restoreReq, rErr := http.NewRequestWithContext(baseContext(), "PATCH", fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", url.PathEscape(existingTargetID)), bytes.NewReader(patchPayload))
+			if rErr == nil {
+				restoreReq.GetBody = func() (io.ReadCloser, error) {
+					return io.NopCloser(bytes.NewReader(patchPayload)), nil
+				}
+				restoreReq.Header.Set("Content-Type", "application/json")
+				if rResp, rErr2 := o.doRequest(restoreReq); rErr2 == nil {
+					_, _ = io.ReadAll(io.LimitReader(rResp.Body, 1024*1024))
+					_ = rResp.Body.Close()
+				}
+			}
+			if err != nil {
+				return "", err
+			}
+		} else {
+			_ = o.DeleteFile(existingTargetID)
 		}
 	}
 	if resp.StatusCode != http.StatusOK {

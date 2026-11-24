@@ -43,6 +43,10 @@ jobs:
       - name: Go Vet
         run: go vet ./...
 
+      - name: Vulnerability Check (govulncheck)
+        if: runner.os == 'Linux'
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: Run Tests with Race Detector (Linux)
         if: runner.os == 'Linux'
         run: go test -race -count=1 -v ./...

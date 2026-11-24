@@ -119,11 +119,14 @@ func Rollback(args []string) {
 		return
 	}
 
-	// Régénération du manifest local
-	newManifest, _ := scanner.GenerateManifest(targetPath, nil)
-	localManifestFile := paths.GetManifestPath(safeInst)
-	if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
-		_ = osWriteFileAtomic(localManifestFile, b, 0644)
+	newManifest, genErr := scanner.GenerateManifest(targetPath, nil)
+	if genErr != nil {
+		ipc.Logf("[rollback] Avertissement régénération manifest local : %v", genErr)
+	} else {
+		localManifestFile := paths.GetManifestPath(safeInst)
+		if b, err := json.MarshalIndent(newManifest, "", "  "); err == nil {
+			_ = osWriteFileAtomic(localManifestFile, b, 0644)
+		}
 	}
 
 	pruneOldRollbacks(instDir, 3, prefix1, prefix2)

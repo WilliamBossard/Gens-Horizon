@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -78,24 +80,63 @@ func TestAliveLockSurvivesShortSleepHeartbeatGap(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	// Vieillir de 45s (simule une courte mise en veille < 5m) : le lock vivant doit être respecté
-	gap45s := time.Now().Add(-45 * time.Second)
-	if err := os.Chtimes(lockFile, gap45s, gap45s); err != nil {
-		t.Fatalf("Chtimes 45s failed: %v", err)
+	// Vieillir de 6m (simule une mise en veille < 10m) : le lock vivant doit être respecté
+	gap6m := time.Now().Add(-6 * time.Minute)
+	if err := os.Chtimes(lockFile, gap6m, gap6m); err != nil {
+		t.Fatalf("Chtimes 6m failed: %v", err)
 	}
 	if AcquireLock() {
 		ReleaseLock()
-		t.Fatalf("expected live PID lock aged 45s not to be stolen")
+		t.Fatalf("expected live PID lock aged 6m not to be stolen")
 	}
 
-	// Vieillir au-delà de 5m : doit être considéré obsolète et nettoyé
-	old6m := time.Now().Add(-6 * time.Minute)
-	if err := os.Chtimes(lockFile, old6m, old6m); err != nil {
-		t.Fatalf("Chtimes 6m failed: %v", err)
+	// Vieillir au-delà de 10m : doit être considéré obsolète et nettoyé
+	old11m := time.Now().Add(-11 * time.Minute)
+	if err := os.Chtimes(lockFile, old11m, old11m); err != nil {
+		t.Fatalf("Chtimes 11m failed: %v", err)
 	}
 	if !AcquireLock() {
-		t.Fatalf("expected lock aged 6m without heartbeat to be reclaimed")
+		t.Fatalf("expected lock aged 11m without heartbeat to be reclaimed")
 	}
 	ReleaseLock()
+}
+
+func TestIsHorizonProcessSelf(t *testing.T) {
+	if !isHorizonProcess(os.Getpid()) {
+		t.Fatalf("expected isHorizonProcess(os.Getpid()) to return true")
+	}
+	if isHorizonProcess(0) {
+		t.Fatalf("expected isHorizonProcess(0) to return false")
+	}
+}
+
+func TestAcquireLockConcurrentExclusion(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HORIZON_DATA_DIR", tmpDir)
+
+	const workers = 12
+	var acquiredCount atomic.Int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if AcquireLock() {
+				acquiredCount.Add(1)
+				time.Sleep(30 * time.Millisecond)
+				ReleaseLock()
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if got := acquiredCount.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 concurrent goroutine to acquire lock, got %d", got)
+	}
 }
 

@@ -65,7 +65,12 @@ func (d *DropboxProvider) refreshToken() error {
 		form.Set("client_secret", d.creds.ClientSecret)
 	}
 
-	resp, err := d.client.PostForm("https://api.dropboxapi.com/oauth2/token", form)
+	req, err := http.NewRequestWithContext(baseContext(), "POST", "https://api.dropboxapi.com/oauth2/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := d.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -176,6 +181,7 @@ func (d *DropboxProvider) doRPC(endpoint string, reqBody any) ([]byte, error) {
 		if resp2.StatusCode != http.StatusOK {
 			return nil, &retry.HTTPError{
 				StatusCode: resp2.StatusCode,
+				RetryAfter: retry.ParseRetryAfter(resp2.Header.Get("Retry-After")),
 				Message:    fmt.Sprintf("dropbox RPC %s HTTP %d : %s", endpoint, resp2.StatusCode, string(respBytes)),
 			}
 		}
@@ -185,6 +191,7 @@ func (d *DropboxProvider) doRPC(endpoint string, reqBody any) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, &retry.HTTPError{
 			StatusCode: resp.StatusCode,
+			RetryAfter: retry.ParseRetryAfter(resp.Header.Get("Retry-After")),
 			Message:    fmt.Sprintf("dropbox RPC %s HTTP %d : %s", endpoint, resp.StatusCode, string(respBytes)),
 		}
 	}
@@ -421,12 +428,17 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 		const maxAttempts = 3
 		var lastErr error
 		authRefreshed := false
+		didRefreshThisIter := false
 
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			if attempt > 0 && !authRefreshed {
-				time.Sleep(time.Duration(attempt*1500) * time.Millisecond)
+		for attempt := 0; attempt < maxAttempts; {
+			if attempt > 0 && !didRefreshThisIter {
+				select {
+				case <-baseContext().Done():
+					return nil, baseContext().Err()
+				case <-time.After(time.Duration(attempt*1500) * time.Millisecond):
+				}
 			}
-			authRefreshed = false
+			didRefreshThisIter = false
 
 			tok, gErr := d.getAccessToken()
 			if gErr != nil {
@@ -453,6 +465,7 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 			})
 			if doErr != nil {
 				lastErr = doErr
+				attempt++
 				continue
 			}
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
@@ -463,7 +476,6 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 				return b, nil
 			}
 			if resp.StatusCode == http.StatusConflict {
-				// Récupération d'offset si Dropbox a déjà reçu le bloc lors d'une tentative précédente
 				var conflictBody struct {
 					Error struct {
 						Tag           string `json:".tag"`
@@ -478,17 +490,22 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 				}
 			}
 			if resp.StatusCode == http.StatusUnauthorized {
-				if _, refErr := d.refreshTokenIfStale(tok); refErr != nil {
-					return nil, refErr
+				if !authRefreshed {
+					if _, refErr := d.refreshTokenIfStale(tok); refErr != nil {
+						return nil, refErr
+					}
+					authRefreshed = true
+					didRefreshThisIter = true
+					lastErr = &retry.HTTPError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("dropbox %s HTTP 401 : %s", endpoint, string(b))}
+					continue
 				}
-				authRefreshed = true
-				lastErr = &retry.HTTPError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("dropbox %s HTTP 401 : %s", endpoint, string(b))}
-				continue
+				return nil, &retry.HTTPError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("dropbox %s HTTP 401 : %s", endpoint, string(b))}
 			}
 			lastErr = &retry.HTTPError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("dropbox %s HTTP %d : %s", endpoint, resp.StatusCode, string(b))}
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
 				return nil, lastErr
 			}
+			attempt++
 		}
 		return nil, lastErr
 	}

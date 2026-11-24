@@ -40,6 +40,7 @@ func QuotaWithContext(ctx context.Context, args []string) {
 
 	var usedBytes, totalBytes int64
 	var quotaErr error
+	var listErr error
 	var cloudFiles []providers.CloudFile
 
 	var wg sync.WaitGroup
@@ -60,7 +61,7 @@ func QuotaWithContext(ctx context.Context, args []string) {
 			cloudFiles = cached
 			return
 		}
-		listErr := retry.Do(ctx, retryOpts, func() error {
+		listErr = retry.Do(ctx, retryOpts, func() error {
 			var lErr error
 			cloudFiles, lErr = p.ListFiles("GensHorizon_")
 			return lErr
@@ -79,6 +80,10 @@ func QuotaWithContext(ctx context.Context, args []string) {
 
 	if quotaErr != nil {
 		ipc.SendError("QUOTA_ERROR", quotaErr.Error(), "")
+		return
+	}
+	if listErr != nil {
+		ipc.SendError("QUOTA_ERROR", listErr.Error(), "")
 		return
 	}
 
