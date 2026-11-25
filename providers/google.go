@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +20,6 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
-	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 type GoogleProvider struct {
@@ -47,7 +47,7 @@ func (g *GoogleProvider) getAccessToken() (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if g.tokenData.AccessToken == "" || g.tokenData.ExpiryDate == 0 || time.Now().UnixMilli() > (g.tokenData.ExpiryDate-60000) {
+	if g.tokenData.AccessToken == "" || (g.tokenData.ExpiryDate > 0 && time.Now().UnixMilli() > (g.tokenData.ExpiryDate-60000)) {
 		if err := g.refreshToken(); err != nil {
 			return "", err
 		}
@@ -80,10 +80,7 @@ func (g *GoogleProvider) refreshToken() error {
 
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("échec rafraîchissement token (HTTP %d) : %s", resp.StatusCode, string(bodyBytes)),
-		}
+		return newProviderHTTPError("échec rafraîchissement token", resp, bodyBytes)
 	}
 
 	var res struct {
@@ -153,7 +150,10 @@ func (g *GoogleProvider) doRequest(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
+func (g *GoogleProvider) ListFiles(ctx context.Context, nameContains string) ([]CloudFile, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	var files []CloudFile
 	var pageToken string
 	maxPages := 100
@@ -169,12 +169,13 @@ func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 		}
 		queries := []string{"trashed = false"}
 		if nameContains != "" {
-			queries = append(queries, fmt.Sprintf("name contains '%s'", strings.ReplaceAll(nameContains, "'", "\\'")))
+			escaped := strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(nameContains)
+			queries = append(queries, fmt.Sprintf("name contains '%s'", escaped))
 		}
 		params.Set("q", strings.Join(queries, " and "))
 
 		reqURL := "https://www.googleapis.com/drive/v3/files?" + params.Encode()
-		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -188,11 +189,7 @@ func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 		_ = resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, &retry.HTTPError{
-				StatusCode: resp.StatusCode,
-				RetryAfter: retry.ParseRetryAfter(resp.Header.Get("Retry-After")),
-				Message:    fmt.Sprintf("[google] listFiles HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
-			}
+			return nil, newProviderHTTPError("[google] listFiles", resp, bodyBytes)
 		}
 
 		var res struct {
@@ -232,7 +229,10 @@ func (g *GoogleProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 	return files, nil
 }
 
-func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
+func (g *GoogleProvider) DownloadFile(ctx context.Context, fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	escapedID := url.PathEscape(fileID)
 	buildURL := func(confirm bool) string {
 		u := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?alt=media", escapedID)
@@ -247,7 +247,7 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 	confirmAbuse := false
 
 	buildRangeReq := func(token string, confirm bool, start, end int64) (*http.Request, error) {
-		req, err := http.NewRequest(http.MethodGet, buildURL(confirm), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, buildURL(confirm), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -335,9 +335,12 @@ func (g *GoogleProvider) DownloadFile(fileID string, destPath string, onProgress
 	})
 }
 
-func (g *GoogleProvider) DownloadJSON(fileID string, target any) error {
+func (g *GoogleProvider) DownloadJSON(ctx context.Context, fileID string, target any) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?alt=media", url.PathEscape(fileID))
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return err
 	}
@@ -350,16 +353,16 @@ func (g *GoogleProvider) DownloadJSON(fileID string, target any) error {
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("[google] downloadJSON HTTP %d : %s", resp.StatusCode, string(b)),
-		}
+		return newProviderHTTPError("[google] downloadJSON", resp, b)
 	}
 
 	return json.NewDecoder(io.LimitReader(resp.Body, 16*1024*1024)).Decode(target)
 }
 
-func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID string, onProgress func(pct int)) (string, error) {
+func (g *GoogleProvider) UploadZip(ctx context.Context, name string, srcPath string, existingID string, onProgress func(pct int)) (string, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return "", err
@@ -379,7 +382,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 	}
 	metaBytes, _ := json.Marshal(metadata)
 
-	req, err := http.NewRequest(initMethod, initURL, bytes.NewReader(metaBytes))
+	req, err := http.NewRequestWithContext(ctx, initMethod, initURL, bytes.NewReader(metaBytes))
 	if err != nil {
 		return "", err
 	}
@@ -395,10 +398,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("[google] initiation upload resumable échouée : HTTP %d : %s", resp.StatusCode, string(errBytes)),
-		}
+		return "", newProviderHTTPError("[google] initiation upload resumable échouée", resp, errBytes)
 	}
 
 	uploadURL := resp.Header.Get("Location")
@@ -428,12 +428,11 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 	uploadClient := clientWithTimeout(g.client, 5*time.Minute)
 
 	if fileSize == 0 {
-		putReq, err := http.NewRequest(http.MethodPut, uploadURL, http.NoBody)
+		putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, http.NoBody)
 		if err != nil {
 			return "", err
 		}
 		putReq.ContentLength = 0
-		putReq.Header.Set("Content-Range", "bytes */0")
 		putResp, err := uploadClient.Do(putReq)
 		if err != nil {
 			return "", err
@@ -441,7 +440,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 		defer putResp.Body.Close()
 		respBytes, _ := io.ReadAll(io.LimitReader(putResp.Body, 1<<20))
 		if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
-			return "", fmt.Errorf("[google] échec upload ZIP vide (HTTP %d) : %s", putResp.StatusCode, string(respBytes))
+			return "", newProviderHTTPError("[google] échec upload ZIP vide", putResp, respBytes)
 		}
 		var res struct {
 			ID string `json:"id"`
@@ -473,11 +472,11 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 		for attempt := 0; attempt < 3; attempt++ {
 			if attempt > 0 {
 				select {
-				case <-baseContext().Done():
-					return "", baseContext().Err()
+				case <-ctx.Done():
+					return "", ctx.Err()
 				case <-time.After(time.Duration(attempt*1500) * time.Millisecond):
 				}
-				if serverOffset, completedBody, qErr := queryGoogleUploadOffset(uploadClient, uploadURL, fileSize); qErr == nil {
+				if serverOffset, completedBody, qErr := queryGoogleUploadOffset(ctx, uploadClient, uploadURL, fileSize); qErr == nil {
 					if completedBody != nil {
 						var res struct {
 							ID string `json:"id"`
@@ -517,7 +516,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 				OnProgress: onProgress,
 			}
 
-			putResp, cleanup, err := doUploadWithIdleTimeout(uploadClient, http.MethodPut, uploadURL, pr, chunkLen, func(r *http.Request) {
+			putResp, cleanup, err := doUploadWithIdleTimeoutWithContext(ctx, uploadClient, http.MethodPut, uploadURL, pr, chunkLen, func(r *http.Request) {
 				r.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+chunkLen-1, fileSize))
 			})
 			if err != nil {
@@ -556,7 +555,7 @@ func (g *GoogleProvider) UploadZip(name string, srcPath string, existingID strin
 				return res.ID, nil
 			}
 
-			lastErr = fmt.Errorf("[google] échec upload chunk (HTTP %d) : %s", putResp.StatusCode, string(respBytes))
+			lastErr = newProviderHTTPError("[google] échec upload chunk", putResp, respBytes)
 			if putResp.StatusCode >= 400 && putResp.StatusCode < 500 && putResp.StatusCode != http.StatusTooManyRequests {
 				return "", lastErr
 			}
@@ -589,8 +588,11 @@ func parseGoogleRangeHeader(rangeHdr string) int64 {
 	return endByte + 1
 }
 
-func queryGoogleUploadOffset(client *http.Client, uploadURL string, totalSize int64) (int64, []byte, error) {
-	req, err := http.NewRequest(http.MethodPut, uploadURL, http.NoBody)
+func queryGoogleUploadOffset(ctx context.Context, client *http.Client, uploadURL string, totalSize int64) (int64, []byte, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, http.NoBody)
 	if err != nil {
 		return -1, nil, err
 	}
@@ -617,7 +619,10 @@ func queryGoogleUploadOffset(client *http.Client, uploadURL string, totalSize in
 	return -1, nil, fmt.Errorf("status %d", resp.StatusCode)
 }
 
-func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (string, error) {
+func (g *GoogleProvider) UploadJSON(ctx context.Context, name string, data any, existingID string) (string, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
 		return "", err
@@ -658,7 +663,7 @@ func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (s
 	_, _ = part2.Write(jsonBytes)
 	_ = writer.Close()
 
-	req, err := http.NewRequest(method, reqURL, body)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
 	if err != nil {
 		return "", err
 	}
@@ -672,10 +677,7 @@ func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (s
 
 	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("[google] uploadJSON HTTP %d : %s", resp.StatusCode, string(respBytes)),
-		}
+		return "", newProviderHTTPError("[google] uploadJSON", resp, respBytes)
 	}
 
 	var res struct {
@@ -688,9 +690,12 @@ func (g *GoogleProvider) UploadJSON(name string, data any, existingID string) (s
 	return res.ID, nil
 }
 
-func (g *GoogleProvider) DeleteFile(fileID string) error {
+func (g *GoogleProvider) DeleteFile(ctx context.Context, fileID string) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s", url.PathEscape(fileID))
-	req, err := http.NewRequest(http.MethodDelete, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
 	if err != nil {
 		return err
 	}
@@ -705,21 +710,21 @@ func (g *GoogleProvider) DeleteFile(fileID string) error {
 		return ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("[google] deleteFile HTTP %d : %s", resp.StatusCode, string(errBytes)),
-		}
+		return newProviderHTTPError("[google] deleteFile", resp, errBytes)
 	}
 	InvalidateCloudIndexCache()
 	return nil
 }
 
 // RenameFile renomme un fichier staging sur Google Drive puis supprime l'éventuelle ancienne version cible.
-func (g *GoogleProvider) RenameFile(fileID string, newName string, existingTargetID string) (string, error) {
+func (g *GoogleProvider) RenameFile(ctx context.Context, fileID string, newName string, existingTargetID string) (string, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?fields=id,name", url.PathEscape(fileID))
 	metaBytes, _ := json.Marshal(map[string]any{"name": newName})
 
-	req, err := http.NewRequest(http.MethodPatch, reqURL, bytes.NewReader(metaBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(metaBytes))
 	if err != nil {
 		return "", err
 	}
@@ -736,10 +741,7 @@ func (g *GoogleProvider) RenameFile(fileID string, newName string, existingTarge
 
 	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return "", &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("[google] renameFile HTTP %d : %s", resp.StatusCode, string(respBytes)),
-		}
+		return "", newProviderHTTPError("[google] renameFile", resp, respBytes)
 	}
 
 	var res struct {
@@ -754,7 +756,7 @@ func (g *GoogleProvider) RenameFile(fileID string, newName string, existingTarge
 	}
 
 	if existingTargetID != "" && existingTargetID != promotedID {
-		if delErr := g.DeleteFile(existingTargetID); delErr != nil && !errors.Is(delErr, ErrNotFound) {
+		if delErr := g.DeleteFile(ctx, existingTargetID); delErr != nil && !errors.Is(delErr, ErrNotFound) {
 			ipc.Logf("[google] avertissement : suppression ancienne cible %s après promotion échouée : %v", existingTargetID, delErr)
 		}
 	}
@@ -763,9 +765,12 @@ func (g *GoogleProvider) RenameFile(fileID string, newName string, existingTarge
 	return promotedID, nil
 }
 
-func (g *GoogleProvider) GetQuota() (int64, int64, error) {
+func (g *GoogleProvider) GetQuota(ctx context.Context) (int64, int64, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	reqURL := "https://www.googleapis.com/drive/v3/about?fields=storageQuota"
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -777,10 +782,7 @@ func (g *GoogleProvider) GetQuota() (int64, int64, error) {
 
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("[google] getQuota HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
-		}
+		return 0, 0, newProviderHTTPError("[google] getQuota", resp, bodyBytes)
 	}
 
 	var res struct {
@@ -799,12 +801,15 @@ func (g *GoogleProvider) GetQuota() (int64, int64, error) {
 }
 
 // GetFileModifiedTime récupère le timestamp serveur d'un fichier Google Drive par son ID.
-func (g *GoogleProvider) GetFileModifiedTime(fileID string) (time.Time, error) {
+func (g *GoogleProvider) GetFileModifiedTime(ctx context.Context, fileID string) (time.Time, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	if fileID == "" {
 		return time.Time{}, fmt.Errorf("[google] getFileModifiedTime: fileID vide")
 	}
 	reqURL := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?fields=modifiedTime", url.PathEscape(fileID))
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -819,10 +824,7 @@ func (g *GoogleProvider) GetFileModifiedTime(fileID string) (time.Time, error) {
 		return time.Time{}, ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return time.Time{}, &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("[google] getFileModifiedTime HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
-		}
+		return time.Time{}, newProviderHTTPError("[google] getFileModifiedTime", resp, bodyBytes)
 	}
 
 	var res struct {

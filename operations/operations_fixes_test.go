@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,23 +22,27 @@ type stubDeleteProvider struct {
 }
 
 func (s *stubDeleteProvider) Name() string { return "stub" }
-func (s *stubDeleteProvider) ListFiles(string) ([]providers.CloudFile, error) {
+func (s *stubDeleteProvider) ListFiles(context.Context, string) ([]providers.CloudFile, error) {
 	return nil, nil
 }
-func (s *stubDeleteProvider) DownloadFile(string, string, func(int), int64) error { return nil }
-func (s *stubDeleteProvider) DownloadJSON(string, any) error                       { return nil }
-func (s *stubDeleteProvider) UploadZip(string, string, string, func(int)) (string, error) {
+func (s *stubDeleteProvider) DownloadFile(context.Context, string, string, func(int), int64) error {
+	return nil
+}
+func (s *stubDeleteProvider) DownloadJSON(context.Context, string, any) error { return nil }
+func (s *stubDeleteProvider) UploadZip(context.Context, string, string, string, func(int)) (string, error) {
 	return "", nil
 }
-func (s *stubDeleteProvider) UploadJSON(string, any, string) (string, error) { return "", nil }
-func (s *stubDeleteProvider) DeleteFile(fileID string) error {
+func (s *stubDeleteProvider) UploadJSON(context.Context, string, any, string) (string, error) {
+	return "", nil
+}
+func (s *stubDeleteProvider) DeleteFile(_ context.Context, fileID string) error {
 	s.deletedIDs = append(s.deletedIDs, fileID)
 	if err, ok := s.errByID[fileID]; ok {
 		return err
 	}
 	return nil
 }
-func (s *stubDeleteProvider) GetQuota() (int64, int64, error) { return 0, 0, nil }
+func (s *stubDeleteProvider) GetQuota(context.Context) (int64, int64, error) { return 0, 0, nil }
 
 func TestCollectCleanItemsClockSkewSafe(t *testing.T) {
 	baseTime := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
@@ -254,18 +259,20 @@ func newMockStagedProvider() *mockStagedProvider {
 }
 
 func (m *mockStagedProvider) Name() string { return "mock-staged" }
-func (m *mockStagedProvider) ListFiles(string) ([]providers.CloudFile, error) {
+func (m *mockStagedProvider) ListFiles(context.Context, string) ([]providers.CloudFile, error) {
 	return nil, nil
 }
-func (m *mockStagedProvider) DownloadFile(string, string, func(int), int64) error { return nil }
-func (m *mockStagedProvider) DownloadJSON(string, any) error                       { return nil }
-func (m *mockStagedProvider) UploadZip(name string, _ string, _ string, _ func(int)) (string, error) {
+func (m *mockStagedProvider) DownloadFile(context.Context, string, string, func(int), int64) error {
+	return nil
+}
+func (m *mockStagedProvider) DownloadJSON(context.Context, string, any) error { return nil }
+func (m *mockStagedProvider) UploadZip(_ context.Context, name string, _ string, _ string, _ func(int)) (string, error) {
 	m.nextSeq++
 	id := fmt.Sprintf("zip-%d", m.nextSeq)
 	m.files[id] = mockStagedFile{id: id, name: name}
 	return id, nil
 }
-func (m *mockStagedProvider) UploadJSON(name string, _ any, _ string) (string, error) {
+func (m *mockStagedProvider) UploadJSON(_ context.Context, name string, _ any, _ string) (string, error) {
 	if m.failJSONName != "" && (name == m.failJSONName || (len(name) > len("GensHorizon_Staging_") && m.failJSONName == "*")) {
 		return "", errors.New("simulated manifest upload error")
 	}
@@ -274,12 +281,12 @@ func (m *mockStagedProvider) UploadJSON(name string, _ any, _ string) (string, e
 	m.files[id] = mockStagedFile{id: id, name: name}
 	return id, nil
 }
-func (m *mockStagedProvider) DeleteFile(fileID string) error {
+func (m *mockStagedProvider) DeleteFile(_ context.Context, fileID string) error {
 	delete(m.files, fileID)
 	return nil
 }
-func (m *mockStagedProvider) GetQuota() (int64, int64, error) { return 0, 0, nil }
-func (m *mockStagedProvider) RenameFile(fileID string, newName string, existingTargetID string) (string, error) {
+func (m *mockStagedProvider) GetQuota(context.Context) (int64, int64, error) { return 0, 0, nil }
+func (m *mockStagedProvider) RenameFile(_ context.Context, fileID string, newName string, existingTargetID string) (string, error) {
 	if m.failRenameName != "" && newName == m.failRenameName {
 		return "", errors.New("simulated rename error")
 	}
@@ -458,12 +465,12 @@ type mockTimestampProvider struct {
 	timestamps map[string]time.Time
 }
 
-func (m *mockTimestampProvider) ListFiles(s string) ([]providers.CloudFile, error) {
+func (m *mockTimestampProvider) ListFiles(ctx context.Context, s string) ([]providers.CloudFile, error) {
 	m.listCalled.Add(1)
-	return m.mockStagedProvider.ListFiles(s)
+	return m.mockStagedProvider.ListFiles(ctx, s)
 }
 
-func (m *mockTimestampProvider) GetFileModifiedTime(fileID string) (time.Time, error) {
+func (m *mockTimestampProvider) GetFileModifiedTime(_ context.Context, fileID string) (time.Time, error) {
 	t, ok := m.timestamps[fileID]
 	if !ok {
 		return time.Time{}, providers.ErrNotFound
@@ -497,7 +504,7 @@ type stubMetaListProvider struct {
 	dlCalls atomic.Int32
 }
 
-func (s *stubMetaListProvider) DownloadJSON(id string, target any) error {
+func (s *stubMetaListProvider) DownloadJSON(_ context.Context, id string, target any) error {
 	s.dlCalls.Add(1)
 	return nil
 }

@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -206,7 +207,7 @@ func TestDropboxChunkedUploadRefreshes401Token(t *testing.T) {
 		},
 	}
 
-	id, err := d.UploadZip("test.zip", srcPath, "", nil)
+	id, err := d.UploadZip(context.Background(), "test.zip", srcPath, "", nil)
 	if err != nil {
 		t.Fatalf("UploadZip failed: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestOneDriveSimpleUploadRewindsBodyOn401(t *testing.T) {
 		},
 	}
 
-	id, err := o.UploadZip("small.zip", srcPath, "", nil)
+	id, err := o.UploadZip(context.Background(), "small.zip", srcPath, "", nil)
 	if err != nil {
 		t.Fatalf("OneDrive UploadZip failed: %v", err)
 	}
@@ -328,7 +329,7 @@ func TestGoogleDownloadFileUsesRefreshedTokenForAbuseConfirm(t *testing.T) {
 	}
 
 	dest := filepath.Join(tmpDir, "out.zip")
-	if err := g.DownloadFile("file-123", dest, nil, int64(len(payload))); err != nil {
+	if err := g.DownloadFile(context.Background(), "file-123", dest, nil, int64(len(payload))); err != nil {
 		t.Fatalf("Google DownloadFile failed: %v", err)
 	}
 	if abuseAuthHeader != "Bearer new_g_tok" {
@@ -356,7 +357,7 @@ func TestGoogleListFilesTruncatedError(t *testing.T) {
 		},
 	}
 
-	_, err := g.ListFiles("")
+	_, err := g.ListFiles(context.Background(), "")
 	if !errors.Is(err, ErrListingTruncated) {
 		t.Fatalf("expected ErrListingTruncated, got %v", err)
 	}
@@ -392,7 +393,7 @@ func TestGoogleProviderUploadZipUsesInjectedClientTransport(t *testing.T) {
 		},
 	}
 
-	id, err := g.UploadZip("test.zip", tmpFile, "", nil)
+	id, err := g.UploadZip(context.Background(), "test.zip", tmpFile, "", nil)
 	if err != nil {
 		t.Fatalf("UploadZip failed: %v", err)
 	}
@@ -446,7 +447,7 @@ func TestProvidersImplementFileRenamerAndOneDriveSimpleUploadRetries401(t *testi
 		},
 	}
 
-	id, err := o.UploadZip("small.zip", tmpFile, "", nil)
+	id, err := o.UploadZip(context.Background(), "small.zip", tmpFile, "", nil)
 	if err != nil {
 		t.Fatalf("OneDrive UploadZip failed: %v", err)
 	}
@@ -475,7 +476,7 @@ func TestDropboxListFilesEnforcesMaxPagesCap(t *testing.T) {
 		},
 	}
 
-	_, err := d.ListFiles("")
+	_, err := d.ListFiles(context.Background(), "")
 	if !errors.Is(err, ErrListingTruncated) {
 		t.Fatalf("expected ErrListingTruncated on infinite Dropbox cursor, got: %v", err)
 	}
@@ -498,7 +499,7 @@ func TestGoogleUploadJSONEscapesExistingID(t *testing.T) {
 		},
 	}
 
-	id, err := g.UploadJSON("meta.json", map[string]string{"k": "v"}, "file/id?x#1")
+	id, err := g.UploadJSON(context.Background(), "meta.json", map[string]string{"k": "v"}, "file/id?x#1")
 	if err != nil {
 		t.Fatalf("UploadJSON failed: %v", err)
 	}
@@ -601,11 +602,11 @@ func TestProvidersImplementFileTimestampFetcher(t *testing.T) {
 		},
 	}
 	var _ FileTimestampFetcher = gp
-	gt, err := gp.GetFileModifiedTime("file-1")
+	gt, err := gp.GetFileModifiedTime(context.Background(), "file-1")
 	if err != nil || !gt.Equal(wantTime) {
 		t.Fatalf("Google GetFileModifiedTime failed: got %v, err=%v", gt, err)
 	}
-	if _, err := gp.GetFileModifiedTime("missing"); !errors.Is(err, ErrNotFound) {
+	if _, err := gp.GetFileModifiedTime(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Google expected ErrNotFound on 404, got %v", err)
 	}
 
@@ -618,7 +619,7 @@ func TestProvidersImplementFileTimestampFetcher(t *testing.T) {
 		},
 	}
 	var _ FileTimestampFetcher = op
-	ot, err := op.GetFileModifiedTime("od-1")
+	ot, err := op.GetFileModifiedTime(context.Background(), "od-1")
 	if err != nil || !ot.Equal(wantTime) {
 		t.Fatalf("OneDrive GetFileModifiedTime failed: got %v, err=%v", ot, err)
 	}
@@ -632,7 +633,7 @@ func TestProvidersImplementFileTimestampFetcher(t *testing.T) {
 		},
 	}
 	var _ FileTimestampFetcher = dp
-	dt, err := dp.GetFileModifiedTime("id:abc")
+	dt, err := dp.GetFileModifiedTime(context.Background(), "id:abc")
 	if err != nil || !dt.Equal(wantTime) {
 		t.Fatalf("Dropbox GetFileModifiedTime failed: got %v, err=%v", dt, err)
 	}
@@ -665,7 +666,7 @@ func TestDropboxRenameFileAtomicPromotionAndRollback(t *testing.T) {
 		},
 	}
 
-	_, err := dp.RenameFile("id:staged", "Backup.zip", "id:existing")
+	_, err := dp.RenameFile(context.Background(), "id:staged", "Backup.zip", "id:existing")
 	if err == nil {
 		t.Fatalf("expected RenameFile to return error when promotion move fails")
 	}
@@ -710,7 +711,7 @@ func TestGoogleDownloadFile403CannotDownloadAbuseFile(t *testing.T) {
 	}
 
 	dest := filepath.Join(tmpDir, "out.zip")
-	if err := g.DownloadFile("file-abuse", dest, nil, int64(len(payload))); err != nil {
+	if err := g.DownloadFile(context.Background(), "file-abuse", dest, nil, int64(len(payload))); err != nil {
 		t.Fatalf("DownloadFile failed on 403 cannotDownloadAbuseFile: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -743,7 +744,7 @@ func TestOneDriveChunkUploadFastFailOn400AndSessionResumeOn416(t *testing.T) {
 			}),
 		},
 	}
-	if _, err := o400.UploadZip("big.zip", src, "", nil); err == nil {
+	if _, err := o400.UploadZip(context.Background(), "big.zip", src, "", nil); err == nil {
 		t.Fatalf("expected 400 error")
 	}
 	if putCalls400.Load() != 1 {
@@ -770,7 +771,7 @@ func TestOneDriveChunkUploadFastFailOn400AndSessionResumeOn416(t *testing.T) {
 			}),
 		},
 	}
-	if _, err := o416.UploadZip("big.zip", src, "", nil); err != nil {
+	if _, err := o416.UploadZip(context.Background(), "big.zip", src, "", nil); err != nil {
 		t.Fatalf("expected 416 + nextExpectedRanges to complete upload cleanly, got err=%v", err)
 	}
 	if queries.Load() == 0 {
@@ -789,11 +790,11 @@ func TestProvidersReturnTypedHTTPErrorOnNon2xx(t *testing.T) {
 		},
 	}
 	for name, err := range map[string]error{
-		"google.UploadJSON":          func() error { _, e := g.UploadJSON("a.json", map[string]string{"k": "v"}, ""); return e }(),
-		"google.DeleteFile":          g.DeleteFile("id-1"),
-		"google.RenameFile":          func() error { _, e := g.RenameFile("id-1", "new.zip", ""); return e }(),
-		"google.GetQuota":            func() error { _, _, e := g.GetQuota(); return e }(),
-		"google.GetFileModifiedTime": func() error { _, e := g.GetFileModifiedTime("id-1"); return e }(),
+		"google.UploadJSON":          func() error { _, e := g.UploadJSON(context.Background(), "a.json", map[string]string{"k": "v"}, ""); return e }(),
+		"google.DeleteFile":          g.DeleteFile(context.Background(), "id-1"),
+		"google.RenameFile":          func() error { _, e := g.RenameFile(context.Background(), "id-1", "new.zip", ""); return e }(),
+		"google.GetQuota":            func() error { _, _, e := g.GetQuota(context.Background()); return e }(),
+		"google.GetFileModifiedTime": func() error { _, e := g.GetFileModifiedTime(context.Background(), "id-1"); return e }(),
 	} {
 		var httpErr *retry.HTTPError
 		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusTooManyRequests {
@@ -811,11 +812,11 @@ func TestProvidersReturnTypedHTTPErrorOnNon2xx(t *testing.T) {
 		},
 	}
 	for name, err := range map[string]error{
-		"onedrive.UploadJSON":          func() error { _, e := o.UploadJSON("a.json", map[string]string{"k": "v"}, ""); return e }(),
-		"onedrive.DeleteFile":          o.DeleteFile("id-1"),
-		"onedrive.RenameFile":          func() error { _, e := o.RenameFile("id-1", "new.zip", ""); return e }(),
-		"onedrive.GetQuota":            func() error { _, _, e := o.GetQuota(); return e }(),
-		"onedrive.GetFileModifiedTime": func() error { _, e := o.GetFileModifiedTime("id-1"); return e }(),
+		"onedrive.UploadJSON":          func() error { _, e := o.UploadJSON(context.Background(), "a.json", map[string]string{"k": "v"}, ""); return e }(),
+		"onedrive.DeleteFile":          o.DeleteFile(context.Background(), "id-1"),
+		"onedrive.RenameFile":          func() error { _, e := o.RenameFile(context.Background(), "id-1", "new.zip", ""); return e }(),
+		"onedrive.GetQuota":            func() error { _, _, e := o.GetQuota(context.Background()); return e }(),
+		"onedrive.GetFileModifiedTime": func() error { _, e := o.GetFileModifiedTime(context.Background(), "id-1"); return e }(),
 	} {
 		var httpErr *retry.HTTPError
 		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
@@ -850,7 +851,7 @@ func TestOneDriveRenameFileConflictBackupAndRestore(t *testing.T) {
 		},
 	}
 
-	_, err := o.RenameFile("staging-id", "target.zip", "existing-id")
+	_, err := o.RenameFile(context.Background(), "staging-id", "target.zip", "existing-id")
 	if err == nil {
 		t.Fatalf("expected error when promotion PATCH fails")
 	}

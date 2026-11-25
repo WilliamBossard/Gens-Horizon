@@ -17,7 +17,9 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/WilliamBossard/Gens-Horizon/auth"
@@ -28,19 +30,23 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/providers"
 )
 
-func createPKCEPair() (verifier string, challenge string) {
+func createPKCEPair() (verifier string, challenge string, err error) {
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", fmt.Errorf("échec génération aléatoire PKCE : %w", err)
+	}
 	verifier = base64.RawURLEncoding.EncodeToString(b)
 	sum := sha256.Sum256([]byte(verifier))
 	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
-	return verifier, challenge
+	return verifier, challenge, nil
 }
 
-func createOAuthState() string {
+func createOAuthState() (string, error) {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("échec génération aléatoire state OAuth : %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func openBrowser(targetURL string) error {
@@ -50,6 +56,9 @@ func openBrowser(targetURL string) error {
 	}
 	switch runtime.GOOS {
 	case "windows":
+		if len(targetURL) > 1900 {
+			return exec.Command("explorer.exe", targetURL).Start()
+		}
 		return exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL).Start()
 	case "darwin":
 		return exec.Command("open", targetURL).Start()
@@ -75,11 +84,19 @@ func LoginWithContext(ctx context.Context, args []string) {
 		return
 	}
 
-	codeVerifier, codeChallenge := createPKCEPair()
-	state := createOAuthState()
-	u, err := url.Parse(cfg.RedirectURI)
+	codeVerifier, codeChallenge, err := createPKCEPair()
 	if err != nil {
-		ipc.SendError("INVALID_REDIRECT_URI", err.Error(), "")
+		ipc.SendError("CRYPTO_ERROR", err.Error(), "")
+		return
+	}
+	state, err := createOAuthState()
+	if err != nil {
+		ipc.SendError("CRYPTO_ERROR", err.Error(), "")
+		return
+	}
+	u, err := url.Parse(cfg.RedirectURI)
+	if err != nil || u.Scheme != "http" || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost") {
+		ipc.SendError("INVALID_REDIRECT_URI", "RedirectURI doit utiliser http://127.0.0.1 ou http://localhost", "")
 		return
 	}
 
@@ -164,6 +181,7 @@ func LoginWithContext(ctx context.Context, args []string) {
 	}
 	done := make(chan struct{})
 	var closeDoneOnce sync.Once
+	var callbackHandled atomic.Bool
 	signalDone := func() {
 		closeDoneOnce.Do(func() {
 			close(done)
@@ -182,6 +200,12 @@ func LoginWithContext(ctx context.Context, args []string) {
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Erreur CSRF</h2><p>Le jeton de session est invalide.</p></body></html>")
 			ipc.Logf("[login] Requête OAuth ignorée (state invalide)")
+			return
+		}
+		if !callbackHandled.CompareAndSwap(false, true) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#fff;text-align:center;padding:50px;'><h2>Connexion en cours</h2><p>Vous pouvez fermer cet onglet.</p></body></html>")
 			return
 		}
 
@@ -204,7 +228,7 @@ func LoginWithContext(ctx context.Context, args []string) {
 		}
 
 		// Échange du code d'autorisation contre des jetons
-		tokenData, err := exchangeCodeForToken(providerName, cfg, code, codeVerifier)
+		tokenData, err := exchangeCodeForToken(ctx, providerName, cfg, code, codeVerifier)
 		if err != nil {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -222,11 +246,15 @@ func LoginWithContext(ctx context.Context, args []string) {
 			}
 			time.Sleep(150 * time.Millisecond)
 		}
-		if lockAcquired {
-			defer lock.ReleaseLock()
-		} else {
-			ipc.Logf("[login] AVERTISSEMENT : horizon.lock occupé lors de la sauvegarde du token, écriture atomique directe.")
+		if !lockAcquired {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, "<html><body>Une autre opération Horizon est en cours. Réessayez dans quelques secondes.</body></html>")
+			ipc.SendError("LOCK_BUSY", "horizon.lock occupé lors de la sauvegarde du token.", "")
+			signalDone()
+			return
 		}
+		defer lock.ReleaseLock()
 
 		tokenPath := providers.GetTokenPath(providerName)
 		if err := auth.EncryptToken(tokenPath, tokenData); err != nil {
@@ -279,9 +307,35 @@ func LoginWithContext(ctx context.Context, args []string) {
 	}
 }
 
-func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code string, codeVerifier string) (auth.TokenData, error) {
+func sanitizeOAuthErrorBody(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	s = strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == '\t' {
+			return ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > 256 {
+		return s[:256] + "...(tronqué)"
+	}
+	return s
+}
+
+func postFormWithContext(ctx context.Context, client *http.Client, targetURL string, form url.Values) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return client.Do(req)
+}
+
+func exchangeCodeForToken(ctx context.Context, providerName string, cfg config.ProviderConfig, code string, codeVerifier string) (auth.TokenData, error) {
 	var tokenData auth.TokenData
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpClient := providers.NewPooledClient(30 * time.Second)
 
 	switch providerName {
 	case "google":
@@ -295,15 +349,15 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 		if codeVerifier != "" {
 			form.Set("code_verifier", codeVerifier)
 		}
-		resp, err := httpClient.PostForm(cfg.TokenURI, form)
+		resp, err := postFormWithContext(ctx, httpClient, cfg.TokenURI, form)
 		if err != nil {
 			return tokenData, err
 		}
 		defer resp.Body.Close()
 
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		if resp.StatusCode != http.StatusOK {
-			return tokenData, fmt.Errorf("google token exchange HTTP %d : %s", resp.StatusCode, string(b))
+			return tokenData, fmt.Errorf("google token exchange HTTP %d : %s", resp.StatusCode, sanitizeOAuthErrorBody(b))
 		}
 
 		var res struct {
@@ -333,15 +387,15 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 		if codeVerifier != "" {
 			form.Set("code_verifier", codeVerifier)
 		}
-		resp, err := httpClient.PostForm(cfg.TokenURI, form)
+		resp, err := postFormWithContext(ctx, httpClient, cfg.TokenURI, form)
 		if err != nil {
 			return tokenData, err
 		}
 		defer resp.Body.Close()
 
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		if resp.StatusCode != http.StatusOK {
-			return tokenData, fmt.Errorf("dropbox token exchange HTTP %d : %s", resp.StatusCode, string(b))
+			return tokenData, fmt.Errorf("dropbox token exchange HTTP %d : %s", resp.StatusCode, sanitizeOAuthErrorBody(b))
 		}
 
 		var res struct {
@@ -371,15 +425,15 @@ func exchangeCodeForToken(providerName string, cfg config.ProviderConfig, code s
 		if cfg.ClientSecret != "" {
 			form.Set("client_secret", cfg.ClientSecret)
 		}
-		resp, err := httpClient.PostForm(cfg.TokenURI, form)
+		resp, err := postFormWithContext(ctx, httpClient, cfg.TokenURI, form)
 		if err != nil {
 			return tokenData, err
 		}
 		defer resp.Body.Close()
 
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		if resp.StatusCode != http.StatusOK {
-			return tokenData, fmt.Errorf("onedrive token exchange HTTP %d : %s", resp.StatusCode, string(b))
+			return tokenData, fmt.Errorf("onedrive token exchange HTTP %d : %s", resp.StatusCode, sanitizeOAuthErrorBody(b))
 		}
 
 		var res struct {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -37,7 +36,7 @@ func CleanWithContext(ctx context.Context, args []string) {
 	if apply {
 		if !lock.AcquireLock() {
 			ipc.SendError("ERR_ALREADY_RUNNING", "ERR_ALREADY_RUNNING", "")
-			os.Exit(1)
+			return
 		}
 		defer lock.ReleaseLock()
 		paths.CleanupOrphanedTemps(paths.GetHorizonDataDir())
@@ -96,7 +95,7 @@ func CleanWithContext(ctx context.Context, args []string) {
 		delOpts := retryOpts
 		delOpts.Label = "clean(" + item.Name + ")"
 		delErr := retry.Do(ctx, delOpts, func() error {
-			err := p.DeleteFile(item.ID)
+			err := p.DeleteFile(ctx, item.ID)
 			if errors.Is(err, providers.ErrNotFound) {
 				return nil
 			}
@@ -112,6 +111,7 @@ func CleanWithContext(ctx context.Context, args []string) {
 	}
 
 	providers.InvalidateCloudIndexCache()
+	PruneOldRollbacks(paths.GetInstancesFolder(), 3)
 	formattedDeleted := formatByteSize(deletedBytes)
 
 	ipc.Send(map[string]any{

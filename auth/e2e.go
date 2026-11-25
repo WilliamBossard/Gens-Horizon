@@ -31,8 +31,8 @@ func getE2EKeyPath() string {
 // SaveE2EPassphrase chiffre et sauvegarde la passphrase E2E localement (DPAPI / trousseau OS).
 func SaveE2EPassphrase(passphrase string) error {
 	clean := strings.TrimSpace(passphrase)
-	if len(clean) < 4 {
-		return errors.New("la passphrase E2E doit contenir au moins 4 caractères")
+	if len(clean) < 12 {
+		return errors.New("la passphrase E2E doit contenir au moins 12 caractères")
 	}
 	payload, err := json.Marshal(e2eKeyPayload{Passphrase: clean})
 	if err != nil {

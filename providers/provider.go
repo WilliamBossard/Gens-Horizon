@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -27,23 +28,23 @@ type CloudFile struct {
 
 type Provider interface {
 	Name() string
-	ListFiles(nameContains string) ([]CloudFile, error)
-	DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error
-	DownloadJSON(fileID string, target any) error
-	UploadZip(name string, srcPath string, existingID string, onProgress func(pct int)) (string, error)
-	UploadJSON(name string, data any, existingID string) (string, error)
-	DeleteFile(fileID string) error
-	GetQuota() (usedBytes int64, totalBytes int64, err error)
+	ListFiles(ctx context.Context, nameContains string) ([]CloudFile, error)
+	DownloadFile(ctx context.Context, fileID string, destPath string, onProgress func(pct int), totalSize int64) error
+	DownloadJSON(ctx context.Context, fileID string, target any) error
+	UploadZip(ctx context.Context, name string, srcPath string, existingID string, onProgress func(pct int)) (string, error)
+	UploadJSON(ctx context.Context, name string, data any, existingID string) (string, error)
+	DeleteFile(ctx context.Context, fileID string) error
+	GetQuota(ctx context.Context) (usedBytes int64, totalBytes int64, err error)
 }
 
 // FileRenamer est une interface optionnelle pour les providers supportant la promotion atomique de fichiers staging.
 type FileRenamer interface {
-	RenameFile(fileID string, newName string, existingTargetID string) (string, error)
+	RenameFile(ctx context.Context, fileID string, newName string, existingTargetID string) (string, error)
 }
 
 // FileTimestampFetcher est une interface optionnelle pour récupérer le timestamp serveur d'un fichier spécifique sans lister tout le Cloud.
 type FileTimestampFetcher interface {
-	GetFileModifiedTime(fileID string) (time.Time, error)
+	GetFileModifiedTime(ctx context.Context, fileID string) (time.Time, error)
 }
 
 func GetTokenPath(providerName string) string {

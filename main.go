@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -97,7 +98,7 @@ func main() {
 	} else if containsCommand(args, "--delete", "delete") {
 		operations.SyncWithContext(ctx, args)
 	} else if containsCommand(args, "--set-e2e-key") {
-		reader := bufio.NewReader(os.Stdin)
+		reader := bufio.NewReader(io.LimitReader(os.Stdin, 4096))
 		line, _ := reader.ReadString('\n')
 		pass := strings.TrimSpace(line)
 		if pass == "" {

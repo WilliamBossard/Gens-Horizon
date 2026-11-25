@@ -50,7 +50,7 @@ func QuotaWithContext(ctx context.Context, args []string) {
 		defer wg.Done()
 		quotaErr = retry.Do(ctx, retryOpts, func() error {
 			var qErr error
-			usedBytes, totalBytes, qErr = p.GetQuota()
+			usedBytes, totalBytes, qErr = p.GetQuota(ctx)
 			return qErr
 		})
 	}()
@@ -63,7 +63,7 @@ func QuotaWithContext(ctx context.Context, args []string) {
 		}
 		listErr = retry.Do(ctx, retryOpts, func() error {
 			var lErr error
-			cloudFiles, lErr = p.ListFiles("GensHorizon_")
+			cloudFiles, lErr = p.ListFiles(ctx, "GensHorizon_")
 			return lErr
 		})
 		if listErr == nil {

@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 // MinMultiRangeSize définit la taille minimale pour déclencher un téléchargement parallèle multi-segments (30 Mo)
@@ -312,7 +314,14 @@ func downloadMultiRange(
 				if r.StatusCode != http.StatusPartialContent {
 					b, _ := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 					_ = r.Body.Close()
-					chunkErr = fmt.Errorf("chunk %d HTTP %d (expected 206): %s", c.id, r.StatusCode, string(b))
+					chunkErr = fmt.Errorf("chunk %d HTTP %d (expected 206): %s", c.id, r.StatusCode, sanitizeHTTPBody(b))
+					if ra := retry.ParseRetryAfter(r.Header.Get("Retry-After")); ra > 0 && (r.StatusCode == http.StatusTooManyRequests || r.StatusCode == http.StatusServiceUnavailable) {
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-time.After(ra):
+						}
+					}
 					continue
 				}
 				if crHdr := r.Header.Get("Content-Range"); crHdr != "" {
@@ -559,7 +568,14 @@ func downloadWithResume(
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			_ = resp.Body.Close()
 			if attempt == maxAttempts-1 || (resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests) {
-				return fmt.Errorf("download HTTP %d : %s", resp.StatusCode, string(b))
+				return fmt.Errorf("download HTTP %d : %s", resp.StatusCode, sanitizeHTTPBody(b))
+			}
+			if ra := retry.ParseRetryAfter(resp.Header.Get("Retry-After")); ra > 0 && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(ra):
+				}
 			}
 			continue
 		}

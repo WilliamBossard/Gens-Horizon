@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,6 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
-	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 type OneDriveProvider struct {
@@ -84,10 +84,7 @@ func (o *OneDriveProvider) refreshToken() error {
 
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("erreur refresh token OneDrive (HTTP %d) : %s", resp.StatusCode, string(bodyBytes)),
-		}
+		return newProviderHTTPError("erreur refresh token OneDrive", resp, bodyBytes)
 	}
 
 	var res struct {
@@ -192,13 +189,16 @@ func (o *OneDriveProvider) doRequestWithClient(req *http.Request, client *http.C
 	return resp, nil
 }
 
-func (o *OneDriveProvider) ListFiles(nameContains string) ([]CloudFile, error) {
+func (o *OneDriveProvider) ListFiles(ctx context.Context, nameContains string) ([]CloudFile, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	var files []CloudFile
 	nextURL := "https://graph.microsoft.com/v1.0/me/drive/special/approot/children?$top=1000"
 	const maxPages = 100
 
 	for page := 0; nextURL != "" && page < maxPages; page++ {
-		req, err := http.NewRequest(http.MethodGet, nextURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -212,11 +212,7 @@ func (o *OneDriveProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 		_ = resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, &retry.HTTPError{
-				StatusCode: resp.StatusCode,
-				RetryAfter: retry.ParseRetryAfter(resp.Header.Get("Retry-After")),
-				Message:    fmt.Sprintf("onedrive listFiles HTTP %d : %s", resp.StatusCode, string(bodyBytes)),
-			}
+			return nil, newProviderHTTPError("onedrive listFiles", resp, bodyBytes)
 		}
 
 		type Item struct {
@@ -261,12 +257,15 @@ func (o *OneDriveProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 	return files, nil
 }
 
-func (o *OneDriveProvider) DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
+func (o *OneDriveProvider) DownloadFile(ctx context.Context, fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	dlClient := streamingClient(o.client)
 	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/content", url.PathEscape(fileID))
 
 	buildDLReq := func(token string, start, end int64) (*http.Request, error) {
-		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -315,9 +314,12 @@ func (o *OneDriveProvider) DownloadFile(fileID string, destPath string, onProgre
 	})
 }
 
-func (o *OneDriveProvider) DownloadJSON(fileID string, target any) error {
+func (o *OneDriveProvider) DownloadJSON(ctx context.Context, fileID string, target any) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/content", url.PathEscape(fileID))
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return err
 	}
@@ -330,16 +332,16 @@ func (o *OneDriveProvider) DownloadJSON(fileID string, target any) error {
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("onedrive downloadJSON HTTP %d : %s", resp.StatusCode, string(b)),
-		}
+		return newProviderHTTPError("onedrive downloadJSON", resp, b)
 	}
 
 	return json.NewDecoder(io.LimitReader(resp.Body, 16*1024*1024)).Decode(target)
 }
 
-func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID string, onProgress func(pct int)) (string, error) {
+func (o *OneDriveProvider) UploadZip(ctx context.Context, name string, srcPath string, existingID string, onProgress func(pct int)) (string, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return "", err
@@ -378,7 +380,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 		}
 
 		reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/special/approot:/%s:/content", url.PathEscape(name))
-		req, err := http.NewRequest(http.MethodPut, reqURL, initialBody)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, initialBody)
 		if err != nil {
 			return "", err
 		}
@@ -395,10 +397,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-			return "", &retry.HTTPError{
-				StatusCode: resp.StatusCode,
-				Message:    fmt.Sprintf("onedrive simple upload HTTP %d : %s", resp.StatusCode, string(b)),
-			}
+			return "", newProviderHTTPError("onedrive simple upload", resp, b)
 		}
 		var res struct {
 			ID string `json:"id"`
@@ -416,7 +415,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 	sessBody, _ := json.Marshal(map[string]any{
 		"item": map[string]any{"@microsoft.graph.conflictBehavior": "replace", "name": name},
 	})
-	req, err := http.NewRequest(http.MethodPost, sessionURL, bytes.NewReader(sessBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sessionURL, bytes.NewReader(sessBody))
 	if err != nil {
 		return "", err
 	}
@@ -430,10 +429,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 
 	sessBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return "", &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("onedrive createUploadSession HTTP %d : %s", resp.StatusCode, string(sessBytes)),
-		}
+		return "", newProviderHTTPError("onedrive createUploadSession", resp, sessBytes)
 	}
 
 	var sessionRes struct {
@@ -459,7 +455,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 	var finalID string
 
 	querySessionNextOffset := func() (int64, bool) {
-		req, qErr := http.NewRequest(http.MethodGet, sessionRes.UploadURL, nil)
+		req, qErr := http.NewRequestWithContext(ctx, http.MethodGet, sessionRes.UploadURL, nil)
 		if qErr != nil {
 			return 0, false
 		}
@@ -499,8 +495,8 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 		for attempt := 0; attempt < 3; attempt++ {
 			if attempt > 0 {
 				select {
-				case <-baseContext().Done():
-					return "", baseContext().Err()
+				case <-ctx.Done():
+					return "", ctx.Err()
 				case <-time.After(time.Duration(attempt*1500) * time.Millisecond):
 				}
 			}
@@ -517,7 +513,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 				OnProgress: onProgress,
 			}
 
-			chunkResp, cleanup, err := doUploadWithIdleTimeout(uploadClient, http.MethodPut, sessionRes.UploadURL, pr, currentChunk, func(r *http.Request) {
+			chunkResp, cleanup, err := doUploadWithIdleTimeoutWithContext(ctx, uploadClient, http.MethodPut, sessionRes.UploadURL, pr, currentChunk, func(r *http.Request) {
 				r.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+currentChunk-1, fileSize))
 			})
 			if err != nil {
@@ -534,7 +530,7 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 			cleanup()
 
 			if chunkResp.StatusCode != http.StatusOK && chunkResp.StatusCode != http.StatusCreated && chunkResp.StatusCode != http.StatusAccepted {
-				lastErr = fmt.Errorf("onedrive chunk upload HTTP %d : %s", chunkResp.StatusCode, string(chunkBody))
+				lastErr = newProviderHTTPError("onedrive chunk upload", chunkResp, chunkBody)
 				if chunkResp.StatusCode == http.StatusRequestedRangeNotSatisfiable || chunkResp.StatusCode >= 500 || chunkResp.StatusCode == http.StatusTooManyRequests || chunkResp.StatusCode == http.StatusRequestTimeout {
 					if expectedStart, ok := querySessionNextOffset(); ok && expectedStart > offset {
 						nextOffset = expectedStart
@@ -574,14 +570,17 @@ func (o *OneDriveProvider) UploadZip(name string, srcPath string, existingID str
 	return finalID, nil
 }
 
-func (o *OneDriveProvider) UploadJSON(name string, data any, existingID string) (string, error) {
+func (o *OneDriveProvider) UploadJSON(ctx context.Context, name string, data any, existingID string) (string, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
 		return "", err
 	}
 
 	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/special/approot:/%s:/content", url.PathEscape(name))
-	req, err := http.NewRequest(http.MethodPut, reqURL, bytes.NewReader(jsonBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(jsonBytes))
 	if err != nil {
 		return "", err
 	}
@@ -596,10 +595,7 @@ func (o *OneDriveProvider) UploadJSON(name string, data any, existingID string) 
 
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("onedrive uploadJSON HTTP %d : %s", resp.StatusCode, string(b)),
-		}
+		return "", newProviderHTTPError("onedrive uploadJSON", resp, b)
 	}
 
 	var res struct {
@@ -610,9 +606,12 @@ func (o *OneDriveProvider) UploadJSON(name string, data any, existingID string) 
 	return res.ID, nil
 }
 
-func (o *OneDriveProvider) DeleteFile(fileID string) error {
+func (o *OneDriveProvider) DeleteFile(ctx context.Context, fileID string) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", url.PathEscape(fileID))
-	req, err := http.NewRequest(http.MethodDelete, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
 	if err != nil {
 		return err
 	}
@@ -628,17 +627,17 @@ func (o *OneDriveProvider) DeleteFile(fileID string) error {
 		return ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("onedrive delete HTTP %d : %s", resp.StatusCode, string(errBytes)),
-		}
+		return newProviderHTTPError("onedrive delete", resp, errBytes)
 	}
 	InvalidateCloudIndexCache()
 	return nil
 }
 
 // RenameFile renomme un fichier staging sur OneDrive (avec remplacement de cible si besoin).
-func (o *OneDriveProvider) RenameFile(fileID string, newName string, existingTargetID string) (string, error) {
+func (o *OneDriveProvider) RenameFile(ctx context.Context, fileID string, newName string, existingTargetID string) (string, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", url.PathEscape(fileID))
 	patchPayload, _ := json.Marshal(map[string]any{
 		"name":                              newName,
@@ -646,7 +645,7 @@ func (o *OneDriveProvider) RenameFile(fileID string, newName string, existingTar
 	})
 
 	tryPatch := func() (*http.Response, []byte, error) {
-		req, err := http.NewRequest(http.MethodPatch, reqURL, bytes.NewReader(patchPayload))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(patchPayload))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -670,7 +669,7 @@ func (o *OneDriveProvider) RenameFile(fileID string, newName string, existingTar
 	if resp.StatusCode == http.StatusConflict && existingTargetID != "" && existingTargetID != fileID {
 		backupName := fmt.Sprintf("%s.bak.%d", newName, time.Now().UnixNano())
 		backupPayload, _ := json.Marshal(map[string]string{"name": backupName})
-		backupReq, bErr := http.NewRequestWithContext(baseContext(), "PATCH", fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", url.PathEscape(existingTargetID)), bytes.NewReader(backupPayload))
+		backupReq, bErr := http.NewRequestWithContext(ctx, "PATCH", fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", url.PathEscape(existingTargetID)), bytes.NewReader(backupPayload))
 		if bErr != nil {
 			return "", fmt.Errorf("onedrive backup cible avant promotion : %w", bErr)
 		}
@@ -690,7 +689,7 @@ func (o *OneDriveProvider) RenameFile(fileID string, newName string, existingTar
 
 		resp, b, err = tryPatch()
 		if err != nil || resp.StatusCode != http.StatusOK {
-			restoreReq, rErr := http.NewRequestWithContext(baseContext(), "PATCH", fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", url.PathEscape(existingTargetID)), bytes.NewReader(patchPayload))
+			restoreReq, rErr := http.NewRequestWithContext(ctx, "PATCH", fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", url.PathEscape(existingTargetID)), bytes.NewReader(patchPayload))
 			if rErr == nil {
 				restoreReq.GetBody = func() (io.ReadCloser, error) {
 					return io.NopCloser(bytes.NewReader(patchPayload)), nil
@@ -705,14 +704,11 @@ func (o *OneDriveProvider) RenameFile(fileID string, newName string, existingTar
 				return "", err
 			}
 		} else {
-			_ = o.DeleteFile(existingTargetID)
+			_ = o.DeleteFile(ctx, existingTargetID)
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("onedrive renameFile HTTP %d : %s", resp.StatusCode, string(b)),
-		}
+		return "", newProviderHTTPError("onedrive renameFile", resp, b)
 	}
 
 	var res struct {
@@ -727,9 +723,12 @@ func (o *OneDriveProvider) RenameFile(fileID string, newName string, existingTar
 	return promotedID, nil
 }
 
-func (o *OneDriveProvider) GetQuota() (int64, int64, error) {
+func (o *OneDriveProvider) GetQuota(ctx context.Context) (int64, int64, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	reqURL := "https://graph.microsoft.com/v1.0/me/drive"
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -742,10 +741,7 @@ func (o *OneDriveProvider) GetQuota() (int64, int64, error) {
 
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("onedrive quota HTTP %d : %s", resp.StatusCode, string(b)),
-		}
+		return 0, 0, newProviderHTTPError("onedrive quota", resp, b)
 	}
 
 	var res struct {
@@ -762,12 +758,15 @@ func (o *OneDriveProvider) GetQuota() (int64, int64, error) {
 }
 
 // GetFileModifiedTime récupère le timestamp serveur d'un élément OneDrive par son ID.
-func (o *OneDriveProvider) GetFileModifiedTime(fileID string) (time.Time, error) {
+func (o *OneDriveProvider) GetFileModifiedTime(ctx context.Context, fileID string) (time.Time, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	if fileID == "" {
 		return time.Time{}, fmt.Errorf("onedrive getFileModifiedTime: fileID vide")
 	}
 	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s?$select=lastModifiedDateTime", url.PathEscape(fileID))
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -782,10 +781,7 @@ func (o *OneDriveProvider) GetFileModifiedTime(fileID string) (time.Time, error)
 		return time.Time{}, ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return time.Time{}, &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("onedrive getFileModifiedTime HTTP %d : %s", resp.StatusCode, string(b)),
-		}
+		return time.Time{}, newProviderHTTPError("onedrive getFileModifiedTime", resp, b)
 	}
 
 	var res struct {

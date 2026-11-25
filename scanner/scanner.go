@@ -277,10 +277,17 @@ func GenerateManifestWithProfile(targetDir string, oldManifest Manifest, verifyA
 
 	var wg sync.WaitGroup
 	var skippedFiles atomic.Int64
+	workerMaps := make([]map[string]FileEntry, workerCount)
 	for i := 0; i < workerCount; i++ {
+		workerMaps[i] = make(map[string]FileEntry)
 		wg.Add(1)
-		go func() {
+		go func(localMap map[string]FileEntry) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					ipc.Logf("[scanner] Panique interceptée dans worker : %v", r)
+				}
+			}()
 			for t := range taskChan {
 				hash, err := HashFile(t.fullPath)
 				if err != nil {
@@ -289,25 +296,28 @@ func GenerateManifestWithProfile(targetDir string, oldManifest Manifest, verifyA
 					// Conserver l'ancienne entrée en cas d'erreur EBUSY/EPERM
 					if oldManifest != nil {
 						if oldEntry, ok := oldManifest[t.relPath]; ok {
-							manifestMu.Lock()
-							manifest[t.relPath] = oldEntry
-							manifestMu.Unlock()
+							localMap[t.relPath] = oldEntry
 						}
 					}
 					continue
 				}
 
-				manifestMu.Lock()
-				manifest[t.relPath] = FileEntry{
+				localMap[t.relPath] = FileEntry{
 					Hash:  hash,
 					Mtime: FlexibleInt64(t.mtimeMs),
 					Size:  FlexibleInt64(t.size),
 				}
-				manifestMu.Unlock()
 			}
-		}()
+		}(workerMaps[i])
 	}
 	wg.Wait()
+	manifestMu.Lock()
+	for _, wm := range workerMaps {
+		for k, v := range wm {
+			manifest[k] = v
+		}
+	}
+	manifestMu.Unlock()
 	if n := skippedFiles.Load(); n > 0 {
 		ipc.Logf("[scanner] AVERTISSEMENT : %d fichier(s) illisible(s) ou verrouillé(s) lors du scan.", n)
 	}

@@ -78,9 +78,11 @@ func Send(payload any) {
 	stdoutMu.Lock()
 	defer stdoutMu.Unlock()
 	b, err := json.Marshal(payload)
-	if err == nil {
-		fmt.Fprintf(os.Stdout, "%s\n", b)
+	if err != nil {
+		Logf("[ipc] Erreur sérialisation JSON : %v", err)
+		return
 	}
+	fmt.Fprintf(os.Stdout, "%s\n", b)
 }
 
 func SendProgress(step string, value int, instance string) {

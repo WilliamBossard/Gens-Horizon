@@ -96,7 +96,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 	}
 	if !lock.AcquireLock() {
 		ipc.SendError("ERR_ALREADY_RUNNING", "ERR_ALREADY_RUNNING", "")
-		os.Exit(1)
+		return
 	}
 	defer lock.ReleaseLock()
 	paths.CleanupOrphanedTemps(paths.GetHorizonDataDir())
@@ -234,7 +234,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 		if hasManifest {
 			err = retry.Do(ctx, retryOpts, func() error {
 				remoteManifest = nil
-				return p.DownloadJSON(manifestFile.ID, &remoteManifest)
+				return p.DownloadJSON(ctx, manifestFile.ID, &remoteManifest)
 			})
 			if err == nil {
 				hasRemoteManifest = true
@@ -359,7 +359,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 			metaOpts := retryOpts
 			metaOpts.Label = "uploadMeta(" + inst + ")"
 			if mErr := retry.Do(ctx, metaOpts, func() error {
-				_, upErr := p.UploadJSON(metaName, metaData, metaExistingID)
+				_, upErr := p.UploadJSON(ctx, metaName, metaData, metaExistingID)
 				return upErr
 			}); mErr != nil {
 				ipc.Logf("[upload] avertissement : upload metadata cloud échoué pour %s : %v", inst, mErr)
@@ -383,7 +383,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 						delOpts := retryOpts
 						delOpts.Label = "deleteOldDelta(" + df.Name + ")"
 						if delErr := retry.Do(ctx, delOpts, func() error {
-							return p.DeleteFile(df.ID)
+							return p.DeleteFile(ctx, df.ID)
 						}); delErr != nil {
 							ipc.Logf("[upload] AVERTISSEMENT : échec suppression ancien delta %s : %v", df.Name, delErr)
 						}
@@ -452,8 +452,18 @@ func UploadWithContext(ctx context.Context, args []string) {
 
 			deltaName := fmt.Sprintf("%s%s_%d.zip", PrefixDelta, safeInst, time.Now().UnixMilli())
 			ipc.SendProgress("UPLOADING", 0, inst)
-			deltaID, err := p.UploadZip(deltaName, uploadDeltaPath, "", func(pct int) {
-				ipc.SendProgress("UPLOADING", pct, inst)
+			var deltaID string
+			upDeltaOpts := retryOpts
+			upDeltaOpts.Label = "uploadDelta(" + inst + ")"
+			err = retry.Do(ctx, upDeltaOpts, func() error {
+				id, upErr := p.UploadZip(ctx, deltaName, uploadDeltaPath, "", func(pct int) {
+					ipc.SendProgress("UPLOADING", pct, inst)
+				})
+				if upErr != nil {
+					return upErr
+				}
+				deltaID = id
+				return nil
 			})
 			_ = os.RemoveAll(tmpDeltaDir)
 			if err != nil {
@@ -469,7 +479,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 			// Mise à jour du manifest avec retry (nettoie le delta orphelin si le manifest échoue)
 			var newMID string
 			err = retry.Do(ctx, retryOpts, func() error {
-				id, upErr := p.UploadJSON(manifestName, newManifest, manifestFile.ID)
+				id, upErr := p.UploadJSON(ctx, manifestName, newManifest, manifestFile.ID)
 				if upErr != nil {
 					return upErr
 				}
@@ -478,7 +488,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 			})
 			if err != nil {
 				if deltaID != "" {
-					if rbErr := p.DeleteFile(deltaID); rbErr != nil {
+					if rbErr := p.DeleteFile(ctx, deltaID); rbErr != nil {
 						ipc.Logf("[upload] Échec nettoyage delta orphelin %s : %v", deltaName, rbErr)
 					}
 				}
@@ -500,7 +510,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 			}
 			if mf, ok := cloudIndex[metaName]; ok {
 				_ = retry.Do(ctx, retryOpts, func() error {
-					return p.DownloadJSON(mf.ID, &prevMeta)
+					return p.DownloadJSON(ctx, mf.ID, &prevMeta)
 				})
 			} else if rawMeta, rErr := os.ReadFile(paths.GetMetaPath(safeInst)); rErr == nil {
 				_ = json.Unmarshal(rawMeta, &prevMeta)
@@ -523,7 +533,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 			metaOpts := retryOpts
 			metaOpts.Label = "uploadMeta(" + inst + ")"
 			if mErr := retry.Do(ctx, metaOpts, func() error {
-				_, upErr := p.UploadJSON(metaName, metaData, metaExistingID)
+				_, upErr := p.UploadJSON(ctx, metaName, metaData, metaExistingID)
 				return upErr
 			}); mErr != nil {
 				ipc.Logf("[upload] avertissement : upload metadata cloud échoué pour %s : %v", inst, mErr)
@@ -600,7 +610,7 @@ func fetchServerTimeForInstanceWithContext(ctx context.Context, p providers.Prov
 			fetchOpts := opts
 			fetchOpts.Label = "getFileModifiedTime(" + id + ")"
 			if err := retry.Do(ctx, fetchOpts, func() error {
-				t, gErr := fetcher.GetFileModifiedTime(id)
+				t, gErr := fetcher.GetFileModifiedTime(ctx, id)
 				if gErr != nil {
 					return gErr
 				}
@@ -746,8 +756,18 @@ func uploadFullBackupAtomicWithContext(
 		stagingBackupName := fmt.Sprintf("GensHorizon_Staging_%s_backup_%d.zip", safeInst, stamp)
 		stagingManifestName := fmt.Sprintf("GensHorizon_Staging_%s_manifest_%d.json", safeInst, stamp)
 
-		stagedBaseID, err := p.UploadZip(stagingBackupName, tempZip, "", func(pct int) {
-			ipc.SendProgress("UPLOADING", pct, inst)
+		var stagedBaseID string
+		upStageOpts := retryOpts
+		upStageOpts.Label = "uploadStagingBase(" + inst + ")"
+		err := retry.Do(ctx, upStageOpts, func() error {
+			id, upErr := p.UploadZip(ctx, stagingBackupName, tempZip, "", func(pct int) {
+				ipc.SendProgress("UPLOADING", pct, inst)
+			})
+			if upErr != nil {
+				return upErr
+			}
+			stagedBaseID = id
+			return nil
 		})
 		if err != nil {
 			return "", "", "UPLOAD_FAILED", err
@@ -757,7 +777,7 @@ func uploadFullBackupAtomicWithContext(
 		mOpts := retryOpts
 		mOpts.Label = "uploadStagingManifest(" + inst + ")"
 		err = retry.Do(ctx, mOpts, func() error {
-			id, upErr := p.UploadJSON(stagingManifestName, newManifest, "")
+			id, upErr := p.UploadJSON(ctx, stagingManifestName, newManifest, "")
 			if upErr != nil {
 				return upErr
 			}
@@ -765,34 +785,46 @@ func uploadFullBackupAtomicWithContext(
 			return nil
 		})
 		if err != nil {
-			_ = p.DeleteFile(stagedBaseID)
+			_ = p.DeleteFile(ctx, stagedBaseID)
 			ipc.Logf("[upload] Échec envoi manifest staging pour %s ; sauvegarde cloud existante préservée.", inst)
 			return "", "", "MANIFEST_UPLOAD_FAILED", fmt.Errorf("échec envoi manifest cloud : %w", err)
 		}
 
-		promotedBaseID, err := renamer.RenameFile(stagedBaseID, baseBackupName, existingBaseID)
+		promotedBaseID, err := renamer.RenameFile(ctx, stagedBaseID, baseBackupName, existingBaseID)
 		if err != nil {
-			_ = p.DeleteFile(stagedBaseID)
-			_ = p.DeleteFile(stagedManifestID)
+			_ = p.DeleteFile(ctx, stagedBaseID)
+			_ = p.DeleteFile(ctx, stagedManifestID)
 			return "", "", "UPLOAD_FAILED", fmt.Errorf("échec promotion archive de base : %w", err)
 		}
 
-		promotedManifestID, err := renamer.RenameFile(stagedManifestID, manifestName, existingManifestID)
+		promotedManifestID, err := renamer.RenameFile(ctx, stagedManifestID, manifestName, existingManifestID)
 		if err != nil {
 			// Tenter un upload JSON direct de rattrapage avant de déclarer l'échec
-			fallbackID, fbErr := p.UploadJSON(manifestName, newManifest, existingManifestID)
+			fallbackID, fbErr := p.UploadJSON(ctx, manifestName, newManifest, existingManifestID)
 			if fbErr != nil {
-				return "", "", "MANIFEST_UPLOAD_FAILED", fmt.Errorf("échec promotion manifest cloud : %w", err)
+				_ = p.DeleteFile(ctx, stagedManifestID)
+				ipc.Logf("[upload] AVERTISSEMENT : archive de base promue (%s) mais promotion et rattrapage du manifeste échoués pour %s ; relancez un upload --force pour resynchroniser le manifeste.", promotedBaseID, inst)
+				return "", "", "MANIFEST_UPLOAD_FAILED", fmt.Errorf("échec promotion manifest cloud (base promue, manifeste désynchronisé — relancez --upload --force) : %w", err)
 			}
-			_ = p.DeleteFile(stagedManifestID)
+			_ = p.DeleteFile(ctx, stagedManifestID)
 			promotedManifestID = fallbackID
 		}
 
 		return promotedBaseID, promotedManifestID, "", nil
 	}
 
-	newBaseID, err := p.UploadZip(baseBackupName, tempZip, existingBaseID, func(pct int) {
-		ipc.SendProgress("UPLOADING", pct, inst)
+	var newBaseID string
+	upBaseOpts := retryOpts
+	upBaseOpts.Label = "uploadBase(" + inst + ")"
+	err := retry.Do(ctx, upBaseOpts, func() error {
+		id, upErr := p.UploadZip(ctx, baseBackupName, tempZip, existingBaseID, func(pct int) {
+			ipc.SendProgress("UPLOADING", pct, inst)
+		})
+		if upErr != nil {
+			return upErr
+		}
+		newBaseID = id
+		return nil
 	})
 	if err != nil {
 		return "", "", "UPLOAD_FAILED", err
@@ -800,7 +832,7 @@ func uploadFullBackupAtomicWithContext(
 
 	var newMID string
 	err = retry.Do(ctx, retryOpts, func() error {
-		id, upErr := p.UploadJSON(manifestName, newManifest, existingManifestID)
+		id, upErr := p.UploadJSON(ctx, manifestName, newManifest, existingManifestID)
 		if upErr != nil {
 			return upErr
 		}

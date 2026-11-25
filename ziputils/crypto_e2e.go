@@ -1,6 +1,7 @@
 package ziputils
 
 import (
+	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/pbkdf2"
@@ -96,11 +97,13 @@ func EncryptFileE2E(srcPath, dstPath, passphrase string) error {
 		return err
 	}
 	defer in.Close()
+	br := bufio.NewReaderSize(in, 256*1024)
 
 	out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
+	bw := bufio.NewWriterSize(out, 256*1024)
 	closed := false
 	defer func() {
 		if !closed {
@@ -109,21 +112,22 @@ func EncryptFileE2E(srcPath, dstPath, passphrase string) error {
 		}
 	}()
 
-	if _, err := out.Write([]byte(e2eMagicV2)); err != nil {
+	if _, err := bw.Write([]byte(e2eMagicV2)); err != nil {
 		return err
 	}
-	if _, err := out.Write(salt); err != nil {
+	if _, err := bw.Write(salt); err != nil {
 		return err
 	}
-	if _, err := out.Write(baseNonce); err != nil {
+	if _, err := bw.Write(baseNonce); err != nil {
 		return err
 	}
 
 	buf := make([]byte, e2eChunkSize)
+	ctBuf := make([]byte, 0, e2eChunkSize+gcm.Overhead())
 	var chunkIdx uint64
 	var aad [9]byte
 	for {
-		n, rErr := io.ReadFull(in, buf)
+		n, rErr := io.ReadFull(br, buf)
 		isLast := rErr == io.EOF || rErr == io.ErrUnexpectedEOF
 		if rErr != nil && !isLast {
 			return rErr
@@ -132,13 +136,13 @@ func EncryptFileE2E(srcPath, dstPath, passphrase string) error {
 			// Marqueur de fin explicite si le fichier est un multiple exact de e2eChunkSize
 			binary.BigEndian.PutUint64(aad[:8], chunkIdx)
 			aad[8] = 1
-			ct := gcm.Seal(nil, makeChunkNonce(baseNonce, chunkIdx, true), nil, aad[:])
+			ct := gcm.Seal(ctBuf[:0], makeChunkNonce(baseNonce, chunkIdx, true), nil, aad[:])
 			var lenBuf [4]byte
 			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(ct)))
-			if _, err := out.Write(lenBuf[:]); err != nil {
+			if _, err := bw.Write(lenBuf[:]); err != nil {
 				return err
 			}
-			if _, err := out.Write(ct); err != nil {
+			if _, err := bw.Write(ct); err != nil {
 				return err
 			}
 			break
@@ -150,13 +154,13 @@ func EncryptFileE2E(srcPath, dstPath, passphrase string) error {
 		} else {
 			aad[8] = 0
 		}
-		ct := gcm.Seal(nil, makeChunkNonce(baseNonce, chunkIdx, isLast), buf[:n], aad[:])
+		ct := gcm.Seal(ctBuf[:0], makeChunkNonce(baseNonce, chunkIdx, isLast), buf[:n], aad[:])
 		var lenBuf [4]byte
 		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(ct)))
-		if _, err := out.Write(lenBuf[:]); err != nil {
+		if _, err := bw.Write(lenBuf[:]); err != nil {
 			return err
 		}
-		if _, err := out.Write(ct); err != nil {
+		if _, err := bw.Write(ct); err != nil {
 			return err
 		}
 		chunkIdx++
@@ -165,6 +169,9 @@ func EncryptFileE2E(srcPath, dstPath, passphrase string) error {
 		}
 	}
 
+	if err := bw.Flush(); err != nil {
+		return err
+	}
 	if err := out.Close(); err != nil {
 		return err
 	}
@@ -182,9 +189,10 @@ func DecryptFileE2E(srcPath, dstPath, passphrase string) error {
 		return err
 	}
 	defer in.Close()
+	br := bufio.NewReaderSize(in, 256*1024)
 
 	hdr := make([]byte, len(e2eMagicV2)+e2eSaltLen+e2eNonceLen)
-	if _, err := io.ReadFull(in, hdr); err != nil {
+	if _, err := io.ReadFull(br, hdr); err != nil {
 		return fmt.Errorf("%w: en-tête tronqué", ErrE2EInvalid)
 	}
 	magicStr := string(hdr[:len(e2eMagicV2)])
@@ -217,6 +225,7 @@ func DecryptFileE2E(srcPath, dstPath, passphrase string) error {
 	if err != nil {
 		return err
 	}
+	bw := bufio.NewWriterSize(out, 256*1024)
 	closed := false
 	defer func() {
 		if !closed {
@@ -229,25 +238,27 @@ func DecryptFileE2E(srcPath, dstPath, passphrase string) error {
 	var chunkIdx uint64
 	var aad [9]byte
 	maxCt := uint32(e2eChunkSize + gcm.Overhead())
+	ctBuf := make([]byte, maxCt)
+	ptBuf := make([]byte, 0, e2eChunkSize)
 	for {
-		if _, err := io.ReadFull(in, lenBuf[:]); err != nil {
+		if _, err := io.ReadFull(br, lenBuf[:]); err != nil {
 			return fmt.Errorf("%w: flux tronqué avant la fin", ErrE2EInvalid)
 		}
 		ctLen := binary.BigEndian.Uint32(lenBuf[:])
 		if ctLen == 0 || ctLen > maxCt {
 			return fmt.Errorf("%w: taille de bloc invalide (%d)", ErrE2EInvalid, ctLen)
 		}
-		ct := make([]byte, ctLen)
-		if _, err := io.ReadFull(in, ct); err != nil {
+		ct := ctBuf[:ctLen]
+		if _, err := io.ReadFull(br, ct); err != nil {
 			return fmt.Errorf("%w: bloc tronqué", ErrE2EInvalid)
 		}
 
 		// Essayer d'abord bloc intermédiaire, puis bloc final
 		binary.BigEndian.PutUint64(aad[:8], chunkIdx)
 		aad[8] = 0
-		if pt, err := gcm.Open(nil, makeChunkNonce(baseNonce, chunkIdx, false), ct, aad[:]); err == nil {
+		if pt, err := gcm.Open(ptBuf[:0], makeChunkNonce(baseNonce, chunkIdx, false), ct, aad[:]); err == nil {
 			if len(pt) > 0 {
-				if _, wErr := out.Write(pt); wErr != nil {
+				if _, wErr := bw.Write(pt); wErr != nil {
 					return wErr
 				}
 			}
@@ -256,18 +267,21 @@ func DecryptFileE2E(srcPath, dstPath, passphrase string) error {
 		}
 
 		aad[8] = 1
-		pt, err := gcm.Open(nil, makeChunkNonce(baseNonce, chunkIdx, true), ct, aad[:])
+		pt, err := gcm.Open(ptBuf[:0], makeChunkNonce(baseNonce, chunkIdx, true), ct, aad[:])
 		if err != nil {
 			return ErrE2EMismatch
 		}
 		if len(pt) > 0 {
-			if _, wErr := out.Write(pt); wErr != nil {
+			if _, wErr := bw.Write(pt); wErr != nil {
 				return wErr
 			}
 		}
 		break
 	}
 
+	if err := bw.Flush(); err != nil {
+		return err
+	}
 	if err := out.Close(); err != nil {
 		return err
 	}

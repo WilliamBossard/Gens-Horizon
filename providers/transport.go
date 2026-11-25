@@ -2,11 +2,15 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 var baseProcessCtx atomic.Pointer[context.Context]
@@ -25,6 +29,36 @@ func baseContext() context.Context {
 		return *ptr
 	}
 	return context.Background()
+}
+
+// sanitizeHTTPBody tronque et assainit un corps d'erreur HTTP pour éviter d'exposer
+// des payloads volumineux ou des caractères de contrôle dans les logs / messages IPC.
+func sanitizeHTTPBody(body []byte) string {
+	const maxLen = 512
+	s := strings.TrimSpace(string(body))
+	s = strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == '\t' {
+			return ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > maxLen {
+		return s[:maxLen] + "...(tronqué)"
+	}
+	return s
+}
+
+// newProviderHTTPError construit une retry.HTTPError en extrayant systématiquement Retry-After
+// et en assainissant le corps de réponse.
+func newProviderHTTPError(prefix string, resp *http.Response, body []byte) *retry.HTTPError {
+	return &retry.HTTPError{
+		StatusCode: resp.StatusCode,
+		RetryAfter: retry.ParseRetryAfter(resp.Header.Get("Retry-After")),
+		Message:    fmt.Sprintf("%s (HTTP %d) : %s", prefix, resp.StatusCode, sanitizeHTTPBody(body)),
+	}
 }
 
 // defaultPooledTransport est un transport HTTP mutualisé entre tous les providers Cloud
@@ -86,10 +120,17 @@ func (ir *idleActivityReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// doUploadWithIdleTimeout exécute une requête d'upload en surveillant l'activité I/O
-// (annule uniquement si aucun octet n'est transmis pendant uploadIdleTimeout).
 func doUploadWithIdleTimeout(client *http.Client, method, rawURL string, body io.Reader, contentLen int64, setHeaders func(*http.Request)) (*http.Response, func(), error) {
-	ctx, cancel := context.WithCancel(baseContext())
+	return doUploadWithIdleTimeoutWithContext(baseContext(), client, method, rawURL, body, contentLen, setHeaders)
+}
+
+// doUploadWithIdleTimeoutWithContext exécute une requête d'upload en surveillant l'activité I/O
+// et en respectant l'annulation du contexte fourni.
+func doUploadWithIdleTimeoutWithContext(parentCtx context.Context, client *http.Client, method, rawURL string, body io.Reader, contentLen int64, setHeaders func(*http.Request)) (*http.Response, func(), error) {
+	if parentCtx == nil {
+		parentCtx = baseContext()
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
 	var timer *time.Timer
 	reqBody := body
 	if body != nil && uploadIdleTimeout > 0 {

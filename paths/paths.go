@@ -30,8 +30,10 @@ func GetHorizonDataDir() string {
 
 // GetAppDataPath renvoie le chemin AppData du système
 func GetAppDataPath() string {
-	if val := os.Getenv("APPDATA"); val != "" {
-		return val
+	if runtime.GOOS == "windows" {
+		if val := os.Getenv("APPDATA"); val != "" {
+			return val
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -135,8 +137,8 @@ func ResolveWithFallback(newPath string, legacyPaths ...string) string {
 		if lp == "" || lp == newPath {
 			continue
 		}
-		info, statErr := os.Stat(lp)
-		if statErr != nil {
+		info, statErr := os.Lstat(lp)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || info.IsDir() {
 			continue
 		}
 		if data, err := os.ReadFile(lp); err == nil {
@@ -301,11 +303,16 @@ func CleanupOrphanedTemps(dataDir string) {
 			continue
 		}
 		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
 			name := entry.Name()
 			lower := strings.ToLower(name)
+			if entry.IsDir() {
+				if d == os.TempDir() && (strings.HasPrefix(lower, "horizon-sync-") || strings.HasPrefix(lower, "horizon-up-") || strings.HasPrefix(lower, "horizon-delta-")) {
+					if info, err := entry.Info(); err == nil && info.ModTime().Before(threshold) {
+						_ = os.RemoveAll(filepath.Join(d, name))
+					}
+				}
+				continue
+			}
 			isHorizonTemp := strings.HasPrefix(lower, "horizon_") && strings.HasSuffix(lower, ".zip")
 			isOldTemp := strings.HasPrefix(lower, "temp_") || strings.HasSuffix(lower, ".tmp") || strings.Contains(lower, ".tmp.") || strings.Contains(lower, ".stale.")
 

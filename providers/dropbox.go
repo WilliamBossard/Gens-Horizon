@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,6 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
-	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 type DropboxProvider struct {
@@ -78,10 +78,7 @@ func (d *DropboxProvider) refreshToken() error {
 
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if resp.StatusCode != http.StatusOK {
-		return &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("erreur refresh token Dropbox (HTTP %d) : %s", resp.StatusCode, string(bodyBytes)),
-		}
+		return newProviderHTTPError("erreur refresh token Dropbox", resp, bodyBytes)
 	}
 
 	var res struct {
@@ -120,7 +117,10 @@ func (d *DropboxProvider) refreshTokenIfStale(failedToken string) (string, error
 	return d.tokenData.AccessToken, nil
 }
 
-func (d *DropboxProvider) doRPC(endpoint string, reqBody any) ([]byte, error) {
+func (d *DropboxProvider) doRPC(ctx context.Context, endpoint string, reqBody any) ([]byte, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	tok, err := d.getAccessToken()
 	if err != nil {
 		return nil, err
@@ -139,7 +139,7 @@ func (d *DropboxProvider) doRPC(endpoint string, reqBody any) ([]byte, error) {
 		if bodyBytes != nil {
 			bodyReader = bytes.NewReader(bodyBytes)
 		}
-		req, rErr := http.NewRequest(http.MethodPost, "https://api.dropboxapi.com/2/"+endpoint, bodyReader)
+		req, rErr := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.dropboxapi.com/2/"+endpoint, bodyReader)
 		if rErr != nil {
 			return nil, rErr
 		}
@@ -179,26 +179,21 @@ func (d *DropboxProvider) doRPC(endpoint string, reqBody any) ([]byte, error) {
 		respBytes, _ = io.ReadAll(io.LimitReader(resp2.Body, 16*1024*1024))
 		_ = resp2.Body.Close()
 		if resp2.StatusCode != http.StatusOK {
-			return nil, &retry.HTTPError{
-				StatusCode: resp2.StatusCode,
-				RetryAfter: retry.ParseRetryAfter(resp2.Header.Get("Retry-After")),
-				Message:    fmt.Sprintf("dropbox RPC %s HTTP %d : %s", endpoint, resp2.StatusCode, string(respBytes)),
-			}
+			return nil, newProviderHTTPError("dropbox RPC "+endpoint, resp2, respBytes)
 		}
 		return respBytes, nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			RetryAfter: retry.ParseRetryAfter(resp.Header.Get("Retry-After")),
-			Message:    fmt.Sprintf("dropbox RPC %s HTTP %d : %s", endpoint, resp.StatusCode, string(respBytes)),
-		}
+		return nil, newProviderHTTPError("dropbox RPC "+endpoint, resp, respBytes)
 	}
 	return respBytes, nil
 }
 
-func (d *DropboxProvider) ListFiles(nameContains string) ([]CloudFile, error) {
+func (d *DropboxProvider) ListFiles(ctx context.Context, nameContains string) ([]CloudFile, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	var files []CloudFile
 
 	body := map[string]any{
@@ -211,7 +206,7 @@ func (d *DropboxProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 		"limit":                               1000,
 	}
 
-	respBytes, err := d.doRPC("files/list_folder", body)
+	respBytes, err := d.doRPC(ctx, "files/list_folder", body)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +247,7 @@ func (d *DropboxProvider) ListFiles(nameContains string) ([]CloudFile, error) {
 
 	const maxPages = 100
 	for page := 1; res.HasMore && res.Cursor != "" && page < maxPages; page++ {
-		contBytes, err := d.doRPC("files/list_folder/continue", map[string]any{"cursor": res.Cursor})
+		contBytes, err := d.doRPC(ctx, "files/list_folder/continue", map[string]any{"cursor": res.Cursor})
 		if err != nil {
 			return nil, fmt.Errorf("dropbox list_folder/continue : %w", err)
 		}
@@ -289,8 +284,11 @@ func marshalDropboxAPIArg(v any) (string, error) {
 	return b.String(), nil
 }
 
-func (d *DropboxProvider) buildDownloadRequest(token string, argJSON string, start, end int64) (*http.Request, error) {
-	req, err := http.NewRequest(http.MethodPost, "https://content.dropboxapi.com/2/files/download", nil)
+func (d *DropboxProvider) buildDownloadRequest(ctx context.Context, token string, argJSON string, start, end int64) (*http.Request, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://content.dropboxapi.com/2/files/download", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +302,10 @@ func (d *DropboxProvider) buildDownloadRequest(token string, argJSON string, sta
 	return req, nil
 }
 
-func (d *DropboxProvider) DownloadFile(fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
+func (d *DropboxProvider) DownloadFile(ctx context.Context, fileID string, destPath string, onProgress func(pct int), totalSize int64) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	dlClient := streamingClient(d.client)
 	arg, err := marshalDropboxAPIArg(map[string]string{"path": fileID})
 	if err != nil {
@@ -317,7 +318,7 @@ func (d *DropboxProvider) DownloadFile(fileID string, destPath string, onProgres
 			return nil, err
 		}
 
-		req, err := d.buildDownloadRequest(tok, arg, start, end)
+		req, err := d.buildDownloadRequest(ctx, tok, arg, start, end)
 		if err != nil {
 			return nil, err
 		}
@@ -333,7 +334,7 @@ func (d *DropboxProvider) DownloadFile(fileID string, destPath string, onProgres
 			if rErr != nil {
 				return nil, rErr
 			}
-			req, err = d.buildDownloadRequest(newTok, arg, start, end)
+			req, err = d.buildDownloadRequest(ctx, newTok, arg, start, end)
 			if err != nil {
 				return nil, err
 			}
@@ -347,7 +348,10 @@ func (d *DropboxProvider) DownloadFile(fileID string, destPath string, onProgres
 	})
 }
 
-func (d *DropboxProvider) DownloadJSON(fileID string, target any) error {
+func (d *DropboxProvider) DownloadJSON(ctx context.Context, fileID string, target any) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	tok, err := d.getAccessToken()
 	if err != nil {
 		return err
@@ -357,7 +361,7 @@ func (d *DropboxProvider) DownloadJSON(fileID string, target any) error {
 		return err
 	}
 
-	req, err := d.buildDownloadRequest(tok, arg, 0, -1)
+	req, err := d.buildDownloadRequest(ctx, tok, arg, 0, -1)
 	if err != nil {
 		return err
 	}
@@ -373,7 +377,7 @@ func (d *DropboxProvider) DownloadJSON(fileID string, target any) error {
 		if rErr != nil {
 			return rErr
 		}
-		req, err = d.buildDownloadRequest(newTok, arg, 0, -1)
+		req, err = d.buildDownloadRequest(ctx, newTok, arg, 0, -1)
 		if err != nil {
 			return err
 		}
@@ -386,10 +390,7 @@ func (d *DropboxProvider) DownloadJSON(fileID string, target any) error {
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return &retry.HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("dropbox downloadJSON HTTP %d : %s", resp.StatusCode, string(b)),
-		}
+		return newProviderHTTPError("dropbox downloadJSON", resp, b)
 	}
 
 	return json.NewDecoder(io.LimitReader(resp.Body, 16*1024*1024)).Decode(target)
@@ -397,7 +398,10 @@ func (d *DropboxProvider) DownloadJSON(fileID string, target any) error {
 
 var dropboxChunkSize = int64(8 * 1024 * 1024)
 
-func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID string, onProgress func(pct int)) (string, error) {
+func (d *DropboxProvider) UploadZip(ctx context.Context, name string, srcPath string, existingID string, onProgress func(pct int)) (string, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return "", err
@@ -433,8 +437,8 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 		for attempt := 0; attempt < maxAttempts; {
 			if attempt > 0 && !didRefreshThisIter {
 				select {
-				case <-baseContext().Done():
-					return nil, baseContext().Err()
+				case <-ctx.Done():
+					return nil, ctx.Err()
 				case <-time.After(time.Duration(attempt*1500) * time.Millisecond):
 				}
 			}
@@ -458,7 +462,7 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 				OnProgress: onProgress,
 			}
 
-			resp, cleanup, doErr := doUploadWithIdleTimeout(uploadClient, http.MethodPost, endpoint, pr, chunkLen, func(r *http.Request) {
+			resp, cleanup, doErr := doUploadWithIdleTimeoutWithContext(ctx, uploadClient, http.MethodPost, endpoint, pr, chunkLen, func(r *http.Request) {
 				r.Header.Set("Authorization", "Bearer "+tok)
 				r.Header.Set("Content-Type", "application/octet-stream")
 				r.Header.Set("Dropbox-API-Arg", argJSON)
@@ -496,12 +500,12 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 					}
 					authRefreshed = true
 					didRefreshThisIter = true
-					lastErr = &retry.HTTPError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("dropbox %s HTTP 401 : %s", endpoint, string(b))}
+					lastErr = newProviderHTTPError("dropbox "+endpoint, resp, b)
 					continue
 				}
-				return nil, &retry.HTTPError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("dropbox %s HTTP 401 : %s", endpoint, string(b))}
+				return nil, newProviderHTTPError("dropbox "+endpoint, resp, b)
 			}
-			lastErr = &retry.HTTPError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("dropbox %s HTTP %d : %s", endpoint, resp.StatusCode, string(b))}
+			lastErr = newProviderHTTPError("dropbox "+endpoint, resp, b)
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
 				return nil, lastErr
 			}
@@ -598,7 +602,10 @@ func (d *DropboxProvider) UploadZip(name string, srcPath string, existingID stri
 	return res.ID, nil
 }
 
-func (d *DropboxProvider) UploadJSON(name string, data any, existingID string) (string, error) {
+func (d *DropboxProvider) UploadJSON(ctx context.Context, name string, data any, existingID string) (string, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
 		return "", err
@@ -633,7 +640,7 @@ func (d *DropboxProvider) UploadJSON(name string, data any, existingID string) (
 			}
 		}
 
-		req, err := http.NewRequest(http.MethodPost, "https://content.dropboxapi.com/2/files/upload", bytes.NewReader(jsonBytes))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://content.dropboxapi.com/2/files/upload", bytes.NewReader(jsonBytes))
 		if err != nil {
 			return "", err
 		}
@@ -659,10 +666,7 @@ func (d *DropboxProvider) UploadJSON(name string, data any, existingID string) (
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			return "", &retry.HTTPError{
-				StatusCode: resp.StatusCode,
-				Message:    fmt.Sprintf("dropbox uploadJSON HTTP %d : %s", resp.StatusCode, string(respBytes)),
-			}
+			return "", newProviderHTTPError("dropbox uploadJSON", resp, respBytes)
 		}
 
 		var res struct {
@@ -675,13 +679,53 @@ func (d *DropboxProvider) UploadJSON(name string, data any, existingID string) (
 	return "", fmt.Errorf("dropbox uploadJSON : échec après rafraîchissement du token")
 }
 
-func (d *DropboxProvider) DeleteFile(fileID string) error {
-	_, err := d.doRPC("files/delete_v2", map[string]string{"path": fileID})
+func isDropboxNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if idx := strings.IndexByte(msg, '{'); idx >= 0 {
+		var payload struct {
+			ErrorSummary string `json:"error_summary"`
+			Error        struct {
+				Tag        string `json:".tag"`
+				PathLookup struct {
+					Tag string `json:".tag"`
+				} `json:"path_lookup"`
+				Path struct {
+					Tag string `json:".tag"`
+				} `json:"path"`
+				FromLookup struct {
+					Tag string `json:".tag"`
+				} `json:"from_lookup"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(msg[idx:]), &payload) == nil {
+			if payload.Error.Tag == "not_found" ||
+				payload.Error.PathLookup.Tag == "not_found" ||
+				payload.Error.Path.Tag == "not_found" ||
+				payload.Error.FromLookup.Tag == "not_found" {
+				return true
+			}
+			if payload.ErrorSummary != "" {
+				return strings.Contains(payload.ErrorSummary, "not_found")
+			}
+			return false
+		}
+	}
+	return strings.Contains(msg, "path_lookup/not_found") || strings.Contains(msg, "path/not_found") || strings.Contains(msg, "from_lookup/not_found")
+}
+
+func (d *DropboxProvider) DeleteFile(ctx context.Context, fileID string) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
+	_, err := d.doRPC(ctx, "files/delete_v2", map[string]string{"path": fileID})
 	if err == nil {
 		InvalidateCloudIndexCache()
 		return nil
 	}
-	if strings.Contains(err.Error(), "not_found") {
+	if isDropboxNotFoundError(err) {
 		InvalidateCloudIndexCache()
 		return ErrNotFound
 	}
@@ -690,32 +734,35 @@ func (d *DropboxProvider) DeleteFile(fileID string) error {
 
 // RenameFile déplace un fichier staging vers son nom définitif sur Dropbox de manière réversible
 // (mise en backup temporaire de l'ancienne cible avant promotion, rollback si le déplacement échoue).
-func (d *DropboxProvider) RenameFile(fileID string, newName string, existingTargetID string) (string, error) {
+func (d *DropboxProvider) RenameFile(ctx context.Context, fileID string, newName string, existingTargetID string) (string, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	targetPath := "/" + newName
 	var backupTempPath string
 
 	if existingTargetID != "" && existingTargetID != fileID {
 		backupTempPath = fmt.Sprintf("/.__staging_bak_%d_%s", time.Now().UnixMilli(), newName)
-		if _, bakErr := d.doRPC("files/move_v2", map[string]any{
+		if _, bakErr := d.doRPC(ctx, "files/move_v2", map[string]any{
 			"from_path":  existingTargetID,
 			"to_path":    backupTempPath,
 			"autorename": false,
 		}); bakErr != nil {
-			if !strings.Contains(bakErr.Error(), "not_found") {
+			if !isDropboxNotFoundError(bakErr) {
 				return "", fmt.Errorf("[dropbox] mise en sauvegarde ancienne cible avant promotion : %w", bakErr)
 			}
 			backupTempPath = ""
 		}
 	}
 
-	respBytes, err := d.doRPC("files/move_v2", map[string]any{
+	respBytes, err := d.doRPC(ctx, "files/move_v2", map[string]any{
 		"from_path":  fileID,
 		"to_path":    targetPath,
 		"autorename": false,
 	})
 	if err != nil {
 		if backupTempPath != "" {
-			if _, rbErr := d.doRPC("files/move_v2", map[string]any{
+			if _, rbErr := d.doRPC(ctx, "files/move_v2", map[string]any{
 				"from_path":  backupTempPath,
 				"to_path":    targetPath,
 				"autorename": false,
@@ -727,7 +774,7 @@ func (d *DropboxProvider) RenameFile(fileID string, newName string, existingTarg
 	}
 
 	if backupTempPath != "" {
-		if delErr := d.DeleteFile(backupTempPath); delErr != nil && !errors.Is(delErr, ErrNotFound) {
+		if delErr := d.DeleteFile(ctx, backupTempPath); delErr != nil && !errors.Is(delErr, ErrNotFound) {
 			ipc.Logf("[dropbox] avertissement : suppression backup temporaire %s échouée : %v", backupTempPath, delErr)
 		}
 	}
@@ -746,8 +793,11 @@ func (d *DropboxProvider) RenameFile(fileID string, newName string, existingTarg
 	return promotedID, nil
 }
 
-func (d *DropboxProvider) GetQuota() (int64, int64, error) {
-	respBytes, err := d.doRPC("users/get_space_usage", nil)
+func (d *DropboxProvider) GetQuota(ctx context.Context) (int64, int64, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
+	respBytes, err := d.doRPC(ctx, "users/get_space_usage", nil)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -766,15 +816,18 @@ func (d *DropboxProvider) GetQuota() (int64, int64, error) {
 }
 
 // GetFileModifiedTime récupère le timestamp serveur d'un fichier Dropbox par son ID ou chemin.
-func (d *DropboxProvider) GetFileModifiedTime(fileID string) (time.Time, error) {
+func (d *DropboxProvider) GetFileModifiedTime(ctx context.Context, fileID string) (time.Time, error) {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	if fileID == "" {
 		return time.Time{}, fmt.Errorf("dropbox getFileModifiedTime: fileID vide")
 	}
-	respBytes, err := d.doRPC("files/get_metadata", map[string]any{
+	respBytes, err := d.doRPC(ctx, "files/get_metadata", map[string]any{
 		"path": fileID,
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "not_found") {
+		if isDropboxNotFoundError(err) {
 			return time.Time{}, ErrNotFound
 		}
 		return time.Time{}, err

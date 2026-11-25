@@ -118,6 +118,9 @@ func TestAcquireLockConcurrentExclusion(t *testing.T) {
 	var acquiredCount atomic.Int32
 	var wg sync.WaitGroup
 	start := make(chan struct{})
+	releaseReady := make(chan struct{})
+	var nonHoldersDone sync.WaitGroup
+	nonHoldersDone.Add(workers - 1)
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -126,13 +129,17 @@ func TestAcquireLockConcurrentExclusion(t *testing.T) {
 			<-start
 			if AcquireLock() {
 				acquiredCount.Add(1)
-				time.Sleep(30 * time.Millisecond)
+				<-releaseReady
 				ReleaseLock()
+			} else {
+				nonHoldersDone.Done()
 			}
 		}()
 	}
 
 	close(start)
+	nonHoldersDone.Wait()
+	close(releaseReady)
 	wg.Wait()
 
 	if got := acquiredCount.Load(); got != 1 {

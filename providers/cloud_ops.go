@@ -23,7 +23,7 @@ func GetCloudIndexReadOnlyWithContext(ctx context.Context, p Provider, opts retr
 
 	var cloudFiles []CloudFile
 	err := retry.Do(ctx, opts, func() error {
-		files, err := p.ListFiles("GensHorizon_")
+		files, err := p.ListFiles(ctx, "GensHorizon_")
 		if err != nil {
 			return err
 		}
@@ -68,7 +68,7 @@ func GetCloudIndexAndCleanDuplicatesWithContext(ctx context.Context, p Provider,
 
 	var cloudFiles []CloudFile
 	err := retry.Do(ctx, opts, func() error {
-		files, err := p.ListFiles("GensHorizon_")
+		files, err := p.ListFiles(ctx, "GensHorizon_")
 		if err != nil {
 			return err
 		}
@@ -117,7 +117,7 @@ func GetCloudIndexAndCleanDuplicatesWithContext(ctx context.Context, p Provider,
 				delOpts := opts
 				delOpts.Label = "deleteDuplicate(" + file.Name + ")"
 				if delErr := retry.Do(ctx, delOpts, func() error {
-					return p.DeleteFile(file.ID)
+					return p.DeleteFile(ctx, file.ID)
 				}); delErr != nil {
 					ipc.Logf("%s Échec purge doublon Cloud %s (%s) : %v", logPrefix, file.Name, file.ID, delErr)
 				} else {

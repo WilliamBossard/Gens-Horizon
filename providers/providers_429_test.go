@@ -51,7 +51,7 @@ func TestProvidersRetryOnHTTP429Burst(t *testing.T) {
 		var files []CloudFile
 		err := retry.Do(context.Background(), fastOpts, func() error {
 			var lErr error
-			files, lErr = p.ListFiles("GensHorizon_")
+			files, lErr = p.ListFiles(context.Background(), "GensHorizon_")
 			return lErr
 		})
 		if err != nil {
@@ -83,7 +83,7 @@ func TestProvidersRetryOnHTTP429Burst(t *testing.T) {
 		var files []CloudFile
 		err := retry.Do(context.Background(), fastOpts, func() error {
 			var lErr error
-			files, lErr = p.ListFiles("GensHorizon_")
+			files, lErr = p.ListFiles(context.Background(), "GensHorizon_")
 			return lErr
 		})
 		if err != nil {
@@ -116,7 +116,7 @@ func TestProvidersRetryOnHTTP429Burst(t *testing.T) {
 		var files []CloudFile
 		err := retry.Do(context.Background(), fastOpts, func() error {
 			var lErr error
-			files, lErr = p.ListFiles("GensHorizon_")
+			files, lErr = p.ListFiles(context.Background(), "GensHorizon_")
 			return lErr
 		})
 		if err != nil {

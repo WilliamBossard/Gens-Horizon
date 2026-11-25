@@ -187,3 +187,56 @@ func pruneOldRollbacks(instDir string, maxKeep int, prefixes ...string) {
 	}
 }
 
+// PruneOldRollbacks conserve au maximum keepPerInstance snapshots *_rollback_<ts> les plus récents
+// par instance dans instDir, et supprime les plus anciens.
+func PruneOldRollbacks(instDir string, keepPerInstance int) int {
+	if keepPerInstance <= 0 || instDir == "" {
+		return 0
+	}
+	entries, err := os.ReadDir(instDir)
+	if err != nil {
+		return 0
+	}
+	type rbEntry struct {
+		path string
+		ts   int64
+	}
+	byInstance := make(map[string][]rbEntry)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		idx := strings.LastIndex(name, "_rollback_")
+		if idx <= 0 {
+			continue
+		}
+		ts, err := strconv.ParseInt(name[idx+len("_rollback_"):], 10, 64)
+		if err != nil {
+			continue
+		}
+		instKey := strings.ToLower(name[:idx])
+		fullPath, pathErr := paths.SafeJoinUnder(instDir, name)
+		if pathErr != nil {
+			continue
+		}
+		byInstance[instKey] = append(byInstance[instKey], rbEntry{path: fullPath, ts: ts})
+	}
+	removed := 0
+	for instKey, list := range byInstance {
+		if len(list) <= keepPerInstance {
+			continue
+		}
+		sort.Slice(list, func(i, j int) bool {
+			return list[i].ts > list[j].ts
+		})
+		for _, old := range list[keepPerInstance:] {
+			if err := os.RemoveAll(old.path); err == nil {
+				removed++
+				ipc.Logf("[rollback] Ancien snapshot supprimé (%s) : %s", instKey, filepath.Base(old.path))
+			}
+		}
+	}
+	return removed
+}
+

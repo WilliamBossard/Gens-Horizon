@@ -62,7 +62,7 @@ func SyncWithContext(ctx context.Context, args []string) {
 	if !isList && !isDryRun {
 		if !lock.AcquireLock() {
 			ipc.SendError("ERR_ALREADY_RUNNING", "ERR_ALREADY_RUNNING", "")
-			os.Exit(1)
+			return
 		}
 		defer lock.ReleaseLock()
 		paths.CleanupOrphanedTemps(paths.GetHorizonDataDir())
@@ -103,7 +103,7 @@ func SyncWithContext(ctx context.Context, args []string) {
 
 	// 1. Traitement de --list
 	if isList {
-		handleCloudList(cloudIndex, p)
+		handleCloudListWithContext(ctx, cloudIndex, p)
 		return
 	}
 
@@ -260,7 +260,7 @@ func SyncWithContext(ctx context.Context, args []string) {
 		metaName := fmt.Sprintf("%s%s.json", PrefixMeta, safeInst)
 		if mf, ok := cloudIndex[metaName]; ok {
 			_ = retry.Do(ctx, retryOpts, func() error {
-				return p.DownloadJSON(mf.ID, &cloudMeta)
+				return p.DownloadJSON(ctx, mf.ID, &cloudMeta)
 			})
 		}
 
@@ -302,7 +302,7 @@ func SyncWithContext(ctx context.Context, args []string) {
 			tempBase := filepath.Join(baseTmpDir, fmt.Sprintf("base_%s.zip", safeInst))
 			ipc.SendProgress("DOWNLOADING", 0, inst)
 
-			err = p.DownloadFile(baseFile.ID, tempBase, func(pct int) {
+			err = p.DownloadFile(ctx, baseFile.ID, tempBase, func(pct int) {
 				ipc.SendProgress("DOWNLOADING", pct, inst)
 			}, baseFile.Size)
 			if err != nil {
@@ -401,7 +401,7 @@ func SyncWithContext(ctx context.Context, args []string) {
 						return
 					}
 					tempDelta := filepath.Join(dTmpDir, fmt.Sprintf("delta_%s_%d.zip", safeInst, item.timestamp))
-					if dErr := p.DownloadFile(item.file.ID, tempDelta, nil, item.file.Size); dErr != nil {
+					if dErr := p.DownloadFile(ctx, item.file.ID, tempDelta, nil, item.file.Size); dErr != nil {
 						_ = os.RemoveAll(dTmpDir)
 						ipc.Logf("[sync] Échec téléchargement delta %s : %v", item.file.Name, dErr)
 						dlResults[idx] = downloadedDelta{errMsg: dErr.Error()}
@@ -496,7 +496,7 @@ func SyncWithContext(ctx context.Context, args []string) {
 			var remoteM scanner.Manifest
 			err = retry.Do(ctx, retryOpts, func() error {
 				remoteM = nil
-				return p.DownloadJSON(mf.ID, &remoteM)
+				return p.DownloadJSON(ctx, mf.ID, &remoteM)
 			})
 			if err != nil {
 				restoreOnSyncFailure()
@@ -534,11 +534,22 @@ func SyncWithContext(ctx context.Context, args []string) {
 }
 
 func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Provider) {
+	handleCloudListWithContext(context.Background(), cloudIndex, p)
+}
+
+func handleCloudListWithContext(ctx context.Context, cloudIndex map[string]providers.CloudFile, p providers.Provider) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var list []string
 	seen := make(map[string]bool)
 	for name := range cloudIndex {
 		if strings.HasPrefix(name, PrefixBackup) && strings.HasSuffix(name, ".zip") {
-			instName := strings.TrimSuffix(strings.TrimPrefix(name, PrefixBackup), ".zip")
+			rawName := strings.TrimSuffix(strings.TrimPrefix(name, PrefixBackup), ".zip")
+			instName, err := paths.SanitizeInstanceName(rawName)
+			if err != nil {
+				continue
+			}
 			if !seen[instName] {
 				seen[instName] = true
 				list = append(list, instName)
@@ -595,7 +606,7 @@ func handleCloudList(cloudIndex map[string]providers.CloudFile, p providers.Prov
 				defer func() { <-metaSem }()
 
 				var meta metaResult
-				if err := p.DownloadJSON(fID, &meta); err == nil {
+				if err := p.DownloadJSON(ctx, fID, &meta); err == nil {
 					metaMu.Lock()
 					metaCache[instName] = meta
 					metaMu.Unlock()
@@ -699,7 +710,7 @@ func handleDeleteWithContext(ctx context.Context, retryOpts retry.Options, targe
 		_, isMatchingDelta := MatchDeltaForInstance(name, safeInst)
 		if name == baseBackupName || name == manifestName || name == metaName || isMatchingDelta {
 			delErr := retry.Do(ctx, retryOpts, func() error {
-				err := p.DeleteFile(f.ID)
+				err := p.DeleteFile(ctx, f.ID)
 				if errors.Is(err, providers.ErrNotFound) {
 					return nil
 				}
