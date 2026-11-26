@@ -106,6 +106,11 @@ func AcquireLock() bool {
 				continue
 			}
 
+			if heartbeatDone != nil {
+				close(heartbeatDone)
+				heartbeatDone = nil
+				heartbeatWg.Wait()
+			}
 			activeLockPath = lockPath
 			heartbeatDone = make(chan struct{})
 			startHeartbeat(lockPath, heartbeatDone)
@@ -118,10 +123,13 @@ func AcquireLock() bool {
 	return false
 }
 
+var heartbeatWg sync.WaitGroup
+
 func startHeartbeat(lockPath string, done <-chan struct{}) {
 	ticker := time.NewTicker(5 * time.Second)
-
+	heartbeatWg.Add(1)
 	go func() {
+		defer heartbeatWg.Done()
 		defer ticker.Stop()
 		for {
 			select {
@@ -142,6 +150,7 @@ func ReleaseLock() {
 	if heartbeatDone != nil {
 		close(heartbeatDone)
 		heartbeatDone = nil
+		heartbeatWg.Wait()
 	}
 
 	if activeLockPath == "" {

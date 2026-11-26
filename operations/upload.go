@@ -245,17 +245,20 @@ func UploadWithContext(ctx context.Context, args []string) {
 		}
 
 		var totalDeltasSize int64
-		var oldestDeltaTime int64 = time.Now().UnixMilli()
+		var oldestDeltaTime int64
 		for _, d := range existingDeltas {
 			totalDeltasSize += d.Size
-			if d.ModifiedTime.UnixMilli() < oldestDeltaTime {
-				oldestDeltaTime = d.ModifiedTime.UnixMilli()
+			if !d.ModifiedTime.IsZero() {
+				ms := d.ModifiedTime.UnixMilli()
+				if oldestDeltaTime == 0 || ms < oldestDeltaTime {
+					oldestDeltaTime = ms
+				}
 			}
 		}
 
 		isDeltaThresholdExceeded := len(existingDeltas) >= cleanupThreshold
 		isSizeSignificant := hasBase && baseFile.Size > 0 && totalDeltasSize >= (baseFile.Size/2)
-		isDeltaTooOld := len(existingDeltas) > 0 && time.Since(time.UnixMilli(oldestDeltaTime)) > 30*24*time.Hour
+		isDeltaTooOld := len(existingDeltas) > 0 && oldestDeltaTime > 0 && time.Since(time.UnixMilli(oldestDeltaTime)) > 30*24*time.Hour
 		isHardCapReached := len(existingDeltas) >= cleanupThreshold*2
 
 		// Smart Consolidation : consolidation complète si le seuil est atteint ET (taille cumulée > 50% de la base, deltas > 30j, ou plafond de sécurité)
@@ -304,7 +307,12 @@ func UploadWithContext(ctx context.Context, args []string) {
 				ipc.SendError(encCode, encErr.Error(), inst)
 				continue
 			}
-			baseArchiveSha, _ := computeFileSHA256(uploadZipPath)
+			baseArchiveSha, shaErr := computeFileSHA256(uploadZipPath)
+			if shaErr != nil {
+				_ = os.RemoveAll(tmpZipDir)
+				ipc.SendError("HASH_FAILED", shaErr.Error(), inst)
+				continue
+			}
 
 			ipc.SendProgress("UPLOADING", 0, inst)
 			existingID := ""
@@ -331,6 +339,21 @@ func UploadWithContext(ctx context.Context, args []string) {
 			)
 			_ = os.RemoveAll(tmpZipDir)
 			if upErr != nil {
+				// Si la nouvelle archive de base a été promue mais que la promotion du manifest a échoué,
+				// mettre à jour meta_<inst>.json avec le nouveau archiveSha256 pour éviter CORRUPT_ARCHIVE côté clients.
+				if newBaseID != "" && baseArchiveSha != "" {
+					metaData := extractInstanceMetadata(localInstFolder, inst)
+					metaData["archiveSha256"] = baseArchiveSha
+					metaData["deltaSha256s"] = map[string]string{}
+					metaExistingID := ""
+					if mf, ok := cloudIndex[metaName]; ok {
+						metaExistingID = mf.ID
+					}
+					_ = retry.Do(ctx, retryOpts, func() error {
+						_, mUpErr := p.UploadJSON(ctx, metaName, metaData, metaExistingID)
+						return mUpErr
+					})
+				}
 				ipc.SendError(stepErrCode, upErr.Error(), inst)
 				continue
 			}
@@ -448,7 +471,12 @@ func UploadWithContext(ctx context.Context, args []string) {
 				ipc.SendError(encCode, encErr.Error(), inst)
 				continue
 			}
-			deltaArchiveSha, _ := computeFileSHA256(uploadDeltaPath)
+			deltaArchiveSha, shaErr := computeFileSHA256(uploadDeltaPath)
+			if shaErr != nil {
+				_ = os.RemoveAll(tmpDeltaDir)
+				ipc.SendError("HASH_FAILED", shaErr.Error(), inst)
+				continue
+			}
 
 			deltaName := fmt.Sprintf("%s%s_%d.zip", PrefixDelta, safeInst, time.Now().UnixMilli())
 			ipc.SendProgress("UPLOADING", 0, inst)
@@ -509,9 +537,17 @@ func UploadWithContext(ctx context.Context, args []string) {
 				DeltaSha256s  map[string]string `json:"deltaSha256s"`
 			}
 			if mf, ok := cloudIndex[metaName]; ok {
-				_ = retry.Do(ctx, retryOpts, func() error {
+				metaFetchErr := retry.Do(ctx, retryOpts, func() error {
 					return p.DownloadJSON(ctx, mf.ID, &prevMeta)
 				})
+				if metaFetchErr != nil && !errors.Is(metaFetchErr, providers.ErrNotFound) {
+					if rawMeta, rErr := os.ReadFile(paths.GetMetaPath(safeInst)); rErr == nil {
+						_ = json.Unmarshal(rawMeta, &prevMeta)
+					} else {
+						ipc.Logf("[upload] avertissement : impossible de lire metadata existante pour %s (%v) ; mise à jour meta ignorée pour préserver les empreintes SHA-256.", inst, metaFetchErr)
+						continue
+					}
+				}
 			} else if rawMeta, rErr := os.ReadFile(paths.GetMetaPath(safeInst)); rErr == nil {
 				_ = json.Unmarshal(rawMeta, &prevMeta)
 			}
@@ -804,7 +840,7 @@ func uploadFullBackupAtomicWithContext(
 			if fbErr != nil {
 				_ = p.DeleteFile(ctx, stagedManifestID)
 				ipc.Logf("[upload] AVERTISSEMENT : archive de base promue (%s) mais promotion et rattrapage du manifeste échoués pour %s ; relancez un upload --force pour resynchroniser le manifeste.", promotedBaseID, inst)
-				return "", "", "MANIFEST_UPLOAD_FAILED", fmt.Errorf("échec promotion manifest cloud (base promue, manifeste désynchronisé — relancez --upload --force) : %w", err)
+				return promotedBaseID, "", "MANIFEST_UPLOAD_FAILED", fmt.Errorf("échec promotion manifest cloud (base promue, manifeste désynchronisé — relancez --upload --force) : %w", err)
 			}
 			_ = p.DeleteFile(ctx, stagedManifestID)
 			promotedManifestID = fallbackID

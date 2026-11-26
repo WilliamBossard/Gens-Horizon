@@ -52,6 +52,9 @@ func (d *DropboxProvider) getAccessToken() (string, error) {
 			}
 		}
 	}
+	if d.tokenData.AccessToken == "" && d.tokenData.RefreshToken == "" {
+		return "", errors.New("[dropbox] aucun token d'accès ou de rafraîchissement disponible")
+	}
 	return d.tokenData.AccessToken, nil
 }
 
@@ -106,13 +109,19 @@ func (d *DropboxProvider) refreshTokenIfStale(failedToken string) (string, error
 	defer d.mu.Unlock()
 
 	if d.tokenData.AccessToken != "" && d.tokenData.AccessToken != failedToken {
-		return d.tokenData.AccessToken, nil
+		if d.tokenData.AccessToken == "" && d.tokenData.RefreshToken == "" {
+		return "", errors.New("[dropbox] aucun token d'accès ou de rafraîchissement disponible")
+	}
+	return d.tokenData.AccessToken, nil
 	}
 	if d.tokenData.RefreshToken == "" {
 		return "", errors.New("dropbox: aucun refresh_token disponible")
 	}
 	if err := d.refreshToken(); err != nil {
 		return "", err
+	}
+	if d.tokenData.AccessToken == "" && d.tokenData.RefreshToken == "" {
+		return "", errors.New("[dropbox] aucun token d'accès ou de rafraîchissement disponible")
 	}
 	return d.tokenData.AccessToken, nil
 }
@@ -312,7 +321,7 @@ func (d *DropboxProvider) DownloadFile(ctx context.Context, fileID string, destP
 		return err
 	}
 
-	return downloadSmart(destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
+	return downloadSmartWithContext(ctx, destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
 		tok, err := d.getAccessToken()
 		if err != nil {
 			return nil, err
@@ -509,6 +518,11 @@ func (d *DropboxProvider) UploadZip(ctx context.Context, name string, srcPath st
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
 				return nil, lastErr
 			}
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+				if wErr := waitChunkRetryAfter(ctx, resp, 0); wErr != nil {
+					return nil, wErr
+				}
+			}
 			attempt++
 		}
 		return nil, lastErr
@@ -672,7 +686,9 @@ func (d *DropboxProvider) UploadJSON(ctx context.Context, name string, data any,
 		var res struct {
 			ID string `json:"id"`
 		}
-		_ = json.Unmarshal(respBytes, &res)
+		if err := json.Unmarshal(respBytes, &res); err != nil {
+			return "", fmt.Errorf("dropbox uploadJSON parsing : %w", err)
+		}
 		InvalidateCloudIndexCache()
 		return res.ID, nil
 	}

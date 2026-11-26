@@ -161,9 +161,9 @@ func zipDedupKey(cleanDest string) string {
 	return cleanDest
 }
 
-// sanitizeZipFileMode supprime setuid/setgid/sticky et garantit un mode fichier valide.
+// sanitizeZipFileMode supprime setuid/setgid/sticky ainsi que les permissions d'écriture groupe/autres et garantit un mode fichier valide.
 func sanitizeZipFileMode(mode os.FileMode) os.FileMode {
-	perm := mode.Perm() &^ (os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+	perm := mode.Perm() &^ (os.ModeSetuid | os.ModeSetgid | os.ModeSticky | 0o022)
 	if perm == 0 {
 		return 0644
 	}

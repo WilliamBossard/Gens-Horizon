@@ -136,8 +136,12 @@ func SendInfo(message string) {
 	})
 }
 
+var stderrMu sync.Mutex
+
 // Logf écrit des messages de log ou d'erreur sur stderr afin de ne pas corrompre le stream JSON sur stdout
 func Logf(format string, args ...any) {
+	stderrMu.Lock()
+	defer stderrMu.Unlock()
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 

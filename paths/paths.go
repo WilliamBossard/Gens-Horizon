@@ -264,9 +264,21 @@ func LoadSettings() config.Settings {
 
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
-		// Écrit les paramètres par défaut
+		// Écrit les paramètres par défaut de manière atomique
 		if b, err := json.MarshalIndent(defaults, "", "  "); err == nil {
-			_ = os.WriteFile(settingsPath, b, 0644)
+			tmpPath := fmt.Sprintf("%s.tmp.%d", settingsPath, os.Getpid())
+			if f, fErr := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644); fErr == nil {
+				_, wErr := f.Write(b)
+				sErr := f.Sync()
+				cErr := f.Close()
+				if wErr == nil && sErr == nil && cErr == nil {
+					if rErr := os.Rename(tmpPath, settingsPath); rErr != nil {
+						_ = os.Remove(tmpPath)
+					}
+				} else {
+					_ = os.Remove(tmpPath)
+				}
+			}
 		}
 		return defaults
 	}

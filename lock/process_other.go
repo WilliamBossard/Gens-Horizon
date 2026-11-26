@@ -17,6 +17,16 @@ func isProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
+	if runtime.GOOS == "linux" {
+		if statBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+			s := string(statBytes)
+			if rparen := strings.LastIndexByte(s, ')'); rparen != -1 && len(s) > rparen+2 {
+				if s[rparen+2] == 'Z' {
+					return false
+				}
+			}
+		}
+	}
 	err := syscall.Kill(pid, 0)
 	if err == nil || err == syscall.EPERM {
 		return true

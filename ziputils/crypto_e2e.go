@@ -212,6 +212,7 @@ func DecryptFileE2E(srcPath, dstPath, passphrase string) error {
 	if err != nil {
 		return err
 	}
+	defer clear(key)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return err
@@ -269,7 +270,10 @@ func DecryptFileE2E(srcPath, dstPath, passphrase string) error {
 		aad[8] = 1
 		pt, err := gcm.Open(ptBuf[:0], makeChunkNonce(baseNonce, chunkIdx, true), ct, aad[:])
 		if err != nil {
-			return ErrE2EMismatch
+			if chunkIdx == 0 {
+				return ErrE2EMismatch
+			}
+			return fmt.Errorf("%w: bloc %d corrompu ou authentification échouée", ErrE2EInvalid, chunkIdx)
 		}
 		if len(pt) > 0 {
 			if _, wErr := bw.Write(pt); wErr != nil {

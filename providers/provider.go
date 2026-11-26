@@ -14,9 +14,14 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/paths"
 )
 
+type permanentProviderError string
+
+func (e permanentProviderError) Error() string      { return string(e) }
+func (e permanentProviderError) NonRetryable() bool { return true }
+
 var (
-	ErrNotFound         = errors.New("cloud file not found")
-	ErrListingTruncated = errors.New("cloud file listing truncated")
+	ErrNotFound         error = permanentProviderError("cloud file not found")
+	ErrListingTruncated error = permanentProviderError("cloud file listing truncated")
 )
 
 type CloudFile struct {

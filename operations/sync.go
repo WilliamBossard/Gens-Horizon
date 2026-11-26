@@ -259,9 +259,12 @@ func SyncWithContext(ctx context.Context, args []string) {
 		}
 		metaName := fmt.Sprintf("%s%s.json", PrefixMeta, safeInst)
 		if mf, ok := cloudIndex[metaName]; ok {
-			_ = retry.Do(ctx, retryOpts, func() error {
+			if metaErr := retry.Do(ctx, retryOpts, func() error {
 				return p.DownloadJSON(ctx, mf.ID, &cloudMeta)
-			})
+			}); metaErr != nil && !errors.Is(metaErr, providers.ErrNotFound) {
+				ipc.SendError("META_FETCH_FAILED", fmt.Sprintf("Impossible de récupérer les empreintes de sécurité (%s) : %v", metaName, metaErr), inst)
+				continue
+			}
 		}
 
 		// Rollback paresseux : créé uniquement après téléchargement et validation des archives
@@ -642,7 +645,9 @@ func handleCloudListWithContext(ctx context.Context, cloudIndex map[string]provi
 			if m.RealName != "" {
 				realName = m.RealName
 			}
-			iconData = m.IconData
+			if m.IconData != nil && isValidImageDataURI(*m.IconData) {
+				iconData = m.IconData
+			}
 			loader = m.Loader
 		}
 

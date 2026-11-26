@@ -83,8 +83,32 @@ func ParseRetryAfter(val string) time.Duration {
 	return 0
 }
 
+type nonRetryableError interface {
+	NonRetryable() bool
+}
+
+type permanentError struct {
+	err error
+}
+
+func (p permanentError) Error() string        { return p.err.Error() }
+func (p permanentError) Unwrap() error        { return p.err }
+func (p permanentError) NonRetryable() bool   { return true }
+
+// Permanent marque une erreur comme non-retryable pour retry.Do.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return permanentError{err: err}
+}
+
 func IsRetryable(err error) bool {
 	if err == nil {
+		return false
+	}
+	var nr nonRetryableError
+	if errors.As(err, &nr) && nr.NonRetryable() {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

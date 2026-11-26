@@ -20,6 +20,7 @@ import (
 	"github.com/WilliamBossard/Gens-Horizon/auth"
 	"github.com/WilliamBossard/Gens-Horizon/config"
 	"github.com/WilliamBossard/Gens-Horizon/ipc"
+	"github.com/WilliamBossard/Gens-Horizon/retry"
 )
 
 type GoogleProvider struct {
@@ -260,7 +261,7 @@ func (g *GoogleProvider) DownloadFile(ctx context.Context, fileID string, destPa
 		return req, nil
 	}
 
-	return downloadSmart(destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
+	return downloadSmartWithContext(ctx, destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
 		tok, err := g.getAccessToken()
 		if err != nil {
 			return nil, err
@@ -493,6 +494,18 @@ func (g *GoogleProvider) UploadZip(ctx context.Context, name string, srcPath str
 						offset = serverOffset
 						remaining = fileSize - offset
 						if remaining <= 0 {
+							if files, lErr := g.ListFiles(ctx, name); lErr == nil {
+								for _, f := range files {
+									if f.Name == name && f.ID != "" {
+										InvalidateCloudIndexCache()
+										if onProgress != nil {
+											onProgress(100)
+										}
+										return f.ID, nil
+									}
+								}
+							}
+							lastErr = errors.New("[google] upload déjà complet côté serveur mais ID de fichier introuvable")
 							break
 						}
 						chunkLen = googleChunkSize
@@ -558,6 +571,13 @@ func (g *GoogleProvider) UploadZip(ctx context.Context, name string, srcPath str
 			lastErr = newProviderHTTPError("[google] échec upload chunk", putResp, respBytes)
 			if putResp.StatusCode >= 400 && putResp.StatusCode < 500 && putResp.StatusCode != http.StatusTooManyRequests {
 				return "", lastErr
+			}
+			if putResp.StatusCode == http.StatusTooManyRequests || putResp.StatusCode == http.StatusServiceUnavailable {
+				if ra := retry.ParseRetryAfter(putResp.Header.Get("Retry-After")); ra > 0 {
+					if wErr := waitChunkRetryAfter(ctx, putResp, 0); wErr != nil {
+						return "", wErr
+					}
+				}
 			}
 		}
 
@@ -684,7 +704,7 @@ func (g *GoogleProvider) UploadJSON(ctx context.Context, name string, data any, 
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(respBytes, &res); err != nil {
-		ipc.Logf("[google] avertissement parsing réponse uploadJSON : %v", err)
+		return "", fmt.Errorf("[google] parsing réponse uploadJSON : %w", err)
 	}
 	InvalidateCloudIndexCache()
 	return res.ID, nil

@@ -424,7 +424,22 @@ func writeAtomicFile(filePath string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	tmpFile := fmt.Sprintf("%s.tmp.%d.%d", filePath, os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(tmpFile, data, perm); err != nil {
+	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpFile)
 		return err
 	}
 	var renameErr error

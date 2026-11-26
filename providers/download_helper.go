@@ -163,15 +163,48 @@ func downloadSmart(
 	onProgress func(pct int),
 	makeRequest RangeRequestFunc,
 ) error {
+	return downloadSmartWithContext(baseContext(), destPath, totalSize, onProgress, makeRequest)
+}
+
+// waitChunkRetryAfter attend le délai Retry-After si présent sur 429/503, sinon backoff linéaire par tentative.
+func waitChunkRetryAfter(ctx context.Context, resp *http.Response, attempt int) error {
+	var wait time.Duration
+	if resp != nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) {
+		wait = retry.ParseRetryAfter(resp.Header.Get("Retry-After"))
+	}
+	if wait <= 0 {
+		if attempt <= 0 {
+			return nil
+		}
+		wait = time.Duration(attempt*1500) * time.Millisecond
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(wait):
+		return nil
+	}
+}
+
+func downloadSmartWithContext(
+	ctx context.Context,
+	destPath string,
+	totalSize int64,
+	onProgress func(pct int),
+	makeRequest RangeRequestFunc,
+) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	if totalSize < MinMultiRangeSize {
-		return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+		return downloadWithResumeWithContext(ctx, destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
 			return makeRequest(offset, -1)
 		})
 	}
 
-	err := downloadMultiRange(destPath, totalSize, onProgress, makeRequest)
+	err := downloadMultiRangeWithContext(ctx, destPath, totalSize, onProgress, makeRequest)
 	if errors.Is(err, errMultiRangeFallback) {
-		return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+		return downloadWithResumeWithContext(ctx, destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
 			return makeRequest(offset, -1)
 		})
 	}
@@ -185,6 +218,19 @@ func downloadMultiRange(
 	onProgress func(pct int),
 	makeRequest RangeRequestFunc,
 ) error {
+	return downloadMultiRangeWithContext(baseContext(), destPath, totalSize, onProgress, makeRequest)
+}
+
+func downloadMultiRangeWithContext(
+	parentCtx context.Context,
+	destPath string,
+	totalSize int64,
+	onProgress func(pct int),
+	makeRequest RangeRequestFunc,
+) error {
+	if parentCtx == nil {
+		parentCtx = baseContext()
+	}
 	// Détermination du nombre de segments (entre 2 et 4, min 8 Mo par segment)
 	numWorkers := int(totalSize / (10 * 1024 * 1024))
 	if numWorkers < 2 {
@@ -201,7 +247,7 @@ func downloadMultiRange(
 	resp0, err := makeRequest(0, firstEnd)
 	if err != nil {
 		// Fallback immédiat sur flux unique avec reprise
-		return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+		return downloadWithResumeWithContext(parentCtx, destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
 			return makeRequest(offset, -1)
 		})
 	}
@@ -209,12 +255,12 @@ func downloadMultiRange(
 	// Si le serveur a renvoyé 200 OK au lieu de 206 Partial Content (absence de support Range),
 	// on consomme le corps de resp0 comme flux complet sans gaspiller la requête
 	if resp0.StatusCode == http.StatusOK {
-		return streamSingleResponse(resp0, destPath, totalSize, onProgress)
+		return streamSingleResponseWithContext(parentCtx, resp0, destPath, totalSize, onProgress)
 	}
 
 	if resp0.StatusCode != http.StatusPartialContent {
 		_ = resp0.Body.Close()
-		return downloadWithResume(destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
+		return downloadWithResumeWithContext(parentCtx, destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
 			return makeRequest(offset, -1)
 		})
 	}
@@ -274,7 +320,7 @@ func downloadMultiRange(
 		chunks[i] = chunkRange{id: i, start: start, end: end}
 	}
 
-	ctx, cancel := context.WithCancel(baseContext())
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
 	streamChunk := func(c chunkRange, initialResp *http.Response) error {
@@ -431,6 +477,13 @@ func downloadMultiRange(
 
 // streamSingleResponse consomme une réponse HTTP complète en flux unique
 func streamSingleResponse(resp *http.Response, destPath string, totalSize int64, onProgress func(pct int)) error {
+	return streamSingleResponseWithContext(baseContext(), resp, destPath, totalSize, onProgress)
+}
+
+func streamSingleResponseWithContext(ctx context.Context, resp *http.Response, destPath string, totalSize int64, onProgress func(pct int)) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	bodyReader := newIdleTimeoutReader(resp.Body, downloadIdleTimeout)
 	defer bodyReader.Close()
 
@@ -452,7 +505,6 @@ func streamSingleResponse(resp *http.Response, destPath string, totalSize int64,
 	defer dlBuf128Pool.Put(bufPtr)
 	buf := *bufPtr
 
-	ctx := baseContext()
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -501,6 +553,19 @@ func downloadWithResume(
 	onProgress func(pct int),
 	makeRequest func(offset int64) (*http.Response, error),
 ) error {
+	return downloadWithResumeWithContext(baseContext(), destPath, totalSize, onProgress, makeRequest)
+}
+
+func downloadWithResumeWithContext(
+	ctx context.Context,
+	destPath string,
+	totalSize int64,
+	onProgress func(pct int),
+	makeRequest func(offset int64) (*http.Response, error),
+) error {
+	if ctx == nil {
+		ctx = baseContext()
+	}
 	out, tmpPath, err := createTempDownloadFile(destPath)
 	if err != nil {
 		return err
@@ -519,7 +584,6 @@ func downloadWithResume(
 	defer dlBuf64Pool.Put(bufPtr)
 	buf := *bufPtr
 
-	ctx := baseContext()
 	const maxAttempts = 3
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {

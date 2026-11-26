@@ -52,6 +52,9 @@ func (o *OneDriveProvider) getAccessToken() (string, error) {
 			}
 		}
 	}
+	if o.tokenData.AccessToken == "" && o.tokenData.RefreshToken == "" {
+		return "", errors.New("[onedrive] aucun token d'accès ou de rafraîchissement disponible")
+	}
 	return o.tokenData.AccessToken, nil
 }
 
@@ -142,13 +145,19 @@ func (o *OneDriveProvider) refreshTokenIfStale(failedToken string) (string, erro
 	defer o.mu.Unlock()
 
 	if o.tokenData.AccessToken != "" && o.tokenData.AccessToken != failedToken {
-		return o.tokenData.AccessToken, nil
+		if o.tokenData.AccessToken == "" && o.tokenData.RefreshToken == "" {
+		return "", errors.New("[onedrive] aucun token d'accès ou de rafraîchissement disponible")
+	}
+	return o.tokenData.AccessToken, nil
 	}
 	if o.tokenData.RefreshToken == "" {
 		return "", errors.New("onedrive: aucun refresh_token disponible")
 	}
 	if err := o.refreshToken(); err != nil {
 		return "", err
+	}
+	if o.tokenData.AccessToken == "" && o.tokenData.RefreshToken == "" {
+		return "", errors.New("[onedrive] aucun token d'accès ou de rafraîchissement disponible")
 	}
 	return o.tokenData.AccessToken, nil
 }
@@ -278,7 +287,7 @@ func (o *OneDriveProvider) DownloadFile(ctx context.Context, fileID string, dest
 		return req, nil
 	}
 
-	return downloadSmart(destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
+	return downloadSmartWithContext(ctx, destPath, totalSize, onProgress, func(start, end int64) (*http.Response, error) {
 		tok, err := o.getAccessToken()
 		if err != nil {
 			return nil, err
@@ -537,6 +546,11 @@ func (o *OneDriveProvider) UploadZip(ctx context.Context, name string, srcPath s
 						chunkDone = true
 						break
 					}
+					if chunkResp.StatusCode == http.StatusTooManyRequests || chunkResp.StatusCode == http.StatusServiceUnavailable {
+						if wErr := waitChunkRetryAfter(ctx, chunkResp, 0); wErr != nil {
+							return "", wErr
+						}
+					}
 					continue
 				}
 				// Erreur 4xx définitive (400/401/403/404/413...) : inutile de réessayer
@@ -550,7 +564,9 @@ func (o *OneDriveProvider) UploadZip(ctx context.Context, name string, srcPath s
 				var doneRes struct {
 					ID string `json:"id"`
 				}
-				_ = json.Unmarshal(chunkBody, &doneRes)
+				if err := json.Unmarshal(chunkBody, &doneRes); err != nil {
+					return "", fmt.Errorf("onedrive chunk upload final parsing : %w", err)
+				}
 				finalID = doneRes.ID
 			}
 			chunkDone = true
@@ -561,6 +577,20 @@ func (o *OneDriveProvider) UploadZip(ctx context.Context, name string, srcPath s
 			return "", lastErr
 		}
 		offset = nextOffset
+	}
+
+	if finalID == "" {
+		if files, lErr := o.ListFiles(ctx, name); lErr == nil {
+			for _, f := range files {
+				if f.Name == name && f.ID != "" {
+					finalID = f.ID
+					break
+				}
+			}
+		}
+		if finalID == "" {
+			ipc.Logf("[onedrive] avertissement : upload terminé pour %s mais ID du fichier absent de la réponse", name)
+		}
 	}
 
 	InvalidateCloudIndexCache()
@@ -601,7 +631,9 @@ func (o *OneDriveProvider) UploadJSON(ctx context.Context, name string, data any
 	var res struct {
 		ID string `json:"id"`
 	}
-	_ = json.Unmarshal(b, &res)
+	if err := json.Unmarshal(b, &res); err != nil {
+		return "", fmt.Errorf("onedrive uploadJSON parsing : %w", err)
+	}
 	InvalidateCloudIndexCache()
 	return res.ID, nil
 }
@@ -704,7 +736,9 @@ func (o *OneDriveProvider) RenameFile(ctx context.Context, fileID string, newNam
 				return "", err
 			}
 		} else {
-			_ = o.DeleteFile(ctx, existingTargetID)
+			if delErr := o.DeleteFile(ctx, existingTargetID); delErr != nil {
+				ipc.Logf("[onedrive] avertissement suppression backup temporaire %s : %v", existingTargetID, delErr)
+			}
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
