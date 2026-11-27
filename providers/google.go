@@ -370,51 +370,89 @@ func (g *GoogleProvider) UploadZip(ctx context.Context, name string, srcPath str
 	}
 	fileSize := info.Size()
 
-	initMethod := "POST"
-	initURL := "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,modifiedTime"
-	if existingID != "" {
-		initMethod = "PATCH"
-		initURL = fmt.Sprintf("https://www.googleapis.com/upload/drive/v3/files/%s?uploadType=resumable&fields=id,name,size,modifiedTime", url.PathEscape(existingID))
+	sessKey := computeUploadSessionKey("google", name, srcPath, fileSize)
+	var uploadURL string
+	var offset int64
+	if cachedURL, ok := loadUploadSession(sessKey); ok {
+		parsedCached, pErr := url.Parse(cachedURL)
+		cachedHost := ""
+		if parsedCached != nil {
+			cachedHost = strings.ToLower(parsedCached.Hostname())
+		}
+		if pErr == nil && parsedCached.Scheme == "https" && (strings.HasSuffix(cachedHost, ".googleapis.com") || cachedHost == "googleapis.com") {
+			uploadClient := clientWithTimeout(g.client, 5*time.Minute)
+			if serverOffset, completedBody, qErr := queryGoogleUploadOffset(ctx, uploadClient, cachedURL, fileSize); qErr == nil {
+				if completedBody != nil {
+					var res struct {
+						ID string `json:"id"`
+					}
+					if err := json.Unmarshal(completedBody, &res); err == nil && res.ID != "" {
+						clearUploadSession(sessKey)
+						InvalidateCloudIndexCache()
+						if onProgress != nil {
+							onProgress(100)
+						}
+						return res.ID, nil
+					}
+				}
+				if serverOffset >= 0 && serverOffset < fileSize {
+					uploadURL = cachedURL
+					offset = serverOffset
+				}
+			} else {
+				clearUploadSession(sessKey)
+			}
+		}
 	}
 
-	metadata := map[string]any{"name": name}
-	if existingID == "" {
-		metadata["parents"] = []string{"appDataFolder"}
-	}
-	metaBytes, _ := json.Marshal(metadata)
-
-	req, err := http.NewRequestWithContext(ctx, initMethod, initURL, bytes.NewReader(metaBytes))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("X-Upload-Content-Type", "application/zip")
-	req.Header.Set("X-Upload-Content-Length", strconv.FormatInt(fileSize, 10))
-
-	resp, err := g.doRequest(req)
-	if err != nil {
-		return "", err
-	}
-	errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	_ = resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", newProviderHTTPError("[google] initiation upload resumable échouée", resp, errBytes)
-	}
-
-	uploadURL := resp.Header.Get("Location")
 	if uploadURL == "" {
-		return "", errors.New("[google] aucune URL d'upload retournée")
-	}
+		initMethod := "POST"
+		initURL := "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,modifiedTime"
+		if existingID != "" {
+			initMethod = "PATCH"
+			initURL = fmt.Sprintf("https://www.googleapis.com/upload/drive/v3/files/%s?uploadType=resumable&fields=id,name,size,modifiedTime", url.PathEscape(existingID))
+		}
 
-	// Validation de sécurité de l'URL d'upload
-	parsedU, err := url.Parse(uploadURL)
-	host := ""
-	if parsedU != nil {
-		host = strings.ToLower(parsedU.Hostname())
-	}
-	if err != nil || parsedU.Scheme != "https" || (!strings.HasSuffix(host, ".googleapis.com") && host != "googleapis.com") {
-		return "", fmt.Errorf("[google] sécurité : URL d'upload suspecte %s", uploadURL)
+		metadata := map[string]any{"name": name}
+		if existingID == "" {
+			metadata["parents"] = []string{"appDataFolder"}
+		}
+		metaBytes, _ := json.Marshal(metadata)
+
+		req, err := http.NewRequestWithContext(ctx, initMethod, initURL, bytes.NewReader(metaBytes))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+		req.Header.Set("X-Upload-Content-Type", "application/zip")
+		req.Header.Set("X-Upload-Content-Length", strconv.FormatInt(fileSize, 10))
+
+		resp, err := g.doRequest(req)
+		if err != nil {
+			return "", err
+		}
+		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			return "", newProviderHTTPError("[google] initiation upload resumable échouée", resp, errBytes)
+		}
+
+		uploadURL = resp.Header.Get("Location")
+		if uploadURL == "" {
+			return "", errors.New("[google] aucune URL d'upload retournée")
+		}
+
+		// Validation de sécurité de l'URL d'upload
+		parsedU, err := url.Parse(uploadURL)
+		host := ""
+		if parsedU != nil {
+			host = strings.ToLower(parsedU.Hostname())
+		}
+		if err != nil || parsedU.Scheme != "https" || (!strings.HasSuffix(host, ".googleapis.com") && host != "googleapis.com") {
+			return "", fmt.Errorf("[google] sécurité : URL d'upload suspecte %s", uploadURL)
+		}
+		saveUploadSession(sessKey, uploadURL, 5*24*time.Hour)
 	}
 
 	// Upload par blocs (chunks de 8 Mo = multiple de 256 Ko requis par Google Drive)
@@ -456,7 +494,6 @@ func (g *GoogleProvider) UploadZip(ctx context.Context, name string, srcPath str
 		return res.ID, nil
 	}
 
-	var offset int64
 	var processed int64
 	lastPct := -1
 
@@ -469,8 +506,9 @@ func (g *GoogleProvider) UploadZip(ctx context.Context, name string, srcPath str
 
 		var chunkDone bool
 		var lastErr error
+		maxAttempts := effectiveMaxRetries()
 
-		for attempt := 0; attempt < 3; attempt++ {
+		for attempt := 0; attempt < maxAttempts; attempt++ {
 			if attempt > 0 {
 				select {
 				case <-ctx.Done():
@@ -506,7 +544,7 @@ func (g *GoogleProvider) UploadZip(ctx context.Context, name string, srcPath str
 								}
 							}
 							lastErr = errors.New("[google] upload déjà complet côté serveur mais ID de fichier introuvable")
-							break
+							continue
 						}
 						chunkLen = googleChunkSize
 						if remaining < chunkLen {
@@ -561,6 +599,7 @@ func (g *GoogleProvider) UploadZip(ctx context.Context, name string, srcPath str
 				if err := json.Unmarshal(respBytes, &res); err != nil {
 					return "", err
 				}
+				clearUploadSession(sessKey)
 				InvalidateCloudIndexCache()
 				if onProgress != nil {
 					onProgress(100)
@@ -569,6 +608,9 @@ func (g *GoogleProvider) UploadZip(ctx context.Context, name string, srcPath str
 			}
 
 			lastErr = newProviderHTTPError("[google] échec upload chunk", putResp, respBytes)
+			if putResp.StatusCode == http.StatusNotFound || putResp.StatusCode == http.StatusGone {
+				clearUploadSession(sessKey)
+			}
 			if putResp.StatusCode >= 400 && putResp.StatusCode < 500 && putResp.StatusCode != http.StatusTooManyRequests {
 				return "", lastErr
 			}

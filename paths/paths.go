@@ -147,10 +147,15 @@ func ResolveWithFallback(newPath string, legacyPaths ...string) string {
 			if perm == 0 {
 				perm = 0600
 			}
-			tmp := fmt.Sprintf("%s.tmp.%d", newPath, time.Now().UnixNano())
-			if err := os.WriteFile(tmp, data, perm); err == nil {
-				if err := os.Rename(tmp, newPath); err == nil {
-					return newPath
+			tmp := fmt.Sprintf("%s.tmp.%d.%d", newPath, os.Getpid(), time.Now().UnixNano())
+			if f, fErr := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm); fErr == nil {
+				_, wErr := f.Write(data)
+				sErr := f.Sync()
+				cErr := f.Close()
+				if wErr == nil && sErr == nil && cErr == nil {
+					if rErr := os.Rename(tmp, newPath); rErr == nil {
+						return newPath
+					}
 				}
 				_ = os.Remove(tmp)
 			}
@@ -222,6 +227,34 @@ func SafeJoinUnder(baseDir, relPath string) (string, error) {
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("évasion de répertoire détectée : %q", relPath)
 	}
+	// Résolution des liens symboliques sur baseDir et sur l'ancêtre existant le plus proche de absTarget
+	realBase := absBase
+	if rb, rbErr := filepath.EvalSymlinks(absBase); rbErr == nil {
+		realBase = rb
+	}
+	cur := absTarget
+	for {
+		if realCur, err := filepath.EvalSymlinks(cur); err == nil {
+			tail, relTailErr := filepath.Rel(cur, absTarget)
+			if relTailErr != nil {
+				return "", relTailErr
+			}
+			projected := realCur
+			if tail != "." {
+				projected = filepath.Join(realCur, tail)
+			}
+			realRel, relErr := filepath.Rel(realBase, projected)
+			if relErr != nil || realRel == "." || realRel == ".." || strings.HasPrefix(realRel, ".."+string(os.PathSeparator)) {
+				return "", fmt.Errorf("évasion par symlink détectée : %q", relPath)
+			}
+			break
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
 	return absTarget, nil
 }
 
@@ -285,6 +318,7 @@ func LoadSettings() config.Settings {
 
 	loaded := config.DefaultSettings()
 	if err := json.Unmarshal(data, &loaded); err != nil {
+		fmt.Fprintf(os.Stderr, "[paths] AVERTISSEMENT : horizon_settings.json corrompu (%v), paramètres par défaut appliqués.\n", err)
 		return defaults
 	}
 	return loaded
@@ -305,11 +339,28 @@ func CleanupOrphanedTemps(dataDir string) {
 	threshold := time.Now().Add(-10 * time.Minute)
 	seen := make(map[string]bool)
 
+	rawTmpDir := os.TempDir()
+	cleanTmpDir := filepath.Clean(rawTmpDir)
+	if realTmp, err := filepath.EvalSymlinks(cleanTmpDir); err == nil {
+		cleanTmpDir = realTmp
+	}
+	isTempDir := func(dir string) bool {
+		cd := filepath.Clean(dir)
+		if rd, err := filepath.EvalSymlinks(cd); err == nil {
+			cd = rd
+		}
+		if runtime.GOOS == "windows" {
+			return strings.EqualFold(cd, cleanTmpDir)
+		}
+		return cd == cleanTmpDir
+	}
+
 	for _, d := range dirsToClean {
 		if d == "" || seen[d] {
 			continue
 		}
 		seen[d] = true
+		dIsTemp := isTempDir(d)
 		entries, err := os.ReadDir(d)
 		if err != nil {
 			continue
@@ -318,7 +369,7 @@ func CleanupOrphanedTemps(dataDir string) {
 			name := entry.Name()
 			lower := strings.ToLower(name)
 			if entry.IsDir() {
-				if d == os.TempDir() && (strings.HasPrefix(lower, "horizon-sync-") || strings.HasPrefix(lower, "horizon-up-") || strings.HasPrefix(lower, "horizon-delta-")) {
+				if dIsTemp && (strings.HasPrefix(lower, "horizon-sync-") || strings.HasPrefix(lower, "horizon-up-") || strings.HasPrefix(lower, "horizon-delta-")) {
 					if info, err := entry.Info(); err == nil && info.ModTime().Before(threshold) {
 						_ = os.RemoveAll(filepath.Join(d, name))
 					}
@@ -328,7 +379,7 @@ func CleanupOrphanedTemps(dataDir string) {
 			isHorizonTemp := strings.HasPrefix(lower, "horizon_") && strings.HasSuffix(lower, ".zip")
 			isOldTemp := strings.HasPrefix(lower, "temp_") || strings.HasSuffix(lower, ".tmp") || strings.Contains(lower, ".tmp.") || strings.Contains(lower, ".stale.")
 
-			if d == os.TempDir() {
+			if dIsTemp {
 				if !isHorizonTemp {
 					continue
 				}
@@ -364,10 +415,6 @@ func GetProviderName(args []string, sets config.Settings) string {
 			if valid[val] {
 				return val
 			}
-		}
-		val := strings.ToLower(strings.TrimSpace(arg))
-		if valid[val] {
-			return val
 		}
 	}
 	if sets.Provider != "" && valid[sets.Provider] {

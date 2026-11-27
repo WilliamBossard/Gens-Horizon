@@ -16,5 +16,11 @@ func TestContainsCommand(t *testing.T) {
 	if !containsCommand([]string{"--help"}, "--help", "-h") {
 		t.Errorf("expected containsCommand to match --help")
 	}
+	if containsCommand([]string{"--sync", "status"}, "--status", "status") {
+		t.Errorf("did not expect positional instance name 'status' to match --status")
+	}
+	if !containsCommand([]string{"delete", "MyInstance"}, "--delete", "delete") {
+		t.Errorf("expected bare command 'delete' at args[0] to match")
+	}
 }
 

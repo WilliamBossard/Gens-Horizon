@@ -192,13 +192,14 @@ func collectCleanItems(cloudIndex map[string]providers.CloudFile) ([]CleanItem, 
 		}
 
 		// B. Fichiers temporaires, staging interrompus ou corrompus
-		// Fenêtre de grâce de 15 minutes sur GensHorizon_Staging_* pour ne pas supprimer un upload actif d'un autre PC.
-		if strings.HasPrefix(name, "GensHorizon_Staging_") || strings.HasPrefix(name, ".__staging_bak_") || strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".part") || strings.HasPrefix(name, "tmp_") {
-			if strings.HasPrefix(name, "GensHorizon_Staging_") && !file.ModifiedTime.IsZero() && file.ModifiedTime.After(stagingGraceCutoff) {
+		// Fenêtre de grâce de 15 minutes sur GensHorizon_Staging_*, .__staging_bak_* et *.bak.* pour ne pas supprimer un upload actif d'un autre PC.
+		isStaging := strings.HasPrefix(name, "GensHorizon_Staging_") || strings.HasPrefix(name, ".__staging_bak_") || strings.Contains(name, ".bak.")
+		if isStaging || strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".part") || strings.HasPrefix(name, "tmp_") {
+			if isStaging && !file.ModifiedTime.IsZero() && file.ModifiedTime.After(stagingGraceCutoff) {
 				continue
 			}
 			reason := "Fichier temporaire résiduel"
-			if strings.HasPrefix(name, "GensHorizon_Staging_") {
+			if isStaging {
 				reason = "Fichier staging résiduel (upload interrompu)"
 			}
 			itemsToClean = append(itemsToClean, CleanItem{

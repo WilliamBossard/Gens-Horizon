@@ -131,6 +131,8 @@ func TestIsValidImageDataURISvgHardening(t *testing.T) {
 		"data:image/svg+xml;charset=utf-8,%3Csvg%3E%3Cuse%20href%3D%22%23x%22%2F%3E%3C%2Fsvg%3E",
 		"data:image/svg+xml;charset=utf-8,%3Csvg%20on%62egin%3D%22alert(1)%22%2F%3E",
 		"data:image/svg+xml;charset=utf-8,%26%23x3c%3Bscript%3Ealert(1)%3C%2Fscript%3E",
+		"data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Ca%20href%3D%22https%3A%2F%2Fevil.com%22%3E%3Ccircle%20r%3D%225%22%2F%3E%3C%2Fa%3E%3C%2Fsvg%3E",
+		"data:image/svg+xml;charset=utf-8,%3Csvg%3E%3CfeImage%20href%3D%22x%22%2F%3E%3C%2Fsvg%3E",
 	}
 	for _, uri := range malicious {
 		if isValidImageDataURI(uri) {

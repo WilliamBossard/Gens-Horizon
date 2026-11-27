@@ -88,6 +88,8 @@ func osKeyringProtect(_ []byte) ([]byte, error) {
 	return nil, errors.New("os keyring unused on windows (dpapi used)")
 }
 
+func osKeyringDelete(_ []byte) {}
+
 func osKeyringUnprotect(_ []byte) ([]byte, error) {
 	return nil, errors.New("os keyring unused on windows (dpapi used)")
 }

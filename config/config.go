@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type ProviderConfig struct {
@@ -85,21 +86,20 @@ func GetProviderConfig(providerName string, dataDir string) (ProviderConfig, err
 		}
 	}
 
-	// 2. Fichier config.json local (développement)
-	candidates := []string{
-		filepath.Join(dataDir, "config.json"),
-		"config.json",
-	}
-	for _, cand := range candidates {
-		data, err := os.ReadFile(cand)
-		if err == nil {
+	// 2. Fichier config.json dans dataDir uniquement (pas de lecture depuis un CWD non fiable)
+	if dataDir != "" {
+		cand := filepath.Join(dataDir, "config.json")
+		if data, err := os.ReadFile(cand); err == nil {
 			var root struct {
 				Credentials map[string]ProviderConfig `json:"credentials"`
 			}
-			if err := json.Unmarshal(data, &root); err == nil {
-				if cfg, ok := root.Credentials[providerName]; ok && cfg.ClientID != "" && cfg.ClientID != "VOTRE_"+providerName+"_CLIENT_ID" {
+			if uErr := json.Unmarshal(data, &root); uErr == nil {
+				placeholder := "VOTRE_" + strings.ToUpper(providerName) + "_CLIENT_ID"
+				if cfg, ok := root.Credentials[providerName]; ok && cfg.ClientID != "" && cfg.ClientID != placeholder {
 					return cfg, nil
 				}
+			} else {
+				fmt.Fprintf(os.Stderr, "[config] AVERTISSEMENT : config.json invalide (%v)\n", uErr)
 			}
 		}
 	}

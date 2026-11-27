@@ -438,7 +438,7 @@ func (d *DropboxProvider) UploadZip(ctx context.Context, name string, srcPath st
 			return nil, mErr
 		}
 
-		const maxAttempts = 3
+		maxAttempts := effectiveMaxRetries()
 		var lastErr error
 		authRefreshed := false
 		didRefreshThisIter := false

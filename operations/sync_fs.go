@@ -37,7 +37,11 @@ func restoreInPlace(snapshotDir, targetPath string) error {
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
 		}
-		_ = os.Remove(dest)
+		if info, lErr := os.Lstat(dest); lErr == nil && info.IsDir() {
+			_ = os.RemoveAll(dest)
+		} else {
+			_ = os.Remove(dest)
+		}
 		return copySingleFile(path, dest, info.Mode())
 	})
 	if err != nil {

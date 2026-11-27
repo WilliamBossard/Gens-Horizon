@@ -609,14 +609,18 @@ func handleCloudListWithContext(ctx context.Context, cloudIndex map[string]provi
 				defer func() { <-metaSem }()
 
 				var meta metaResult
-				if err := p.DownloadJSON(ctx, fID, &meta); err == nil {
+				if err := retry.Do(ctx, retry.DefaultOptions(), func() error {
+					return p.DownloadJSON(ctx, fID, &meta)
+				}); err == nil {
 					metaMu.Lock()
 					metaCache[instName] = meta
 					metaMu.Unlock()
 
 					if b, err := json.MarshalIndent(meta, "", "  "); err == nil {
 						_ = osWriteFileAtomic(localPath, b, 0644)
-						_ = os.Chtimes(localPath, cloudModTime, cloudModTime)
+						if !cloudModTime.IsZero() {
+							_ = os.Chtimes(localPath, cloudModTime, cloudModTime)
+						}
 					}
 				}
 			}(instName, mf.ID, localMetaPath, cloudTime)
@@ -798,7 +802,10 @@ func swapRestoreSnapshot(snapshotDir, targetPath string) error {
 
 	if err := os.Rename(stagingPath, targetPath); err != nil {
 		if hasExisting {
-			_ = os.Rename(backupOldPath, targetPath)
+			if rbErr := os.Rename(backupOldPath, targetPath); rbErr != nil {
+				ipc.Logf("[sync] AVERTISSEMENT : échec rollback rename (%v), tentative restoreInPlace...", rbErr)
+				_ = restoreInPlace(backupOldPath, targetPath)
+			}
 		}
 		_ = os.RemoveAll(stagingPath)
 		return err

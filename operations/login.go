@@ -105,7 +105,14 @@ func LoginWithContext(ctx context.Context, args []string) {
 		port = "12543"
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:"+port)
+	listenHost := "127.0.0.1"
+	if u.Hostname() == "localhost" {
+		listenHost = "localhost"
+	}
+	listener, err := net.Listen("tcp", listenHost+":"+port)
+	if err != nil && listenHost == "localhost" {
+		listener, err = net.Listen("tcp", "127.0.0.1:"+port)
+	}
 	if err != nil {
 		ipc.SendError("PORT_IN_USE", fmt.Sprintf("Le port local %s requis pour la connexion %s est déjà utilisé (%v). Fermez l'application ou l'onglet qui l'occupe puis réessayez.", port, providerName, err), "")
 		return

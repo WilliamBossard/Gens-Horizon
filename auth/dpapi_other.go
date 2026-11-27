@@ -14,10 +14,16 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
 const keyringServiceName = "GensHorizonSalt"
+
+var (
+	keyringAvailOnce sync.Once
+	keyringAvailVal  bool
+)
 
 func dpapiAvailable() bool {
 	return false
@@ -32,19 +38,23 @@ func dpapiUnprotect(_ []byte) ([]byte, error) {
 }
 
 func osKeyringAvailable() bool {
-	switch runtime.GOOS {
-	case "darwin":
-		_, err := exec.LookPath("security")
-		return err == nil
-	case "linux":
-		if os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
-			return false
+	keyringAvailOnce.Do(func() {
+		switch runtime.GOOS {
+		case "darwin":
+			_, err := exec.LookPath("security")
+			keyringAvailVal = err == nil
+		case "linux":
+			if os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
+				keyringAvailVal = false
+				return
+			}
+			_, err := exec.LookPath("secret-tool")
+			keyringAvailVal = err == nil
+		default:
+			keyringAvailVal = false
 		}
-		_, err := exec.LookPath("secret-tool")
-		return err == nil
-	default:
-		return false
-	}
+	})
+	return keyringAvailVal
 }
 
 func osKeyringProtect(saltBytes []byte) ([]byte, error) {
@@ -121,4 +131,22 @@ func osKeyringUnprotect(refBytes []byte) ([]byte, error) {
 		return nil, errors.New("keyring: invalid stored salt format")
 	}
 	return raw, nil
+}
+
+func osKeyringDelete(refBytes []byte) {
+	refID := strings.TrimSpace(string(refBytes))
+	if refID == "" || !osKeyringAvailable() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	switch runtime.GOOS {
+	case "darwin":
+		_ = exec.CommandContext(ctx, "security", "delete-generic-password",
+			"-a", refID, "-s", keyringServiceName).Run()
+	case "linux":
+		_ = exec.CommandContext(ctx, "secret-tool", "clear",
+			"service", keyringServiceName, "account", refID).Run()
+	}
 }

@@ -59,10 +59,20 @@ func SaveE2EPassphrase(passphrase string) error {
 		ipc.Logf("[auth] AVERTISSEMENT : aucun trousseau OS fonctionnel (DPAPI/keyring), e2e.key stocké localement avec permissions 0600 uniquement.")
 	}
 	target := getE2EKeyPath()
+	var oldKeyringRef []byte
+	if existing, rErr := os.ReadFile(target); rErr == nil && bytes.HasPrefix(existing, []byte(e2eKeyringPrefix)) {
+		oldKeyringRef = bytes.TrimPrefix(existing, []byte(e2eKeyringPrefix))
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
 	}
-	return writeAtomicFile(target, toWrite, 0600)
+	if err := writeAtomicFile(target, toWrite, 0600); err != nil {
+		return err
+	}
+	if len(oldKeyringRef) > 0 {
+		osKeyringDelete(oldKeyringRef)
+	}
+	return nil
 }
 
 // LoadE2EPassphrase lit et déchiffre la passphrase E2E locale. Retourne ("", nil) si absente.

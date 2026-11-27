@@ -3,6 +3,7 @@
 package lock
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func isProcessAlive(pid int) bool {
@@ -39,33 +41,33 @@ func isHorizonProcess(pid int) bool {
 		return false
 	}
 	if runtime.GOOS == "darwin" {
-		out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 		if err != nil {
-			return true
+			// Si le processus est mort entre-temps, isProcessAlive le confirme ; ne pas bloquer sur un PID mort.
+			return isProcessAlive(pid)
 		}
 		comm := strings.ToLower(strings.TrimSpace(filepath.Base(string(out))))
 		if comm == "" {
 			return false
-		}
-		if strings.Contains(comm, "horizon") {
-			return true
 		}
 		if selfExe, sErr := os.Executable(); sErr == nil {
 			if comm == strings.ToLower(filepath.Base(selfExe)) {
 				return true
 			}
 		}
-		return false
+		return comm == "horizon" || strings.HasPrefix(comm, "horizon-") || strings.HasPrefix(comm, "gens-horizon")
 	}
 	if runtime.GOOS != "linux" {
 		return true
 	}
 	commBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
 	if err != nil {
-		return true
+		return isProcessAlive(pid)
 	}
 	comm := strings.ToLower(strings.TrimSpace(string(commBytes)))
-	if strings.Contains(comm, "horizon") {
+	if comm == "horizon" || strings.HasPrefix(comm, "horizon-") || strings.HasPrefix(comm, "gens-horizon") {
 		return true
 	}
 	if selfExe, sErr := os.Executable(); sErr == nil {
@@ -76,4 +78,3 @@ func isHorizonProcess(pid int) bool {
 	}
 	return false
 }
-

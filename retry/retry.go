@@ -156,7 +156,7 @@ func Do(ctx context.Context, opts Options, fn func() error) error {
 			return err
 		}
 
-		// Backoff exponentiel avec jitter (+- 20%)
+		// Backoff exponentiel avec jitter (+0% à +20%)
 		var jitter time.Duration
 		if jitterRange := int64(delay / 5); jitterRange > 0 {
 			jitter = time.Duration(rand.Int63n(jitterRange))
@@ -188,6 +188,11 @@ func Do(ctx context.Context, opts Options, fn func() error) error {
 
 // CheckConnectivity effectue une résolution DNS concurrente ultra-rapide (similaire à Node.js dns.lookup)
 func CheckConnectivity() bool {
+	for _, envKey := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		if strings.TrimSpace(os.Getenv(envKey)) != "" {
+			return true
+		}
+	}
 	hosts := []string{"google.com", "cloudflare.com", "microsoft.com"}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -213,11 +218,6 @@ func CheckConnectivity() bool {
 		case <-success:
 			return true
 		case <-done:
-		}
-	}
-	for _, envKey := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
-		if strings.TrimSpace(os.Getenv(envKey)) != "" {
-			return true
 		}
 	}
 	return false

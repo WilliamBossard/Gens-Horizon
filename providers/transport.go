@@ -120,17 +120,19 @@ func (ir *idleActivityReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func doUploadWithIdleTimeout(client *http.Client, method, rawURL string, body io.Reader, contentLen int64, setHeaders func(*http.Request)) (*http.Response, func(), error) {
-	return doUploadWithIdleTimeoutWithContext(baseContext(), client, method, rawURL, body, contentLen, setHeaders)
-}
-
 // doUploadWithIdleTimeoutWithContext exécute une requête d'upload en surveillant l'activité I/O
 // et en respectant l'annulation du contexte fourni.
 func doUploadWithIdleTimeoutWithContext(parentCtx context.Context, client *http.Client, method, rawURL string, body io.Reader, contentLen int64, setHeaders func(*http.Request)) (*http.Response, func(), error) {
 	if parentCtx == nil {
 		parentCtx = baseContext()
 	}
-	ctx, cancel := context.WithCancel(parentCtx)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if client != nil && client.Timeout > 0 {
+		ctx, cancel = context.WithTimeout(parentCtx, client.Timeout)
+	} else {
+		ctx, cancel = context.WithCancel(parentCtx)
+	}
 	var timer *time.Timer
 	reqBody := body
 	if body != nil && uploadIdleTimeout > 0 {

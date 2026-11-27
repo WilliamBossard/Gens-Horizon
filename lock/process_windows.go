@@ -60,7 +60,7 @@ func isHorizonProcess(pid int) bool {
 		return true
 	}
 	exeName := strings.ToLower(filepath.Base(syscall.UTF16ToString(buf[:size])))
-	if strings.Contains(exeName, "horizon") {
+	if exeName == "horizon.exe" || strings.HasPrefix(exeName, "horizon-") || strings.HasPrefix(exeName, "gens-horizon") {
 		return true
 	}
 	if selfExe, sErr := os.Executable(); sErr == nil {

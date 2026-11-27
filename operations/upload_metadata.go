@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/url"
@@ -83,25 +84,105 @@ func isRealPathStrictlyUnder(baseDir, targetPath string) bool {
 
 var validImageDataURIRe = regexp.MustCompile(`^data:image/(?:png|jpeg|jpg|webp|gif|bmp);base64,[A-Za-z0-9+/=]+$`)
 var validSvgDataURIRe = regexp.MustCompile(`^data:image/svg\+xml;(?:charset=[A-Za-z0-9-]+,[A-Za-z0-9%._~:/?#\[\]@!$&()*+,;=-]+|base64,[A-Za-z0-9+/=]+)$`)
-var svgDangerousEventRe = regexp.MustCompile(`(?i)(?:^|[\s/"'])on[a-z]+\s*=`)
+
+var svgAllowedTags = map[string]bool{
+	"svg":            true,
+	"g":              true,
+	"path":           true,
+	"circle":         true,
+	"rect":           true,
+	"polygon":        true,
+	"polyline":       true,
+	"line":           true,
+	"ellipse":        true,
+	"defs":           true,
+	"lineargradient": true,
+	"radialgradient": true,
+	"stop":           true,
+	"title":          true,
+	"desc":           true,
+}
+
+var svgAllowedAttrs = map[string]bool{
+	"xmlns":             true,
+	"viewbox":           true,
+	"width":             true,
+	"height":            true,
+	"x":                 true,
+	"y":                 true,
+	"x1":                true,
+	"y1":                true,
+	"x2":                true,
+	"y2":                true,
+	"cx":                true,
+	"cy":                true,
+	"r":                 true,
+	"rx":                true,
+	"ry":                true,
+	"d":                 true,
+	"points":            true,
+	"fill":              true,
+	"fill-opacity":      true,
+	"fill-rule":         true,
+	"stroke":            true,
+	"stroke-width":      true,
+	"stroke-linecap":    true,
+	"stroke-linejoin":   true,
+	"stroke-opacity":    true,
+	"opacity":           true,
+	"offset":            true,
+	"stop-color":        true,
+	"stop-opacity":      true,
+	"gradientunits":     true,
+	"gradienttransform": true,
+	"transform":         true,
+	"id":                true,
+	"class":             true,
+}
 
 func isDangerousSVGContent(svg string) bool {
 	lower := strings.ToLower(svg)
-	if strings.Contains(lower, "<script") ||
-		strings.Contains(lower, "<foreignobject") ||
-		strings.Contains(lower, "<iframe") ||
-		strings.Contains(lower, "<object") ||
-		strings.Contains(lower, "<embed") ||
-		strings.Contains(lower, "<use") ||
-		strings.Contains(lower, "<animate") ||
-		strings.Contains(lower, "<set") ||
-		strings.Contains(lower, "javascript:") ||
-		strings.Contains(lower, "vbscript:") ||
-		strings.Contains(lower, "data:text/html") ||
-		strings.Contains(lower, "&#") {
+	if strings.Contains(lower, "&#") || strings.Contains(lower, "<!") || strings.Contains(lower, "<?") {
 		return true
 	}
-	return svgDangerousEventRe.MatchString(svg)
+	dec := xml.NewDecoder(strings.NewReader(svg))
+	dec.Strict = true
+	hasRootSVG := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return true
+		}
+		switch t := tok.(type) {
+		case xml.ProcInst, xml.Directive:
+			return true
+		case xml.StartElement:
+			tag := strings.ToLower(t.Name.Local)
+			if !svgAllowedTags[tag] {
+				return true
+			}
+			if tag == "svg" {
+				hasRootSVG = true
+			}
+			for _, attr := range t.Attr {
+				attrName := strings.ToLower(attr.Name.Local)
+				if strings.HasPrefix(attrName, "on") || !svgAllowedAttrs[attrName] {
+					return true
+				}
+				valLower := strings.ToLower(attr.Value)
+				if strings.Contains(valLower, "javascript:") ||
+					strings.Contains(valLower, "vbscript:") ||
+					strings.Contains(valLower, "data:") ||
+					strings.Contains(valLower, "url(") {
+					return true
+				}
+			}
+		}
+	}
+	return !hasRootSVG
 }
 
 func isValidImageDataURI(raw string) bool {

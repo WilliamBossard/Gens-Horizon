@@ -17,6 +17,7 @@ var (
 	lockMu         sync.Mutex
 	heartbeatDone  chan struct{}
 	activeLockPath string
+	activeOSLock   *os.File
 )
 
 func getLockFilePath() string {
@@ -75,20 +76,46 @@ func AcquireLock() bool {
 	defer lockMu.Unlock()
 
 	lockPath := getLockFilePath()
+	osLock, ok := acquireOSLock(lockPath + ".os")
+	if !ok {
+		return false
+	}
+	acquired := false
+	defer func() {
+		if !acquired {
+			releaseOSLock(osLock)
+		}
+	}()
 
 	for attempt := 0; attempt < 5; attempt++ {
 		if _, err := os.Stat(lockPath); err == nil {
 			if isLockStale(lockPath) {
-				ipc.Logf("[lock] Verrou périmé détecté — nettoyage atomique.")
-				// Renommage atomique avant suppression pour éliminer la race TOCTOU
-				// entre deux processus qui détecteraient le même verrou périmé.
-				staleTmp := fmt.Sprintf("%s.stale.%d.%d", lockPath, os.Getpid(), attempt)
-				if renErr := os.Rename(lockPath, staleTmp); renErr == nil {
-					_ = os.Remove(staleTmp)
-				} else if !os.IsNotExist(renErr) {
+				cleanupLock := lockPath + ".cleanup"
+				if cInfo, cErr := os.Stat(cleanupLock); cErr == nil && time.Since(cInfo.ModTime()) < 5*time.Second {
+					time.Sleep(50 * time.Millisecond)
+					continue
+				} else if cErr == nil {
+					_ = os.Remove(cleanupLock)
+				}
+				cf, cfErr := os.OpenFile(cleanupLock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+				if cfErr != nil {
 					time.Sleep(50 * time.Millisecond)
 					continue
 				}
+				_ = cf.Close()
+				// Re-vérifier après acquisition du verrou de nettoyage pour éviter toute race TOCTOU
+				if isLockStale(lockPath) {
+					ipc.Logf("[lock] Verrou périmé détecté — nettoyage atomique.")
+					staleTmp := fmt.Sprintf("%s.stale.%d.%d", lockPath, os.Getpid(), attempt)
+					if renErr := os.Rename(lockPath, staleTmp); renErr == nil {
+						_ = os.Remove(staleTmp)
+					} else if !os.IsNotExist(renErr) {
+						_ = os.Remove(cleanupLock)
+						time.Sleep(50 * time.Millisecond)
+						continue
+					}
+				}
+				_ = os.Remove(cleanupLock)
 			} else {
 				return false
 			}
@@ -112,6 +139,8 @@ func AcquireLock() bool {
 				heartbeatWg.Wait()
 			}
 			activeLockPath = lockPath
+			activeOSLock = osLock
+			acquired = true
 			heartbeatDone = make(chan struct{})
 			startHeartbeat(lockPath, heartbeatDone)
 			return true
@@ -164,7 +193,9 @@ func ReleaseLock() {
 			_ = os.Remove(activeLockPath)
 		}
 	}
+	if activeOSLock != nil {
+		releaseOSLock(activeOSLock)
+		activeOSLock = nil
+	}
 	activeLockPath = ""
 }
-
-

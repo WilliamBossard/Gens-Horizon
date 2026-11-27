@@ -97,3 +97,24 @@ func TestE2EDecryptBackwardCompatV1(t *testing.T) {
 		t.Fatalf("V1 payload mismatch: got %q, want %q", got, plain)
 	}
 }
+
+func TestEncryptStreamE2ERoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	enc := filepath.Join(tmpDir, "stream.zip.e2e")
+	dec := filepath.Join(tmpDir, "stream.zip")
+	payload := bytes.Repeat([]byte("StreamChunkPayload_XYZ_987654321!"), 2000)
+
+	if err := EncryptStreamE2E(bytes.NewReader(payload), enc, "GH-STREAM-KEY-99"); err != nil {
+		t.Fatalf("EncryptStreamE2E failed: %v", err)
+	}
+	if err := DecryptFileE2E(enc, dec, "GH-STREAM-KEY-99"); err != nil {
+		t.Fatalf("DecryptFileE2E failed: %v", err)
+	}
+	got, err := os.ReadFile(dec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("stream decrypted payload mismatch: got %d, want %d", len(got), len(payload))
+	}
+}

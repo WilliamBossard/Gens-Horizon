@@ -68,6 +68,16 @@ func makeChunkNonce(baseNonce []byte, chunkIdx uint64, isLast bool) []byte {
 
 // EncryptFileE2E chiffre srcPath vers dstPath en streaming par blocs AES-256-GCM.
 func EncryptFileE2E(srcPath, dstPath, passphrase string) error {
+	in, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	return EncryptStreamE2E(in, dstPath, passphrase)
+}
+
+// EncryptStreamE2E chiffre le flux in vers dstPath en streaming par blocs AES-256-GCM.
+func EncryptStreamE2E(in io.Reader, dstPath, passphrase string) error {
 	if passphrase == "" {
 		return errors.New("passphrase E2E vide")
 	}
@@ -83,6 +93,7 @@ func EncryptFileE2E(srcPath, dstPath, passphrase string) error {
 	if err != nil {
 		return err
 	}
+	defer clear(key)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return err
@@ -92,23 +103,19 @@ func EncryptFileE2E(srcPath, dstPath, passphrase string) error {
 		return err
 	}
 
-	in, err := os.Open(srcPath)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
 	br := bufio.NewReaderSize(in, 256*1024)
 
-	out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	tmpPath := fmt.Sprintf("%s.tmp.%d", dstPath, os.Getpid())
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
 	bw := bufio.NewWriterSize(out, 256*1024)
-	closed := false
+	committed := false
 	defer func() {
-		if !closed {
+		if !committed {
 			_ = out.Close()
-			_ = os.Remove(dstPath)
+			_ = os.Remove(tmpPath)
 		}
 	}()
 
@@ -172,10 +179,16 @@ func EncryptFileE2E(srcPath, dstPath, passphrase string) error {
 	if err := bw.Flush(); err != nil {
 		return err
 	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
 	if err := out.Close(); err != nil {
 		return err
 	}
-	closed = true
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 
@@ -222,16 +235,17 @@ func DecryptFileE2E(srcPath, dstPath, passphrase string) error {
 		return err
 	}
 
-	out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	tmpPath := fmt.Sprintf("%s.tmp.%d", dstPath, os.Getpid())
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
 	bw := bufio.NewWriterSize(out, 256*1024)
-	closed := false
+	committed := false
 	defer func() {
-		if !closed {
+		if !committed {
 			_ = out.Close()
-			_ = os.Remove(dstPath)
+			_ = os.Remove(tmpPath)
 		}
 	}()
 
@@ -286,9 +300,15 @@ func DecryptFileE2E(srcPath, dstPath, passphrase string) error {
 	if err := bw.Flush(); err != nil {
 		return err
 	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
 	if err := out.Close(); err != nil {
 		return err
 	}
-	closed = true
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }

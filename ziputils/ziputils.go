@@ -473,6 +473,27 @@ func ExtractZip(zipPath string, targetPath string, onProgress func(pct int)) err
 		}
 	}
 
+	// Détecter tout conflit fichier vs dossier parent dans l'archive avant extraction parallèle
+	dirPrefixes := make(map[string]struct{}, len(filesToExtract))
+	for _, zf := range filesToExtract {
+		cleanDest, _ := isZipEntrySafeUnder(cleanTarget, zf.Name)
+		cur := filepath.Dir(cleanDest)
+		for len(cur) > len(cleanTarget) {
+			dirPrefixes[zipDedupKey(cur)] = struct{}{}
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				break
+			}
+			cur = parent
+		}
+	}
+	for _, zf := range filesToExtract {
+		cleanDest, _ := isZipEntrySafeUnder(cleanTarget, zf.Name)
+		if _, isParent := dirPrefixes[zipDedupKey(cleanDest)]; isParent {
+			return fmt.Errorf("conflit fichier/répertoire dans l'archive ZIP : %s", zf.Name)
+		}
+	}
+
 	return extractZipEntriesParallel(cleanTarget, filesToExtract, onProgress)
 }
 
@@ -832,7 +853,8 @@ func ApplyDelta(deltaZipPath string, targetFolder string, onProgress func(pct in
 
 	// 1. Détection de __delta__.json, validation Zip Slip / budget et collecte des entrées
 	for _, zf := range zr.File {
-		if zf.Name == "__delta__.json" {
+		normMetaName := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(zf.Name)), "./")
+		if strings.EqualFold(normMetaName, "__delta__.json") {
 			rc, err := zf.Open()
 			if err != nil {
 				return fmt.Errorf("impossible d'ouvrir __delta__.json : %w", err)

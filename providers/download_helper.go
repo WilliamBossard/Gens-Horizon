@@ -46,15 +46,15 @@ var (
 )
 
 type idleTimeoutReadCloser struct {
-	rc        io.ReadCloser
-	timeout   time.Duration
-	timedOut  atomic.Bool
-	mu        sync.Mutex
-	reading   bool
-	readGen   uint64
-	timer     *time.Timer
-	done      chan struct{}
-	closeOnce sync.Once
+	rc            io.ReadCloser
+	timeout       time.Duration
+	timedOut      atomic.Bool
+	mu            sync.Mutex
+	reading       bool
+	lastReadStart time.Time
+	timer         *time.Timer
+	done          chan struct{}
+	closeOnce     sync.Once
 }
 
 func newIdleTimeoutReader(rc io.ReadCloser, timeout time.Duration) *idleTimeoutReadCloser {
@@ -73,7 +73,7 @@ func newIdleTimeoutReader(rc io.ReadCloser, timeout time.Duration) *idleTimeoutR
 					return
 				case <-itr.timer.C:
 					itr.mu.Lock()
-					shouldClose := itr.reading
+					shouldClose := itr.reading && time.Since(itr.lastReadStart) >= itr.timeout
 					itr.mu.Unlock()
 					if shouldClose {
 						itr.timedOut.Store(true)
@@ -92,7 +92,7 @@ func (itr *idleTimeoutReadCloser) Read(p []byte) (int, error) {
 		return itr.rc.Read(p)
 	}
 	itr.mu.Lock()
-	itr.readGen++
+	itr.lastReadStart = time.Now()
 	itr.reading = true
 	itr.timer.Reset(itr.timeout)
 	itr.mu.Unlock()
@@ -155,16 +155,6 @@ type RangeRequestFunc func(start int64, end int64) (*http.Response, error)
 
 // errMultiRangeFallback signale qu'un serveur ne respecte plus Range sur un segment et impose un fallback flux unique.
 var errMultiRangeFallback = errors.New("multirange unsupported on subsequent chunk")
-
-// downloadSmart choisit intelligemment entre le téléchargement parallèle multi-segments et le flux unique avec reprise
-func downloadSmart(
-	destPath string,
-	totalSize int64,
-	onProgress func(pct int),
-	makeRequest RangeRequestFunc,
-) error {
-	return downloadSmartWithContext(baseContext(), destPath, totalSize, onProgress, makeRequest)
-}
 
 // waitChunkRetryAfter attend le délai Retry-After si présent sur 429/503, sinon backoff linéaire par tentative.
 func waitChunkRetryAfter(ctx context.Context, resp *http.Response, attempt int) error {
@@ -259,7 +249,16 @@ func downloadMultiRangeWithContext(
 	}
 
 	if resp0.StatusCode != http.StatusPartialContent {
+		ra := retry.ParseRetryAfter(resp0.Header.Get("Retry-After"))
+		sc := resp0.StatusCode
 		_ = resp0.Body.Close()
+		if ra > 0 && (sc == http.StatusTooManyRequests || sc == http.StatusServiceUnavailable) {
+			select {
+			case <-parentCtx.Done():
+				return parentCtx.Err()
+			case <-time.After(ra):
+			}
+		}
 		return downloadWithResumeWithContext(parentCtx, destPath, totalSize, onProgress, func(offset int64) (*http.Response, error) {
 			return makeRequest(offset, -1)
 		})
@@ -324,10 +323,11 @@ func downloadMultiRangeWithContext(
 	defer cancel()
 
 	streamChunk := func(c chunkRange, initialResp *http.Response) error {
-		const maxRetries = 3
+		maxRetries := effectiveMaxRetries()
 		var chunkErr error
 		currentOffset := c.start
 		pendingResp := initialResp
+		sleptRetryAfter := false
 
 		for attempt := 0; attempt < maxRetries; attempt++ {
 			if ctx.Err() != nil {
@@ -339,13 +339,14 @@ func downloadMultiRangeWithContext(
 			resp := pendingResp
 			pendingResp = nil
 			if resp == nil {
-				if attempt > 0 {
+				if attempt > 0 && !sleptRetryAfter {
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
 					case <-time.After(time.Duration(attempt*1000) * time.Millisecond):
 					}
 				}
+				sleptRetryAfter = false
 				r, err := makeRequest(currentOffset, c.end)
 				if err != nil {
 					chunkErr = err
@@ -362,6 +363,7 @@ func downloadMultiRangeWithContext(
 					_ = r.Body.Close()
 					chunkErr = fmt.Errorf("chunk %d HTTP %d (expected 206): %s", c.id, r.StatusCode, sanitizeHTTPBody(b))
 					if ra := retry.ParseRetryAfter(r.Header.Get("Retry-After")); ra > 0 && (r.StatusCode == http.StatusTooManyRequests || r.StatusCode == http.StatusServiceUnavailable) {
+						sleptRetryAfter = true
 						select {
 						case <-ctx.Done():
 							return ctx.Err()
@@ -475,11 +477,6 @@ func downloadMultiRangeWithContext(
 	return nil
 }
 
-// streamSingleResponse consomme une réponse HTTP complète en flux unique
-func streamSingleResponse(resp *http.Response, destPath string, totalSize int64, onProgress func(pct int)) error {
-	return streamSingleResponseWithContext(baseContext(), resp, destPath, totalSize, onProgress)
-}
-
 func streamSingleResponseWithContext(ctx context.Context, resp *http.Response, destPath string, totalSize int64, onProgress func(pct int)) error {
 	if ctx == nil {
 		ctx = baseContext()
@@ -511,6 +508,9 @@ func streamSingleResponseWithContext(ctx context.Context, resp *http.Response, d
 		}
 		n, rErr := bodyReader.Read(buf)
 		if n > 0 {
+			if totalSize > 0 && downloaded+int64(n) > totalSize {
+				return fmt.Errorf("download exceeded expected size (%d > %d bytes)", downloaded+int64(n), totalSize)
+			}
 			if _, wErr := out.Write(buf[:n]); wErr != nil {
 				return wErr
 			}
@@ -584,18 +584,20 @@ func downloadWithResumeWithContext(
 	defer dlBuf64Pool.Put(bufPtr)
 	buf := *bufPtr
 
-	const maxAttempts = 3
+	maxAttempts := effectiveMaxRetries()
+	sleptRetryAfter := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if attempt > 0 {
+		if attempt > 0 && !sleptRetryAfter {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(time.Duration(attempt*1500) * time.Millisecond):
 			}
 		}
+		sleptRetryAfter = false
 
 		resp, reqErr := makeRequest(downloaded)
 		if reqErr != nil {
@@ -635,6 +637,7 @@ func downloadWithResumeWithContext(
 				return fmt.Errorf("download HTTP %d : %s", resp.StatusCode, sanitizeHTTPBody(b))
 			}
 			if ra := retry.ParseRetryAfter(resp.Header.Get("Retry-After")); ra > 0 && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) {
+				sleptRetryAfter = true
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -653,6 +656,10 @@ func downloadWithResumeWithContext(
 			}
 			n, rErr := bodyReader.Read(buf)
 			if n > 0 {
+				if totalSize > 0 && downloaded+int64(n) > totalSize {
+					_ = bodyReader.Close()
+					return fmt.Errorf("download exceeded expected size (%d > %d bytes)", downloaded+int64(n), totalSize)
+				}
 				if _, wErr := out.Write(buf[:n]); wErr != nil {
 					_ = bodyReader.Close()
 					return wErr

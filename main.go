@@ -35,7 +35,7 @@ func main() {
 				if text == "SHUTDOWN" {
 					ipc.Logf("[Horizon] Arrêt gracieux (SHUTDOWN) reçu sur stdin.")
 					cancel()
-					time.AfterFunc(3*time.Second, func() {
+					time.AfterFunc(5*time.Second, func() {
 						ipc.Logf("[Horizon] Délai d'arrêt gracieux dépassé, libération du verrou et sortie forcée.")
 						lock.ReleaseLock()
 						os.Exit(130)
@@ -96,13 +96,26 @@ func main() {
 	} else if containsCommand(args, "--clean", "clean") {
 		operations.CleanWithContext(ctx, args)
 	} else if containsCommand(args, "--delete", "delete") {
-		operations.SyncWithContext(ctx, args)
+		syncArgs := args
+		if len(args) > 0 && args[0] == "delete" {
+			syncArgs = append([]string{"--delete"}, args[1:]...)
+		}
+		operations.SyncWithContext(ctx, syncArgs)
 	} else if containsCommand(args, "--set-e2e-key") {
 		reader := bufio.NewReader(io.LimitReader(os.Stdin, 4096))
-		line, _ := reader.ReadString('\n')
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil && readErr != io.EOF {
+			ipc.SendError("E2E_KEY_READ_FAILED", readErr.Error(), "")
+			return
+		}
 		pass := strings.TrimSpace(line)
 		if pass == "" {
-			pass, _ = auth.GenerateRecoveryPassphrase()
+			var genErr error
+			pass, genErr = auth.GenerateRecoveryPassphrase()
+			if genErr != nil {
+				ipc.SendError("E2E_KEY_GEN_FAILED", genErr.Error(), "")
+				return
+			}
 		}
 		if err := auth.SaveE2EPassphrase(pass); err != nil {
 			ipc.SendError("E2E_KEY_SAVE_FAILED", err.Error(), "")
@@ -141,9 +154,13 @@ func main() {
 }
 
 func containsCommand(args []string, flags ...string) bool {
-	for _, arg := range args {
+	for i, arg := range args {
 		for _, f := range flags {
-			if arg == f || strings.HasPrefix(arg, f+"=") {
+			if strings.HasPrefix(f, "-") {
+				if arg == f || strings.HasPrefix(arg, f+"=") {
+					return true
+				}
+			} else if i == 0 && arg == f {
 				return true
 			}
 		}

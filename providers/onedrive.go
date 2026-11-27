@@ -146,9 +146,9 @@ func (o *OneDriveProvider) refreshTokenIfStale(failedToken string) (string, erro
 
 	if o.tokenData.AccessToken != "" && o.tokenData.AccessToken != failedToken {
 		if o.tokenData.AccessToken == "" && o.tokenData.RefreshToken == "" {
-		return "", errors.New("[onedrive] aucun token d'accès ou de rafraîchissement disponible")
-	}
-	return o.tokenData.AccessToken, nil
+			return "", errors.New("[onedrive] aucun token d'accès ou de rafraîchissement disponible")
+		}
+		return o.tokenData.AccessToken, nil
 	}
 	if o.tokenData.RefreshToken == "" {
 		return "", errors.New("onedrive: aucun refresh_token disponible")
@@ -501,7 +501,8 @@ func (o *OneDriveProvider) UploadZip(ctx context.Context, name string, srcPath s
 		var lastErr error
 		var nextOffset = offset + currentChunk
 
-		for attempt := 0; attempt < 3; attempt++ {
+		maxAttempts := effectiveMaxRetries()
+		for attempt := 0; attempt < maxAttempts; attempt++ {
 			if attempt > 0 {
 				select {
 				case <-ctx.Done():
@@ -826,4 +827,3 @@ func (o *OneDriveProvider) GetFileModifiedTime(ctx context.Context, fileID strin
 	}
 	return time.Parse(time.RFC3339, res.LastModifiedDateTime)
 }
-

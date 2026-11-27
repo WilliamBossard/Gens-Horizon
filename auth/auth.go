@@ -121,12 +121,16 @@ func initAuthData() error {
 			if dpapiAvailable() {
 				if sealed, err := dpapiProtect(salt); err == nil {
 					payload := append([]byte(dpapiPrefix), sealed...)
-					_ = writeAtomicFile(sFile, payload, 0600)
+					if wErr := writeAtomicFile(sFile, payload, 0600); wErr != nil {
+						ipc.Logf("[auth] AVERTISSEMENT : échec migration DPAPI salt.key (%v).", wErr)
+					}
 				}
 			} else if osKeyringAvailable() {
 				if refID, err := osKeyringProtect(salt); err == nil {
 					payload := append([]byte(keyringPrefix), refID...)
-					_ = writeAtomicFile(sFile, payload, 0600)
+					if wErr := writeAtomicFile(sFile, payload, 0600); wErr != nil {
+						ipc.Logf("[auth] AVERTISSEMENT : échec migration trousseau salt.key (%v).", wErr)
+					}
 				}
 			}
 		}

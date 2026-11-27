@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,8 +36,11 @@ func resolveSelectiveProfile(settings config.Settings, inst, safeInst string) st
 	return ""
 }
 
-func maybeEncryptZipForUpload(tempZip string, settings config.Settings) (string, string, error) {
+func buildUploadArchive(tempZip string, settings config.Settings, writeStream func(io.Writer) error, writeFile func(string) error) (string, string, error) {
 	if !settings.E2EEncryption {
+		if err := writeFile(tempZip); err != nil {
+			return "", "COMPRESS_FAILED", err
+		}
 		return tempZip, "", nil
 	}
 	pass, err := auth.LoadE2EPassphrase()
@@ -47,8 +51,23 @@ func maybeEncryptZipForUpload(tempZip string, settings config.Settings) (string,
 		return "", "E2E_KEY_REQUIRED", errors.New("chiffrement E2E activé mais aucune clé configurée")
 	}
 	encPath := tempZip + ".e2e"
-	if err := ziputils.EncryptFileE2E(tempZip, encPath, pass); err != nil {
-		return "", "E2E_ENCRYPT_FAILED", err
+	pr, pw := io.Pipe()
+	zipErrCh := make(chan error, 1)
+	go func() {
+		wErr := writeStream(pw)
+		_ = pw.CloseWithError(wErr)
+		zipErrCh <- wErr
+	}()
+	encErr := ziputils.EncryptStreamE2E(pr, encPath, pass)
+	_ = pr.CloseWithError(encErr)
+	zipErr := <-zipErrCh
+	if zipErr != nil {
+		_ = os.Remove(encPath)
+		return "", "COMPRESS_FAILED", zipErr
+	}
+	if encErr != nil {
+		_ = os.Remove(encPath)
+		return "", "E2E_ENCRYPT_FAILED", encErr
 	}
 	return encPath, "", nil
 }
@@ -282,26 +301,43 @@ func UploadWithContext(ctx context.Context, args []string) {
 			}
 
 			ipc.SendProgress("COMPRESSING", 0, inst)
+			var uploadZipPath, encCode string
+			var encErr error
 			if selectiveProfile != "" && selectiveProfile != "FULL" {
 				allFiles := make([]string, 0, len(newManifest))
 				for relPath := range newManifest {
 					allFiles = append(allFiles, relPath)
 				}
-				err = ziputils.CreateDeltaZip(localInstFolder, allFiles, nil, tempZip, func(pct int) {
-					ipc.SendProgress("COMPRESSING", pct, inst)
-				})
+				uploadZipPath, encCode, encErr = buildUploadArchive(
+					tempZip,
+					settings,
+					func(w io.Writer) error {
+						return ziputils.WriteDeltaZip(localInstFolder, allFiles, nil, w, func(pct int) {
+							ipc.SendProgress("COMPRESSING", pct, inst)
+						})
+					},
+					func(p string) error {
+						return ziputils.CreateDeltaZip(localInstFolder, allFiles, nil, p, func(pct int) {
+							ipc.SendProgress("COMPRESSING", pct, inst)
+						})
+					},
+				)
 			} else {
-				err = ziputils.CreateFullZipWithHint(localInstFolder, manifestTotalBytes, tempZip, func(pct int) {
-					ipc.SendProgress("COMPRESSING", pct, inst)
-				})
+				uploadZipPath, encCode, encErr = buildUploadArchive(
+					tempZip,
+					settings,
+					func(w io.Writer) error {
+						return ziputils.WriteFullZipWithHint(localInstFolder, manifestTotalBytes, w, func(pct int) {
+							ipc.SendProgress("COMPRESSING", pct, inst)
+						})
+					},
+					func(p string) error {
+						return ziputils.CreateFullZipWithHint(localInstFolder, manifestTotalBytes, p, func(pct int) {
+							ipc.SendProgress("COMPRESSING", pct, inst)
+						})
+					},
+				)
 			}
-			if err != nil {
-				_ = os.RemoveAll(tmpZipDir)
-				ipc.SendError("COMPRESS_FAILED", err.Error(), inst)
-				continue
-			}
-
-			uploadZipPath, encCode, encErr := maybeEncryptZipForUpload(tempZip, settings)
 			if encErr != nil {
 				_ = os.RemoveAll(tmpZipDir)
 				ipc.SendError(encCode, encErr.Error(), inst)
@@ -456,16 +492,20 @@ func UploadWithContext(ctx context.Context, args []string) {
 			tempDelta := filepath.Join(tmpDeltaDir, fmt.Sprintf("delta_%s.zip", safeInst))
 
 			ipc.SendProgress("COMPRESSING", 0, inst)
-			err = ziputils.CreateDeltaZip(localInstFolder, filesToZip, diff.Deleted, tempDelta, func(pct int) {
-				ipc.SendProgress("COMPRESSING", pct, inst)
-			})
-			if err != nil {
-				_ = os.RemoveAll(tmpDeltaDir)
-				ipc.SendError("COMPRESS_FAILED", err.Error(), inst)
-				continue
-			}
-
-			uploadDeltaPath, encCode, encErr := maybeEncryptZipForUpload(tempDelta, settings)
+			uploadDeltaPath, encCode, encErr := buildUploadArchive(
+				tempDelta,
+				settings,
+				func(w io.Writer) error {
+					return ziputils.WriteDeltaZip(localInstFolder, filesToZip, diff.Deleted, w, func(pct int) {
+						ipc.SendProgress("COMPRESSING", pct, inst)
+					})
+				},
+				func(p string) error {
+					return ziputils.CreateDeltaZip(localInstFolder, filesToZip, diff.Deleted, p, func(pct int) {
+						ipc.SendProgress("COMPRESSING", pct, inst)
+					})
+				},
+			)
 			if encErr != nil {
 				_ = os.RemoveAll(tmpDeltaDir)
 				ipc.SendError(encCode, encErr.Error(), inst)
@@ -536,6 +576,7 @@ func UploadWithContext(ctx context.Context, args []string) {
 				ArchiveSha256 string            `json:"archiveSha256"`
 				DeltaSha256s  map[string]string `json:"deltaSha256s"`
 			}
+			canUpdateMeta := true
 			if mf, ok := cloudIndex[metaName]; ok {
 				metaFetchErr := retry.Do(ctx, retryOpts, func() error {
 					return p.DownloadJSON(ctx, mf.ID, &prevMeta)
@@ -545,38 +586,40 @@ func UploadWithContext(ctx context.Context, args []string) {
 						_ = json.Unmarshal(rawMeta, &prevMeta)
 					} else {
 						ipc.Logf("[upload] avertissement : impossible de lire metadata existante pour %s (%v) ; mise à jour meta ignorée pour préserver les empreintes SHA-256.", inst, metaFetchErr)
-						continue
+						canUpdateMeta = false
 					}
 				}
 			} else if rawMeta, rErr := os.ReadFile(paths.GetMetaPath(safeInst)); rErr == nil {
 				_ = json.Unmarshal(rawMeta, &prevMeta)
 			}
-			if prevMeta.ArchiveSha256 != "" {
-				metaData["archiveSha256"] = prevMeta.ArchiveSha256
-			}
-			deltaShaMap := prevMeta.DeltaSha256s
-			if deltaShaMap == nil {
-				deltaShaMap = make(map[string]string)
-			}
-			if deltaArchiveSha != "" {
-				deltaShaMap[deltaName] = deltaArchiveSha
-			}
-			metaData["deltaSha256s"] = deltaShaMap
-			metaExistingID := ""
-			if mf, ok := cloudIndex[metaName]; ok {
-				metaExistingID = mf.ID
-			}
-			metaOpts := retryOpts
-			metaOpts.Label = "uploadMeta(" + inst + ")"
-			if mErr := retry.Do(ctx, metaOpts, func() error {
-				_, upErr := p.UploadJSON(ctx, metaName, metaData, metaExistingID)
-				return upErr
-			}); mErr != nil {
-				ipc.Logf("[upload] avertissement : upload metadata cloud échoué pour %s : %v", inst, mErr)
-			}
-			if b, err := json.MarshalIndent(metaData, "", "  "); err == nil {
-				if wErr := osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644); wErr != nil {
-					ipc.Logf("[upload] avertissement : sauvegarde metadata locale échouée : %v", wErr)
+			if canUpdateMeta {
+				if prevMeta.ArchiveSha256 != "" {
+					metaData["archiveSha256"] = prevMeta.ArchiveSha256
+				}
+				deltaShaMap := prevMeta.DeltaSha256s
+				if deltaShaMap == nil {
+					deltaShaMap = make(map[string]string)
+				}
+				if deltaArchiveSha != "" {
+					deltaShaMap[deltaName] = deltaArchiveSha
+				}
+				metaData["deltaSha256s"] = deltaShaMap
+				metaExistingID := ""
+				if mf, ok := cloudIndex[metaName]; ok {
+					metaExistingID = mf.ID
+				}
+				metaOpts := retryOpts
+				metaOpts.Label = "uploadMeta(" + inst + ")"
+				if mErr := retry.Do(ctx, metaOpts, func() error {
+					_, upErr := p.UploadJSON(ctx, metaName, metaData, metaExistingID)
+					return upErr
+				}); mErr != nil {
+					ipc.Logf("[upload] avertissement : upload metadata cloud échoué pour %s : %v", inst, mErr)
+				}
+				if b, err := json.MarshalIndent(metaData, "", "  "); err == nil {
+					if wErr := osWriteFileAtomic(paths.GetMetaPath(safeInst), b, 0644); wErr != nil {
+						ipc.Logf("[upload] avertissement : sauvegarde metadata locale échouée : %v", wErr)
+					}
 				}
 			}
 
@@ -877,7 +920,7 @@ func uploadFullBackupAtomicWithContext(
 	})
 	if err != nil {
 		ipc.Logf("[upload] AVERTISSEMENT : archive de base envoyée mais échec manifest %s ; anciens deltas conservés par sécurité.", manifestName)
-		return "", "", "MANIFEST_UPLOAD_FAILED", fmt.Errorf("échec envoi manifest cloud : %w", err)
+		return newBaseID, "", "MANIFEST_UPLOAD_FAILED", fmt.Errorf("échec envoi manifest cloud : %w", err)
 	}
 	return newBaseID, newMID, "", nil
 }
